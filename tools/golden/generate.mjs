@@ -84,4 +84,12 @@ pk3[2] = "# each line: the input as UTF-8 hex (\"-\" when empty), then the hash"
 for (const text of texts) pk3.push(`${Buffer.from(text, "utf8").toString("hex") || "-"} ${pk3IndexHash(text)}`);
 writeFileSync(resolve(root, "crates/shagger/tests/golden/pk3_index_hash.txt"), `${pk3.join("\n")}\n`);
 
+// --- Wire protocol (needs TypeScript enums, so it runs in its own Node) --------
+const protocolOut = resolve(root, "crates/shagger_shared/tests/golden");
+execFileSync(
+  process.execPath,
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "protocol.mjs", shag, protocolOut, shagCommit],
+  { cwd: import.meta.dirname, stdio: "inherit" },
+);
+
 console.log(`wrote ${round.length} round, ${hypot.length} hypot and ${texts.length} pk3IndexHash vectors`);
