@@ -1,0 +1,10 @@
+SHAGGER, src/babylon/
+Copyright (c) 2026 Higher Standard Games
+
+This folder contains code ported from Babylon.js
+(https://github.com/BabylonJS/Babylon.js), Copyright Babylon.js contributors,
+licensed under the Apache License, Version 2.0 (see LICENSE in this folder).
+
+Ported files, with the Babylon.js source each came from and its version:
+
+  (none yet)

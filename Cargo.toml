@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/shagger_shared", "crates/shagger"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.87"
+repository = "https://github.com/Higher-Standard-Games/shagger"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+shagger_shared = { path = "crates/shagger_shared" }

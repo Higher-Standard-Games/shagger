@@ -1,0 +1,11 @@
+[package]
+name = "shagger_shared"
+description = "SHAGGER shared code: wire protocol, collision, BSP tables, demos. No GPU, no window, no async."
+license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
