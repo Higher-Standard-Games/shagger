@@ -4,6 +4,7 @@ description = "SHAGGER engine: networking, loaders, renderer, audio, input, UI."
 # src/babylon/ holds code ported from Babylon.js under Apache-2.0; everything else is MIT.
 license = "MIT AND Apache-2.0"
 version.workspace = true
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true

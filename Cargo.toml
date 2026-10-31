@@ -15,4 +15,4 @@ unsafe_code = "deny"
 all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
-shagger_shared = { path = "crates/shagger_shared" }
+shagger_shared = { path = "crates/shagger_shared", version = "0.0.1" }
