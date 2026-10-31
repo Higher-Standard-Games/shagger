@@ -1,8 +1,10 @@
 // Golden vectors: results computed by V8 and by SHAG's own TypeScript, which
 // the Rust tests must reproduce bit for bit (RUST.md 18.6).
 //
-//   node tools/golden/generate.mjs <path to a SHAG checkout>
+//   node tools/golden/generate.mjs <path to a SHAG checkout> [<path to wash-fps-rust>]
 //
+// Washoi's own vectors (its snapshot events) go into the second checkout, by
+// default ../wash-fps-rust next to this one.
 // Needs Node 22.18+ (TypeScript type stripping). Writes into crates/*/tests/golden/.
 // Commit the output together with the SHAG commit it was made from.
 import { execFileSync } from "node:child_process";
@@ -12,6 +14,7 @@ import { pathToFileURL } from "node:url";
 
 const shag = resolve(process.argv[2] ?? "../shag");
 const root = resolve(import.meta.dirname, "../..");
+const washoi = resolve(process.argv[3] ?? resolve(root, "../wash-fps-rust"));
 const shagCommit = execFileSync("git", ["-C", shag, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 // Deterministic generator, so a rerun on the same SHAG commit gives the same file.
@@ -88,7 +91,7 @@ writeFileSync(resolve(root, "crates/shagger/tests/golden/pk3_index_hash.txt"), `
 const protocolOut = resolve(root, "crates/shagger_shared/tests/golden");
 execFileSync(
   process.execPath,
-  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "protocol.mjs", shag, protocolOut, shagCommit],
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "protocol.mjs", shag, protocolOut, shagCommit, resolve(washoi, "tests/golden")],
   { cwd: import.meta.dirname, stdio: "inherit" },
 );
 

@@ -11,7 +11,7 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [shagArg, outArg, shagCommit] = process.argv.slice(2);
+const [shagArg, outArg, shagCommit, eventsOutArg] = process.argv.slice(2);
 const shag = resolve(shagArg);
 const out = resolve(outArg);
 const load = (path) => import(pathToFileURL(resolve(shag, path)).href);
@@ -239,6 +239,7 @@ function envelopeVectors() {
       decoded.clear();
     }
     const state = serverState(1000 + k, server);
+    Date.now = () => 1_761_900_000_000 + k * 50; // the encoder stamps the snapshot; keep reruns identical
     const bytes = MessageCodec.encodeSnapshot(state, server ?? undefined);
     const vector = { bytes: hex(bytes) };
     try {
@@ -360,6 +361,85 @@ function messageVectors() {
   return vectors;
 }
 
+// --- Washoi's snapshot events (written to wash-fps-rust) -----------------------
+const jsonTexts = ['{"phase":"warmup","timeLeft":30}', '{"type":"override","b":[1,2.5,-0],"a":{"x":null}}', '{"2":"two","1":"one","z":0}',
+  "[1,2]", "null", "7", "{}", '{"a":1,"a":2}', '{"s":"\\ud800"}', '{"bad":', "", "nope", '["blaster","shotgun"]',
+  '{"blaster":50,"shotgun":-1}', '[{"kind":"move","to":[1,2,3]}]', "1e400", '{"deep":[[[[[]]]]]}'];
+function writeEvent(e, code) {
+  const str = () => e.writeString(pick(strings));
+  const json = () => e.writeString(pick(jsonTexts));
+  const f32 = (n) => { for (let i = 0; i < n; i++) e.writeFloat32(float()); };
+  const u8 = () => e.writeUint8(int(256));
+  const u16 = () => e.writeUint16(int(0x10000));
+  switch (code) {
+    case 1: str(); u16(); u16(); u8(); break;
+    case 2: json(); break;
+    case 3: str(); str(); json(); json(); u8(); e.writeUint32(int(0x1_0000_0000)); break;
+    case 4: str(); str(); f32(6); break;
+    case 24: str(); str(); f32(6); e.writeInt32(int(0x1_0000_0000) - 0x8000_0000); f32(1); break;
+    case 5: str(); str(); u8(); break;
+    case 6: str(); str(); break;
+    case 7: str(); f32(6); break;
+    case 8: e.writeInt16(int(0x10000) - 0x8000); str(); str(); str(); f32(3); break;
+    case 9: str(); str(); f32(6); break;
+    case 10: str(); str(); u16(); str(); f32(3); break;
+    case 23: str(); str(); u16(); str(); f32(3); e.writeUint8(int(5)); break;
+    case 25: str(); str(); u16(); str(); f32(3); e.writeUint8(int(5)); e.writeUint8(int(8)); break;
+    case 11: str(); str(); str(); str(); u16(); f32(9); break;
+    case 12: str(); str(); str(); str(); u16(); break;
+    case 13: { const n = int(5); str(); e.writeUint8(n); f32(3 * n); break; }
+    case 14: str(); str(); str(); str(); break;
+    case 15: str(); str(); break;
+    case 16: case 17: str(); f32(12); u8(); break;
+    case 18: str(); str(); u16(); break;
+    case 19: str(); f32(3); break;
+    case 20: str(); json(); break;
+    case 21: {
+      const lifts = int(4);
+      e.writeUint8(lifts);
+      for (let l = 0; l < lifts; l++) {
+        e.writeUint16(int(0x10000)); f32(1); e.writeUint8(int(6)); f32(1);
+        const c = int(4); e.writeUint8(c); f32(c);
+      }
+      break;
+    }
+    case 22: str(); e.writeUint8(chance(0.3) ? 255 : int(256)); break;
+  }
+}
+function canon(value) {
+  if (typeof value === "number") return num(value);
+  if (Array.isArray(value)) return value.map(canon);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, canon(v)]));
+  return value;
+}
+function eventVectors() {
+  const vectors = [];
+  for (let i = 0; i < 1500; i++) {
+    const e = new BinaryEncoder();
+    e.writeUint32(i);
+    e.writeFloat64(0);
+    e.writeUint32(0);
+    e.writeUint16(0);
+    e.writeUint16(0);
+    const count = 1 + int(3);
+    e.writeUint16(count);
+    for (let k = 0; k < count; k++) {
+      const code = i < 26 * 4 ? i % 26 : chance(0.05) ? 26 + int(230) : int(26);
+      e.writeUint8(code);
+      writeEvent(e, code);
+    }
+    let bytes = e.getData();
+    if (chance(0.05)) bytes = bytes.subarray(0, 19 + int(bytes.length - 19));
+    const vector = { bytes: hex(bytes) };
+    try {
+      vector.events = canon(BinaryProtocol.decodeSnapshot(bytes).events);
+    } catch (error) {
+      vector.error = String(error.message);
+    }
+    vectors.push(vector);
+  }
+  return vectors;
+}
 const files = {
   "strings.json": stringVectors(),
   "snapshots.json": snapshotVectors(),
@@ -370,4 +450,10 @@ const files = {
 for (const [name, vectors] of Object.entries(files)) {
   const doc = { generator: "tools/golden/protocol.mjs", shag: shagCommit, node: process.version, vectors };
   writeFileSync(resolve(out, name), `${JSON.stringify(doc, null, 0).replaceAll('},{"', '},\n{"')}\n`);
+}
+
+// After the engine files, so adding Washoi vectors leaves those unchanged.
+if (eventsOutArg) {
+  const doc = { generator: "shagger tools/golden/protocol.mjs", shag: shagCommit, node: process.version, vectors: eventVectors() };
+  writeFileSync(resolve(eventsOutArg, "snapshot_events.json"), `${JSON.stringify(doc).replaceAll('},{"bytes"', '},\n{"bytes"')}\n`);
 }
