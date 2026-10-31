@@ -87,11 +87,37 @@ pk3[2] = "# each line: the input as UTF-8 hex (\"-\" when empty), then the hash"
 for (const text of texts) pk3.push(`${Buffer.from(text, "utf8").toString("hex") || "-"} ${pk3IndexHash(text)}`);
 writeFileSync(resolve(root, "crates/shagger/tests/golden/pk3_index_hash.txt"), `${pk3.join("\n")}\n`);
 
+// --- String to number: trim, parseFloat, Number ------------------------------
+const numberTexts = ["", " ", "0", "-0", "+0", "1", "1.", ".5", "-.5", ".", "+", "-", "1e", "1e+", "1e5", "1.e5", ".e1",
+  "1E-7", "Infinity", "-Infinity", "+Infinity", "Infinityx", "infinity", "inf", "nan", "NaN", "0x10", "0X1f", "0x", "-0x10",
+  "0o17", "0b101", "0b2", "0x1fffffffffffff", "0x20000000000001", "0x20000000000003", "0x" + "f".repeat(300), "1_000",
+  "  42  ", "\t\n\v\f\r 7", "\u00a0 8\u2028", "\ufeff9", "\u0085" + "10", "\u3000 11 \u205f", "12abc", "abc12",
+  "64 64 128", "512", "513", "1e400", "-1e400", "4.9e-324", "2e-324", "0.1", "123456789012345678901234567890",
+  "9007199254740993", "1.7976931348623157e308", "1.7976931348623159e308", "00012", "-00.5e-0", "5e", "--5", "+-5", "0.0000001"];
+for (let i = 0; i < 400; i++) {
+  const pieces = ["", " ", "+", "-", ".", "e", "E", "0", "1", "7", "9", "x", "Infinity", "\u00a0", "\t", "a"];
+  let t = "";
+  for (let j = Math.floor(random() * 8); j > 0; j--) t += pieces[Math.floor(random() * pieces.length)];
+  numberTexts.push(t);
+}
+const numbers = header("String.prototype.trim, parseFloat and Number on strings");
+numbers[2] = "# each line: input as UTF-8 hex (\"-\" when empty), trimmed hex, parseFloat bits, Number bits";
+const utf8 = (t) => Buffer.from(t, "utf8").toString("hex") || "-";
+for (const t of numberTexts) numbers.push(`${utf8(t)} ${utf8(t.trim())} ${bits(parseFloat(t))} ${bits(Number(t))}`);
+writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_string_number.txt"), `${numbers.join("\n")}\n`);
+
 // --- Wire protocol (needs TypeScript enums, so it runs in its own Node) --------
 const protocolOut = resolve(root, "crates/shagger_shared/tests/golden");
 execFileSync(
   process.execPath,
   ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "protocol.mjs", shag, protocolOut, shagCommit, resolve(washoi, "tests/golden")],
+  { cwd: import.meta.dirname, stdio: "inherit" },
+);
+
+// --- BSP loader ------------------------------------------------------------------
+execFileSync(
+  process.execPath,
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "bsp.mjs", shag, resolve(root, "crates/shagger/tests/golden"), shagCommit],
   { cwd: import.meta.dirname, stdio: "inherit" },
 );
 

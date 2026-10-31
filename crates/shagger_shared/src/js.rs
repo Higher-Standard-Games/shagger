@@ -119,6 +119,146 @@ fn to_int_modulo(x: f64, modulus: f64) -> f64 {
     if r >= modulus { 0.0 } else { r }
 }
 
+/// ECMAScript white space and line terminators: what `String.prototype.trim`
+/// removes and what `\s` matches in a regular expression.
+///
+/// Unicode `White_Space` without U+0085, plus U+FEFF.
+#[must_use]
+pub fn is_js_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
+/// `String.prototype.trim`.
+#[must_use]
+pub fn js_trim(s: &str) -> &str {
+    s.trim_matches(is_js_whitespace)
+}
+
+/// The length of the longest prefix of `s` that is a `StrDecimalLiteral`
+/// (sign, digits, fraction, exponent, or `Infinity`), and whether it is
+/// `Infinity`.
+fn decimal_prefix(s: &str) -> Option<(usize, bool)> {
+    let b = s.as_bytes();
+    let mut i = usize::from(matches!(b.first(), Some(b'+' | b'-')));
+    if s[i..].starts_with("Infinity") {
+        return Some((i + 8, true));
+    }
+    let digits = |from: usize| b[from..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let whole = digits(i);
+    i += whole;
+    let mut fraction = 0;
+    if b.get(i) == Some(&b'.') {
+        fraction = digits(i + 1);
+        if whole > 0 || fraction > 0 {
+            i += 1 + fraction;
+        }
+    }
+    if whole == 0 && fraction == 0 {
+        return None;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(b.get(i + 1), Some(b'+' | b'-')));
+        let exponent = digits(i + 1 + sign);
+        if exponent > 0 {
+            i += 1 + sign + exponent;
+        }
+    }
+    Some((i, false))
+}
+
+fn decimal_value(literal: &str, infinity: bool) -> f64 {
+    if infinity {
+        return if literal.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    // Rust's parser is correctly rounded, as V8's is. It wants a digit
+    // before an exponent, which a literal such as "1.e5" has.
+    literal.parse().unwrap_or(f64::NAN)
+}
+
+/// `parseFloat(s)`.
+#[must_use]
+pub fn js_parse_float(s: &str) -> f64 {
+    let s = s.trim_start_matches(is_js_whitespace);
+    match decimal_prefix(s) {
+        Some((end, infinity)) => decimal_value(&s[..end], infinity),
+        None => f64::NAN,
+    }
+}
+
+/// `Number(s)` for a string (ECMAScript `StringToNumber`).
+#[must_use]
+pub fn js_string_to_number(s: &str) -> f64 {
+    let s = js_trim(s);
+    if s.is_empty() {
+        return 0.0;
+    }
+    let radix = match s.get(..2) {
+        Some("0x" | "0X") => 16,
+        Some("0o" | "0O") => 8,
+        Some("0b" | "0B") => 2,
+        _ => 0,
+    };
+    if radix != 0 {
+        let digits = &s[2..];
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+            return f64::NAN;
+        }
+        return radix_value(digits, radix);
+    }
+    match decimal_prefix(s) {
+        Some((end, infinity)) if end == s.len() => decimal_value(s, infinity),
+        _ => f64::NAN,
+    }
+}
+
+/// An integer in a power-of-two radix, rounded to nearest, ties to even.
+fn radix_value(digits: &str, radix: u32) -> f64 {
+    let bits_per_digit = radix.trailing_zeros();
+    let digits = digits.trim_start_matches('0');
+    // Collect the bits, then round once from the exact value.
+    let mut bits: Vec<bool> = Vec::with_capacity(digits.len() * 4);
+    for c in digits.chars() {
+        let d = c.to_digit(radix).unwrap_or(0);
+        for k in (0..bits_per_digit).rev() {
+            bits.push(d >> k & 1 == 1);
+        }
+    }
+    let first = bits.iter().position(|&b| b).unwrap_or(bits.len());
+    let bits = &bits[first..];
+    if bits.is_empty() {
+        return 0.0;
+    }
+    if bits.len() > 1024 {
+        return f64::INFINITY;
+    }
+    let mut mantissa: u64 = 0;
+    for &b in bits.iter().take(53) {
+        mantissa = mantissa << 1 | u64::from(b);
+    }
+    let mut exponent = i32::try_from(bits.len()).unwrap_or(i32::MAX) - 53;
+    if exponent > 0 {
+        let rest = &bits[53..];
+        let half = rest[0];
+        let sticky = rest[1..].iter().any(|&b| b);
+        if half && (sticky || mantissa & 1 == 1) {
+            mantissa += 1;
+            if mantissa == 1 << 53 {
+                mantissa >>= 1;
+                exponent += 1;
+            }
+        }
+    } else {
+        exponent = 0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let m = mantissa as f64;
+    m * 2f64.powi(exponent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
