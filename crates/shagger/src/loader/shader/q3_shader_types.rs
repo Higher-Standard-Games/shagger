@@ -315,9 +315,16 @@ pub enum DepthFunc {
 }
 
 /// `Q3ShaderStage`: one pass.
+///
+/// The TypeScript compares stages by reference (the registry selects a
+/// branch's stages with a `Set` of stage objects), so two stages written
+/// alike are still two stages. `id` carries that identity: the parser gives
+/// every stage its own, and copies of one stage share it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Q3ShaderStage {
+    #[serde(skip)]
+    pub id: u64,
     /// The texture, or `$lightmap`, `$whiteimage` and the like.
     pub map: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -483,5 +490,154 @@ impl Q3Shader {
     #[must_use]
     pub fn has_surface_parm(&self, parm: &str) -> bool {
         self.surface_parms.iter().any(|p| p == parm)
+    }
+}
+
+/// `ResolveMaterialOptions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolveMaterialOptions {
+    /// Static BSP surfaces read `lightingDiffuse` as baked vertex lighting.
+    pub world_surface: bool,
+    /// One stage of the selected branch, for ordered material passes.
+    pub pass_index: Option<usize>,
+    /// Select Warsow's deluxe branches when present.
+    pub deluxe: bool,
+    /// Select the six-face source over the authored 2D fallback. The
+    /// TypeScript's default (`undefined`) is `true`.
+    pub texture_cube_map: Option<bool>,
+    /// Leave out `map $cubemap` stages, which draw as their own pass.
+    pub without_generated_cubemap: bool,
+}
+
+/// `ResolvedMaterialProps["resolvedBranch"]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum ResolvedBranch {
+    #[default]
+    #[serde(rename = "default")]
+    Default,
+    #[serde(rename = "deluxe")]
+    Deluxe,
+    #[serde(rename = "!deluxe")]
+    NotDeluxe,
+}
+
+/// `ResolvedMaterialProps["alphaMode"]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AlphaMode {
+    #[default]
+    Opaque,
+    Blend,
+    Add,
+    Multiply,
+}
+
+/// `ResolvedMaterialProps`: what the map builder draws a surface with.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedMaterialProps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_map: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_particle: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_stage: Option<Q3ShaderStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blend_func: Option<[BlendFactor; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gloss_intensity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gloss_exponent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uses_vertex_rgb: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uses_vertex_alpha: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rgb_gen: Option<RgbGen>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diffuse_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gloss_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glow_texture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glow_stage: Option<Q3ShaderStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material_tokens: Option<Vec<String>>,
+    pub has_material_metadata: bool,
+    pub normal_texture_explicitly_blank: bool,
+    pub gloss_texture_explicitly_blank: bool,
+    pub glow_texture_explicitly_blank: bool,
+    pub resolved_branch: ResolvedBranch,
+    pub use_lightmap: bool,
+    pub alpha_mode: AlphaMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha_cutoff: Option<f64>,
+    pub back_face_culling: bool,
+    pub two_sided_lighting: bool,
+    pub depth_write: bool,
+    pub is_transparent: bool,
+    pub needs_animation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tc_mod: Option<Vec<TcMod>>,
+    pub polygon_offset: bool,
+    pub is_sky: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sky_parms: Option<SkyParms>,
+    pub is_fullbright: bool,
+    pub surface_light: f64,
+    pub autosprite: bool,
+    pub autosprite2: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tc_gen: Option<TcGen>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_cubemap: Option<bool>,
+}
+
+impl Default for ResolvedMaterialProps {
+    /// The default opaque material `resolveMaterialProps` starts from.
+    fn default() -> Self {
+        Self {
+            environment_map: None,
+            soft_particle: None,
+            primary_stage: None,
+            blend_func: None,
+            gloss_intensity: None,
+            gloss_exponent: None,
+            uses_vertex_rgb: None,
+            uses_vertex_alpha: None,
+            rgb_gen: None,
+            diffuse_texture: None,
+            normal_texture: None,
+            gloss_texture: None,
+            glow_texture: None,
+            glow_stage: None,
+            material_tokens: None,
+            has_material_metadata: false,
+            normal_texture_explicitly_blank: false,
+            gloss_texture_explicitly_blank: false,
+            glow_texture_explicitly_blank: false,
+            resolved_branch: ResolvedBranch::Default,
+            use_lightmap: true,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: None,
+            back_face_culling: true,
+            two_sided_lighting: false,
+            depth_write: true,
+            is_transparent: false,
+            needs_animation: false,
+            tc_mod: None,
+            polygon_offset: false,
+            is_sky: false,
+            sky_parms: None,
+            is_fullbright: false,
+            surface_light: 0.0,
+            autosprite: false,
+            autosprite2: false,
+            tc_gen: None,
+            generated_cubemap: None,
+        }
     }
 }

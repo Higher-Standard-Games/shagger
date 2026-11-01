@@ -14,6 +14,7 @@
 //!   so `$$`, `$&`, `` $` `` and `$'` in a parameter are replacement patterns.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use shagger_shared::js::{is_js_whitespace, js_parse_float, js_string_to_number};
 
@@ -616,9 +617,15 @@ fn parse_conditional_condition(tokens: &Tokens, start: usize) -> (Condition, usi
     }
 }
 
+/// Stage identities (see [`Q3ShaderStage`]); 0 is never handed out.
+static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// `parseStage`: up to and past the stage's closing brace.
 fn parse_stage(tokens: &Tokens, start: usize) -> (Q3ShaderStage, usize) {
-    let mut stage = Q3ShaderStage::default();
+    let mut stage = Q3ShaderStage {
+        id: NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed),
+        ..Q3ShaderStage::default()
+    };
     let mut pos = start;
     while pos < tokens.len() && tokens[pos] != "}" {
         let token = tokens[pos].to_lowercase();

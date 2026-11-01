@@ -63,6 +63,8 @@ struct Package {
     zip: ZipArchive<Cursor<Vec<u8>>>,
     /// Normalized path → the entry's index in the archive.
     files: HashMap<String, usize>,
+    /// The normalized paths in archive order (the TypeScript's `files` Set).
+    order: Vec<String>,
 }
 
 /// The loaded packages and the merged file index.
@@ -71,6 +73,9 @@ pub struct Pk3Loader {
     packages: Vec<Package>,
     /// Normalized path → index into `packages`.
     file_index: HashMap<String, usize>,
+    /// The index's keys in the order a JavaScript `Map` keeps them: first
+    /// insertion, packages in priority order, files in archive order.
+    file_order: Vec<String>,
 }
 
 impl Pk3Loader {
@@ -87,12 +92,13 @@ impl Pk3Loader {
     pub fn add_package(&mut self, filename: &str, bytes: Vec<u8>) -> Result<(), Pk3Error> {
         let zip = ZipArchive::new(Cursor::new(bytes)).map_err(|e| Pk3Error(format!("{filename}: {e}")))?;
         let mut files = HashMap::new();
+        let mut order = Vec::new();
         // `file_names` runs in entry order; a name that is not valid text is skipped.
         for (index, name) in zip.file_names().enumerate() {
             let Ok(name) = name else { continue };
             let normalized = normalize_path(&name);
-            if !normalized.ends_with('/') {
-                files.insert(normalized, index);
+            if !normalized.ends_with('/') && files.insert(normalized.clone(), index).is_none() {
+                order.push(normalized);
             }
         }
         self.packages.retain(|p| p.filename != filename);
@@ -100,6 +106,7 @@ impl Pk3Loader {
             filename: filename.to_owned(),
             zip,
             files,
+            order,
         });
         self.rebuild_file_index();
         Ok(())
@@ -109,9 +116,12 @@ impl Pk3Loader {
     fn rebuild_file_index(&mut self) {
         self.packages.sort_by(|a, b| locale_compare(&a.filename, &b.filename));
         self.file_index.clear();
+        self.file_order.clear();
         for (i, package) in self.packages.iter().enumerate() {
-            for path in package.files.keys() {
-                self.file_index.insert(path.clone(), i);
+            for path in &package.order {
+                if self.file_index.insert(path.clone(), i).is_none() {
+                    self.file_order.push(path.clone());
+                }
             }
         }
     }
@@ -134,9 +144,22 @@ impl Pk3Loader {
         Some(&self.packages[i].filename)
     }
 
-    /// Every indexed path (normalized), in no order.
+    /// Every indexed path (normalized), in the TypeScript's `Map` order.
     pub fn files(&self) -> impl Iterator<Item = &str> {
-        self.file_index.keys().map(String::as_str)
+        self.file_order.iter().map(String::as_str)
+    }
+
+    /// `listFiles(pattern)`: the paths matching a glob, in [`Self::files`]
+    /// order. The TypeScript turns `*` into `.*` and `?` into `.` and leaves
+    /// the rest as a case-insensitive regular expression, so a `.` in the
+    /// pattern matches any character too; that is kept. Other regex syntax
+    /// is not supported and matches literally.
+    #[must_use]
+    pub fn list_files(&self, pattern: &str) -> Vec<&str> {
+        let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+        self.files()
+            .filter(|f| glob_match(&pattern, &f.to_lowercase().chars().collect::<Vec<_>>()))
+            .collect()
     }
 
     /// `getFile`: the bytes of `path` from the package that wins it.
@@ -150,6 +173,17 @@ impl Pk3Loader {
         let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
         entry.read_to_end(&mut bytes).ok()?;
         Some(bytes)
+    }
+}
+
+/// `^pattern$` with `*` as `.*` and `.` and `?` as any one character.
+fn glob_match(pattern: &[char], text: &[char]) -> bool {
+    match pattern.split_first() {
+        None => text.is_empty(),
+        Some(('*', rest)) => (0..=text.len()).any(|skip| glob_match(rest, &text[skip..])),
+        Some((&p, rest)) => {
+            text.first().is_some_and(|&t| p == '.' || p == '?' || p == t) && glob_match(rest, &text[1..])
+        }
     }
 }
 
@@ -184,5 +218,15 @@ mod tests {
             ]
         );
         assert_eq!(locale_compare("a.pk3", "A.pk3"), Ordering::Less);
+    }
+
+    #[test]
+    fn globs_read_dots_as_any_character() {
+        let m = |p: &str, t: &str| glob_match(&p.chars().collect::<Vec<_>>(), &t.chars().collect::<Vec<_>>());
+        assert!(m("scripts/*.shader", "scripts/a.shader"));
+        assert!(m("scripts/*.shader", "scripts/sub/a.shader"));
+        assert!(m("scripts/*.shader", "scripts/xshader"));
+        assert!(!m("scripts/*.shader", "scripts/a.shader.txt"));
+        assert!(!m("maps/*.bsp", "levelshots/a.bsp"));
     }
 }
