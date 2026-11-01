@@ -20,6 +20,11 @@ serde_json = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# tokio-tungstenite leaves the choice of rustls crypto provider to us; without
+# one, the first wss:// connection panics. ring builds without a C toolchain
+# beyond cc and is the provider RUST.md 4.1 names.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
 
 [lints]
 workspace = true

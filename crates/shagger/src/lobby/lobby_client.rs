@@ -231,7 +231,12 @@ impl Drop for LobbyClient {
 }
 
 async fn run(url: &str, mut requests: async_mpsc::UnboundedReceiver<Outgoing>, events: &mpsc::Sender<LobbyEvent>) {
-    let connect = tokio_tungstenite::connect_async_with_config(url, None, true);
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        url,
+        None,
+        true,
+        Some(crate::network::client::tls::connector()),
+    );
     let mut socket = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok((socket, _))) => socket,
         Ok(Err(e)) => {

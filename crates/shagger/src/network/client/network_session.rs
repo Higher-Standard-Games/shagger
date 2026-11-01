@@ -147,7 +147,8 @@ async fn open(url: &str) -> Result<Socket, String> {
         .strip_prefix("http")
         .map_or_else(|| url.to_owned(), |rest| format!("ws{rest}"));
     // Nagle off: acks and commands are small and must leave at once (ping is read from acks).
-    let connect = tokio_tungstenite::connect_async_with_config(url.as_str(), None, true);
+    let connect =
+        tokio_tungstenite::connect_async_tls_with_config(url.as_str(), None, true, Some(super::tls::connector()));
     match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok((socket, _response))) => Ok(socket),
         Ok(Err(e)) => Err(format!("WebSocket connection error: {e}")),
