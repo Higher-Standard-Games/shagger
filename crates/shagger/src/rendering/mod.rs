@@ -1,9 +1,9 @@
 //! The renderer (RUST.md 8.2 and 21): wgpu in place of Babylon's scene.
 //!
-//! This is the first slice of milestone 6: the map's world surfaces with
-//! their base textures and baked lighting, drawn from a free camera, to a
-//! window or to an offscreen image. Q3 shader stages, the sky, PVS and frustum culling; models
-//! and post-processing follow (RUST.md 21.10).
+//! Milestone 6 so far: the map's world surfaces with their Q3 shader stages,
+//! baked lighting, animation and autosprites, the far box sky, and PVS and
+//! frustum culling, drawn from a free camera to a window or to an offscreen
+//! image. Models and post-processing follow (RUST.md 21.10).
 
 pub use glam;
 pub use wgpu;
