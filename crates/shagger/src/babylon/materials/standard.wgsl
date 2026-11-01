@@ -12,8 +12,8 @@
 // colour and texture, emissive and opacity Fresnel, a diffuse texture with
 // its alpha, an RGB opacity texture, the ambient colour, and image
 // processing's contrast. No bump, reflection, refraction, lightmap, fog or
-// shadows. The draw's emissive override and UV offset stand in for the
-// per-frame material writes SHAG makes.
+// shadows. The draw's emissive and diffuse overrides, texture matrix and
+// texture level stand in for the per-frame material writes SHAG makes.
 
 struct Light {
     // x: 0 none, 1 hemispheric, 2 directional
@@ -39,8 +39,10 @@ struct Draw {
     skin: vec4u,
     // rgb replaces the material's emissive colour when w is 1.
     emissive: vec4f,
-    // xy: texture offset (Texture.uOffset, vOffset).
-    uv: vec4f,
+    // The texture matrix (getTextureMatrix): u row in xy, v row in zw.
+    uv_rows: vec4f,
+    // xy: the matrix origin; z: the texture's level.
+    uv_origin: vec4f,
 };
 
 struct Material {
@@ -50,7 +52,8 @@ struct Material {
     emissive: vec4f,
     // rgb: material ambient times the scene's
     ambient: vec4f,
-    // x: alpha, y: lighting on, z: texture use bits, w: unused
+    // x: alpha, y: lighting on, z: texture use bits, w: emissive as
+    // illumination
     params: vec4f,
     // Fresnel parameters: left rgb + power, right rgb + bias.
     emissive_left: vec4f,
@@ -107,8 +110,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
     let view_direction = normalize(globals.eye.xyz - in.world_position);
     let normal = normalize(in.normal);
     let uses = u32(material.params.z);
-    let uv = in.uv + draw.uv.xy;
-    let texel = textureSample(tex, tex_sampler, uv);
+    let uv = in.uv.x * draw.uv_rows.xy + in.uv.y * draw.uv_rows.zw + draw.uv_origin.xy;
+    let sampled = textureSample(tex, tex_sampler, uv);
+    // Texture.level scales what the texture gives (diffuse, emissive and
+    // opacity read the same texture here).
+    let texel = vec4f(sampled.rgb * draw.uv_origin.z, sampled.a);
 
     var base_color = vec4f(1.0);
     var alpha = material.params.x;
@@ -164,9 +170,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
         emissive *= material.emissive_left.rgb * (1.0 - term) + term * material.emissive_right.rgb;
     }
 
-    let final_diffuse = clamp(diffuse_base * material.diffuse.rgb + emissive + material.ambient.rgb, vec3f(0.0), vec3f(1.0)) * base_color.rgb;
+    // A tint replaces the diffuse colour (an rgbGen on a diffuse stage).
+    let diffuse_color = select(material.diffuse.rgb, draw.tint.rgb, draw.tint.w > 0.5);
     let final_specular = specular_base * material.specular.rgb;
-    var color = final_diffuse + final_specular;
+    var color: vec3f;
+    if material.params.w > 0.5 {
+        // EMISSIVEASILLUMINATION
+        let final_diffuse = clamp(diffuse_base * diffuse_color + material.ambient.rgb, vec3f(0.0), vec3f(1.0)) * base_color.rgb;
+        color = clamp(final_diffuse + final_specular + emissive, vec3f(0.0), vec3f(1.0));
+    } else {
+        let final_diffuse = clamp(diffuse_base * diffuse_color + emissive + material.ambient.rgb, vec3f(0.0), vec3f(1.0)) * base_color.rgb;
+        color = final_diffuse + final_specular;
+    }
 
     // Image processing: to linear, exposure, back to gamma, contrast.
     color = pow(max(color, vec3f(0.0)), vec3f(2.2)) * globals.image.y;

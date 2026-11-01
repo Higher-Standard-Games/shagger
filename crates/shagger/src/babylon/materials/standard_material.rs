@@ -39,6 +39,18 @@ pub struct TextureUse {
     pub opacity_rgb: bool,
 }
 
+/// `Material.alphaMode` while blending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StandardAlphaMode {
+    /// `ALPHA_COMBINE`: source over, by source alpha.
+    #[default]
+    Combine,
+    /// `ALPHA_ADD`: source times its alpha, added.
+    Add,
+    /// `ALPHA_ONEONE`: source added.
+    OneOne,
+}
+
 /// A `StandardMaterial`'s colours, lighting and blending.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StandardMaterialParams {
@@ -53,6 +65,11 @@ pub struct StandardMaterialParams {
     pub back_face_culling: bool,
     /// `transparencyMode` alpha blend (or alpha below 1).
     pub alpha_blend: bool,
+    /// How a blended material blends.
+    pub alpha_mode: StandardAlphaMode,
+    /// `useEmissiveAsIllumination`: emissive added after the diffuse term
+    /// is clamped, not inside it.
+    pub emissive_as_illumination: bool,
     pub disable_depth_write: bool,
     /// `separateCullingPass`: a two-sided blended mesh draws its back faces,
     /// then its front faces.
@@ -75,6 +92,8 @@ impl Default for StandardMaterialParams {
             disable_lighting: false,
             back_face_culling: true,
             alpha_blend: false,
+            alpha_mode: StandardAlphaMode::Combine,
+            emissive_as_illumination: false,
             disable_depth_write: false,
             separate_culling_pass: false,
             emissive_fresnel: None,
@@ -139,7 +158,7 @@ impl StandardMaterialParams {
                 self.alpha,
                 if self.disable_lighting { 0.0 } else { 1.0 },
                 uses as f32,
-                0.0,
+                if self.emissive_as_illumination { 1.0 } else { 0.0 },
             ],
             emissive_left: e.left_color.extend(e.power).into(),
             emissive_right: e.right_color.extend(e.bias).into(),

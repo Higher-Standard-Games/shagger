@@ -24,8 +24,9 @@ Ported files, with the Babylon.js source each came from and its version:
     fresnelFunction.fx and defaultFragmentAlpha.fx, Babylon.js 9.31.2: the
     StandardMaterial terms SHAG's procedural pickups use (hemispheric and
     directional diffuse and specular, emissive colour and texture, emissive
-    and opacity Fresnel, diffuse alpha, RGB opacity, ambient and image
-    processing contrast), rewritten in WGSL.
+    and opacity Fresnel, diffuse alpha, RGB opacity, ambient, emissive as
+    illumination, texture matrix and level, alpha modes and image processing
+    contrast), rewritten in WGSL.
 
   meshes/vertex_data.rs
     from packages/dev/core/src/Meshes/mesh.vertexData.ts (ComputeNormals,

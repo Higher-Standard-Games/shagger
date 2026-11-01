@@ -44,9 +44,10 @@ struct Draw {
     outline: vec4f,
     // x: the draw's first joint in the palette.
     skin: vec4u,
-    // StandardMaterial only: emissive override and texture offset.
+    // StandardMaterial only: emissive override, texture matrix and level.
     emissive: vec4f,
-    uv: vec4f,
+    uv_rows: vec4f,
+    uv_origin: vec4f,
 };
 
 struct Material {

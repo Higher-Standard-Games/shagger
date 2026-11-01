@@ -35,7 +35,9 @@ use wgpu::util::DeviceExt;
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
 use crate::babylon::materials::STANDARD_WGSL;
+use crate::babylon::materials::standard_material::StandardAlphaMode;
 use crate::babylon::materials::standard_material::StandardMaterialParams;
+use crate::babylon::materials::texture::TextureMatrix;
 use crate::loader::model::gltf_model::{AlphaMode, GltfModel, ModelMaterial, ModelPrimitive};
 use crate::loader::texture::decode_image;
 
@@ -114,9 +116,11 @@ pub struct ModelDraw {
     pub tint: Option<Vec3>,
     /// Replaces a standard material's emissive colour (a pulse).
     pub emissive: Option<Vec3>,
-    /// Offsets a standard material's texture coordinates (`uOffset`,
-    /// `vOffset`).
-    pub uv_offset: Option<[f32; 2]>,
+    /// A standard material's texture matrix (its texture's offsets, scales
+    /// and rotation, as `getTextureMatrix` makes them).
+    pub texture_matrix: Option<TextureMatrix>,
+    /// A standard material's texture `level`.
+    pub texture_level: Option<f32>,
     /// The primitive's first joint in the frame's palette (a rigged
     /// primitive must have one; it is not drawn without).
     pub skin: Option<u32>,
@@ -133,7 +137,8 @@ impl ModelDraw {
             world,
             tint: None,
             emissive: None,
-            uv_offset: None,
+            texture_matrix: None,
+            texture_level: None,
             skin: None,
             outline: None,
         }
@@ -163,7 +168,8 @@ struct DrawUniform {
     outline: [f32; 4],
     skin: [u32; 4],
     emissive: [f32; 4],
-    uv: [f32; 4],
+    uv_rows: [f32; 4],
+    uv_origin: [f32; 4],
 }
 
 #[repr(C)]
@@ -231,6 +237,8 @@ enum BlendKind {
     Opaque,
     Alpha,
     Add,
+    /// `ALPHA_ONEONE`.
+    OneOne,
 }
 
 struct GpuPrimitive {
@@ -509,10 +517,11 @@ impl ModelRenderer {
                 });
                 materials.push(GpuMaterial {
                     bind_group: self.material_bind_group(gpu, view, &buffer),
-                    blend: if params.blends() {
-                        BlendKind::Alpha
-                    } else {
-                        BlendKind::Opaque
+                    blend: match (params.blends(), params.alpha_mode) {
+                        (false, _) => BlendKind::Opaque,
+                        (true, StandardAlphaMode::Combine) => BlendKind::Alpha,
+                        (true, StandardAlphaMode::Add) => BlendKind::Add,
+                        (true, StandardAlphaMode::OneOne) => BlendKind::OneOne,
                     },
                     two_sided: !params.back_face_culling,
                     standard: true,
@@ -629,6 +638,18 @@ impl ModelRenderer {
             BlendKind::Add => Some(wgpu::BlendState {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            BlendKind::OneOne => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
                     dst_factor: wgpu::BlendFactor::One,
                     operation: wgpu::BlendOperation::Add,
                 },
@@ -884,6 +905,7 @@ impl ModelRenderer {
         let size = std::mem::size_of::<DrawUniform>();
         for (i, (draw, _)) in self.frame.iter().enumerate() {
             let at = i * DRAW_STRIDE as usize;
+            let uv = draw.texture_matrix.unwrap_or(TextureMatrix::IDENTITY);
             let outline = draw.outline.unwrap_or(Outline {
                 color: Vec3::ZERO,
                 width: 0.0,
@@ -894,7 +916,18 @@ impl ModelRenderer {
                 outline: outline.color.extend(outline.width).into(),
                 skin: [draw.skin.unwrap_or(0), 0, 0, 0],
                 emissive: draw.emissive.map_or([0.0; 4], |e| e.extend(1.0).into()),
-                uv: draw.uv_offset.map_or([0.0; 4], |[u, v]| [u, v, 0.0, 0.0]),
+                uv_rows: [
+                    uv.u_row[0] as f32,
+                    uv.u_row[1] as f32,
+                    uv.v_row[0] as f32,
+                    uv.v_row[1] as f32,
+                ],
+                uv_origin: [
+                    uv.origin[0] as f32,
+                    uv.origin[1] as f32,
+                    draw.texture_level.unwrap_or(1.0),
+                    0.0,
+                ],
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }
