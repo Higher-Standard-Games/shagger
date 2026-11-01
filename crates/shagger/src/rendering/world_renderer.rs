@@ -168,6 +168,8 @@ struct DrawPass {
     buffer: wgpu::Buffer,
     first_index: u32,
     index_count: u32,
+    /// The batch it draws (an index into `WorldGeometry::batches`).
+    batch: usize,
 }
 
 pub struct WorldRenderer {
@@ -410,7 +412,7 @@ impl WorldRenderer {
         let mut missing = Vec::new();
         let mut opaque = Vec::new();
         let mut blended = Vec::new();
-        for batch in &geometry.batches {
+        for (batch_index, batch) in geometry.batches.iter().enumerate() {
             for props in &batch.passes {
                 // Only the reflection captured at load draws here.
                 if props.generated_cubemap == Some(true) {
@@ -559,6 +561,7 @@ impl WorldRenderer {
                     buffer,
                     first_index: batch.first_index,
                     index_count: batch.index_count,
+                    batch: batch_index,
                 };
                 if state.is_blended() {
                     blended.push((pass, animation));
@@ -758,13 +761,24 @@ impl WorldRenderer {
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
     }
 
-    /// Records the world into an open pass (colour and depth already bound).
+    /// Records the whole world into an open pass (colour and depth already
+    /// bound).
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_visible(pass, &[]);
+    }
+
+    /// Records the batches `visible` keeps (by batch index; a batch past its
+    /// end is drawn), as [`WorldCulling`](super::world_culling::WorldCulling)
+    /// gives them.
+    pub fn draw_visible(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
         for pass_ in &self.passes {
+            if !visible.get(pass_.batch).copied().unwrap_or(true) {
+                continue;
+            }
             if current != Some(pass_.pipeline) {
                 pass.set_pipeline(&self.pipelines[pass_.pipeline]);
                 current = Some(pass_.pipeline);

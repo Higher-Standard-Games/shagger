@@ -22,6 +22,7 @@ use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::autosprite_records::{autosprite_record, autosprite_vertex_data};
 use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face, build_polygon_face};
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
+use crate::loader::bsp::mesh::pvs::build_face_clusters;
 use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
@@ -78,6 +79,12 @@ pub struct WorldBatch {
     pub passes: Vec<ResolvedMaterialProps>,
     pub first_index: u32,
     pub index_count: u32,
+    /// The clusters of its faces (`bspPvsClusters`); `-1` for a face in
+    /// none, which keeps the batch drawn.
+    pub pvs_clusters: Vec<i32>,
+    /// Babylon-space bounds of everything it can draw, for frustum culling
+    /// (autosprites grown by the reach of their turn).
+    pub bounds: [[f32; 3]; 2],
 }
 
 /// A sky shader `BspMeshBuilder.applySkybox` can draw the sky from.
@@ -124,6 +131,27 @@ struct Group {
     /// An autosprite batch: its positions and its faces (positions, centre,
     /// autosprite2, first vertex, indices in the batch).
     sprites: Option<SpriteGroup>,
+    pvs_clusters: Vec<i32>,
+    bounds: [[f32; 3]; 2],
+}
+
+const EMPTY_BOUNDS: [[f32; 3]; 2] = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
+
+impl Group {
+    fn add_clusters(&mut self, clusters: &[i32]) {
+        for &c in clusters {
+            if !self.pvs_clusters.contains(&c) {
+                self.pvs_clusters.push(c);
+            }
+        }
+    }
+
+    fn grow(&mut self, point: [f32; 3], reach: f32) {
+        for (k, &c) in point.iter().enumerate() {
+            self.bounds[0][k] = self.bounds[0][k].min(c - reach);
+            self.bounds[1][k] = self.bounds[1][k].max(c + reach);
+        }
+    }
 }
 
 /// One autosprite face of a batch: positions, centre, autosprite2, first
@@ -148,6 +176,7 @@ pub fn build_world_geometry(
     let profile = bsp_lighting_profile(bsp);
     let stride = if profile.deluxe { 2 } else { 1 };
     let vertex_gain = if bsp.common.header.is_fbsp { profile.gain } else { 1.0 };
+    let face_clusters = build_face_clusters(bsp);
     let mut out = WorldGeometry {
         lightmap_stride: stride,
         ..WorldGeometry::default()
@@ -212,6 +241,8 @@ pub fn build_world_geometry(
                 vertices: Vec::new(),
                 indices: Vec::new(),
                 sprites: Some(SpriteGroup::default()),
+                pvs_clusters: Vec::new(),
+                bounds: EMPTY_BOUNDS,
             };
             let at = if additive {
                 *sprite_keys.entry(face.texture_index).or_insert_with(|| {
@@ -223,7 +254,6 @@ pub fn build_world_geometry(
                 sprite_groups.len() - 1
             };
             let group = &mut sprite_groups[at];
-            let sprites = group.sprites.as_mut().expect("a sprite group");
             let start = group.vertices.len();
             let n = g.vertex_count();
             let mut sum = [0.0f64; 3];
@@ -233,6 +263,15 @@ pub fn build_world_geometry(
                 }
             }
             let center = sum.map(|c| c / n as f64);
+            group.add_clusters(face_clusters.get(i).map_or(&[-1][..], Vec::as_slice));
+            // A sprite turns about its centre, so it can reach as far as its
+            // farthest corner in any direction.
+            let reach = g
+                .positions
+                .chunks_exact(3)
+                .map(|p| ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2) + (p[2] - center[2]).powi(2)).sqrt())
+                .fold(0.0f64, f64::max);
+            group.grow(center.map(|c| c as f32), reach as f32 + 1.0);
             let colors = scale_bsp_vertex_colors(&g.colors, vertex_gain);
             for v in 0..n {
                 let f = |a: &[f64], k: usize, w: usize| a[v * w + k] as f32;
@@ -251,6 +290,7 @@ pub fn build_world_geometry(
             }
             let own: Vec<u32> = g.indices.iter().map(|i| i + start as u32).collect();
             group.indices.extend(&own);
+            let sprites = group.sprites.as_mut().expect("a sprite group");
             sprites.positions.extend(&g.positions);
             sprites
                 .faces
@@ -270,6 +310,8 @@ pub fn build_world_geometry(
                 vertices: Vec::new(),
                 indices: Vec::new(),
                 sprites: None,
+                pvs_clusters: Vec::new(),
+                bounds: EMPTY_BOUNDS,
             });
             groups.len() - 1
         });
@@ -281,6 +323,10 @@ pub fn build_world_geometry(
         };
         let colors = scale_bsp_vertex_colors(&g.colors, vertex_gain);
         let base = group.vertices.len() as u32;
+        group.add_clusters(face_clusters.get(i).map_or(&[-1][..], Vec::as_slice));
+        for p in g.positions.chunks_exact(3) {
+            group.grow([p[0] as f32, p[1] as f32, p[2] as f32], 0.0);
+        }
         for v in 0..g.vertex_count() {
             let f = |a: &[f64], k: usize, n: usize| a[v * n + k] as f32;
             group.vertices.push(WorldVertex {
@@ -324,6 +370,8 @@ pub fn build_world_geometry(
             passes: passes_by_texture[&group.texture_index].clone(),
             first_index: out.indices.len() as u32,
             index_count: group.indices.len() as u32,
+            pvs_clusters: group.pvs_clusters,
+            bounds: group.bounds,
         });
         out.vertices.extend(group.vertices);
         out.indices.extend(group.indices.iter().map(|i| i + base));

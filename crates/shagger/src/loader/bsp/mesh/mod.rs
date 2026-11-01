@@ -7,5 +7,6 @@ pub mod autosprite_records;
 pub mod coordinates;
 pub mod face_builders;
 pub mod lightmaps;
+pub mod pvs;
 pub mod types;
 pub mod vertices;

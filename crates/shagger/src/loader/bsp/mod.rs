@@ -3,3 +3,4 @@
 pub mod bsp_lighting_profile;
 pub mod bsp_loader;
 pub mod mesh;
+pub mod pvs_culler;
