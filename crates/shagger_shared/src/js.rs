@@ -299,6 +299,19 @@ pub fn js_sign(x: f64) -> f64 {
     }
 }
 
+/// `Math.sin`: V8's fdlibm port. The platform `sin` differs from it in the
+/// last bit for about 3% of inputs, and differs again across platforms.
+#[must_use]
+pub fn js_sin(x: f64) -> f64 {
+    crate::fdlibm::sin(x)
+}
+
+/// `Math.cos`: V8's fdlibm port, as [`js_sin`].
+#[must_use]
+pub fn js_cos(x: f64) -> f64 {
+    crate::fdlibm::cos(x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

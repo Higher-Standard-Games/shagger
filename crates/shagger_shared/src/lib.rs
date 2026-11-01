@@ -6,6 +6,7 @@
 
 pub mod bsp;
 pub mod collision;
+pub mod fdlibm;
 pub mod js;
 pub mod json;
 pub mod net;

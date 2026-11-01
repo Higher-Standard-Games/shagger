@@ -106,6 +106,31 @@ const utf8 = (t) => Buffer.from(t, "utf8").toString("hex") || "-";
 for (const t of numberTexts) numbers.push(`${utf8(t)} ${utf8(t.trim())} ${bits(parseFloat(t))} ${bits(Number(t))}`);
 writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_string_number.txt"), `${numbers.join("\n")}\n`);
 
+// --- Math.sin and Math.cos (own generator, so the files above stay put) ------------
+{
+  let s = 0x7f4a7c15;
+  const r = () => {
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 0x1_0000_0000;
+  };
+  const inputs = [0, -0, NaN, Infinity, -Infinity, Number.MIN_VALUE, Number.MAX_VALUE, 2 ** 19 * Math.PI / 2];
+  for (let k = 1; k < 64; k++) inputs.push((k * Math.PI) / 4, (-k * Math.PI) / 4);
+  const scales = [1, Math.PI, 8, 100, 1e6, 1e9, 1e15, 1e22, 1e300, 1e-9];
+  for (let i = 0; i < 15000; i++) inputs.push((r() - 0.5) * scales[i % scales.length]);
+  for (let i = 0; i < 3000; i++) {
+    const v = new DataView(new ArrayBuffer(8));
+    v.setUint32(0, (r() * 0x1_0000_0000) >>> 0);
+    v.setUint32(4, (r() * 0x1_0000_0000) >>> 0);
+    inputs.push(v.getFloat64(0));
+  }
+  const trig = header("Math.sin and Math.cos, from V8");
+  trig[2] = "# each line: x, sin x, cos x as f64 bits";
+  for (const x of inputs) trig.push(`${bits(x)} ${bits(Math.sin(x))} ${bits(Math.cos(x))}`);
+  writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_trig.txt"), `${trig.join("\n")}\n`);
+}
+
 // --- Wire protocol (needs TypeScript enums, so it runs in its own Node) --------
 const protocolOut = resolve(root, "crates/shagger_shared/tests/golden");
 execFileSync(

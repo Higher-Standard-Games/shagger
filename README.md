@@ -26,6 +26,9 @@ Rust differs.
   the Apache License 2.0 (`LICENSE` and `NOTICE` in that folder). Babylon code
   goes in that folder and nowhere else, each file with an Apache header naming
   its Babylon source (21.1).
+- `crates/shagger_shared/src/fdlibm.rs`: V8's `Math.sin` and `Math.cos`,
+  ported from Sun's fdlibm, under fdlibm's permissive notice (kept at the top
+  of the file).
 - `cargo deny check` enforces the dependency license allow-list in CI.
 
 ## Parity with the TypeScript
