@@ -3,6 +3,9 @@
 // a layered lightmap page scaled by the map's gain, and with deluxe pages
 // light * N.L + ambient * (1 - N.L). Vertex-lit faces use their scaled
 // vertex colour. Colours stay in display space, as Babylon writes them.
+// Each material pass adds its alpha test, image alpha and lighting mode
+// (full bright for surfaces without a lightmap stage, as Q3's rgbGen
+// identity draws them, and unlit for additive passes).
 
 struct Globals {
     view_proj: mat4x4f,
@@ -17,6 +20,13 @@ struct Globals {
 @group(0) @binding(3) var lightmap_sampler: sampler;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(1) var base_sampler: sampler;
+
+struct Material {
+    // x: alpha cutoff (< 0: none), y: alpha from the image, z: lighting
+    // (0 baked, 1 full bright, 2 vertex colour), w: times vertex alpha
+    params: vec4f,
+};
+@group(1) @binding(2) var<uniform> material: Material;
 
 struct VertexIn {
     @location(0) position: vec3f,
@@ -51,8 +61,16 @@ fn vs_main(v: VertexIn) -> VertexOut {
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let base = textureSample(base_texture, base_sampler, in.uv);
+    var alpha = 1.0;
+    if (material.params.y > 0.5) { alpha = base.a; }
+    if (material.params.w > 0.5) { alpha = alpha * in.color.a; }
+    if (material.params.x >= 0.0 && alpha < material.params.x) { discard; }
     var light = in.color.rgb;
-    if (in.lightmapped > 0.5) {
+    if (material.params.z > 1.5) {
+        light = in.color.rgb;
+    } else if (material.params.z > 0.5) {
+        light = vec3f(1.0);
+    } else if (in.lightmapped > 0.5) {
         // A layered page: the layer in lightmap U above 1, the page's U below it.
         let layer = floor(in.uv2.x * 0.5);
         let uv = vec2f(in.uv2.x - layer * 2.0, in.uv2.y);
@@ -66,5 +84,5 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
         }
     }
-    return vec4f(base.rgb * light, 1.0);
+    return vec4f(base.rgb * light, alpha);
 }

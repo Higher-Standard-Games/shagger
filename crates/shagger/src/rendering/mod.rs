@@ -12,4 +12,5 @@ pub mod camera;
 pub mod gpu;
 pub mod offscreen;
 pub mod world_geometry;
+pub mod world_materials;
 pub mod world_renderer;

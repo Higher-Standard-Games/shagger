@@ -1,6 +1,13 @@
 //! Draws [`WorldGeometry`] with wgpu: one vertex and index buffer for the map,
 //! the lightmap pages as one array texture (and the deluxe pages as another),
-//! and a base texture per batch.
+//! and per batch its material passes, each with its base image and the
+//! blend, alpha test, cull and depth state its shader gives
+//! ([`super::world_materials`]). Opaque passes draw first, then blended ones
+//! in batch and pass order (Babylon's transparent queue, unsorted).
+//!
+//! Not yet drawn as SHAG draws them: tcMod/rgbGen animation, environment and
+//! `$cubemap` reflections (a reflection pass is left out, an environment
+//! material draws its base image), normal, gloss and glow maps, and the sky.
 
 use std::collections::HashMap;
 
@@ -10,6 +17,7 @@ use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
 use super::world_geometry::{WorldGeometry, WorldVertex};
+use super::world_materials::{Blend, MissingImage, PassState, build_diffuse_candidates, missing_image};
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
@@ -25,6 +33,16 @@ struct Globals {
     ambient: [f32; 4],
 }
 
+/// One pass's material uniform.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MaterialUniform {
+    /// x: alpha cutoff (negative: no test), y: 1 to take alpha from the
+    /// image, z: lighting (0 baked, 1 full bright, 2 vertex colour),
+    /// w: 1 to multiply alpha by the vertex alpha.
+    params: [f32; 4],
+}
+
 /// A decoded RGBA8 image.
 #[derive(Debug, Clone)]
 pub struct Rgba8Image {
@@ -37,17 +55,53 @@ impl Rgba8Image {
     /// One white pixel: what a surface whose texture is missing draws with.
     #[must_use]
     pub fn white() -> Self {
+        Self::solid([255, 255, 255, 255])
+    }
+
+    /// One pixel of a colour.
+    #[must_use]
+    pub fn solid(rgba: [u8; 4]) -> Self {
         Self {
             width: 1,
             height: 1,
-            pixels: vec![255; 4],
+            pixels: rgba.to_vec(),
+        }
+    }
+
+    /// `createRadialGradientTexture`: white at the centre fading to clear
+    /// at the edge, for additive halos with no image.
+    #[must_use]
+    pub fn radial_gradient() -> Self {
+        const SIZE: u32 = 64;
+        let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+        let half = SIZE as f32 / 2.0;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let d = ((x as f32 + 0.5 - half).hypot(y as f32 + 0.5 - half) / half).min(1.0);
+                let v = ((1.0 - d) * 255.0) as u8;
+                pixels.extend_from_slice(&[v, v, v, v]);
+            }
+        }
+        Self {
+            width: SIZE,
+            height: SIZE,
+            pixels,
         }
     }
 }
 
-struct DrawBatch {
-    bind_group: usize,
+/// The fixed-function state a pipeline is made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PipelineKey {
     two_sided: bool,
+    blend: Blend,
+    depth_write: bool,
+    polygon_offset: bool,
+}
+
+struct DrawPass {
+    pipeline: usize,
+    bind_group: usize,
     first_index: u32,
     index_count: u32,
 }
@@ -58,9 +112,10 @@ pub struct WorldRenderer {
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     texture_bind_groups: Vec<wgpu::BindGroup>,
-    batches: Vec<DrawBatch>,
-    pipeline_culled: wgpu::RenderPipeline,
-    pipeline_two_sided: wgpu::RenderPipeline,
+    texture_count: usize,
+    missing: Vec<String>,
+    passes: Vec<DrawPass>,
+    pipelines: Vec<wgpu::RenderPipeline>,
     lighting: [f32; 4],
     ambient: [f32; 4],
 }
@@ -152,8 +207,10 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 }
 
 impl WorldRenderer {
-    /// Uploads the map. `textures` gives each batch's base image by texture
-    /// name (`None` draws white), and `color_format` is the target's format.
+    /// Uploads the map. `textures` loads an image by base path (as
+    /// `resolveAndLoadTexture` does, extensions its own business); each
+    /// pass's candidates are tried in order. `color_format` is the target's
+    /// format.
     pub fn new(
         gpu: &Gpu,
         bsp: &BspFile,
@@ -232,7 +289,20 @@ impl WorldRenderer {
         });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("world base texture"),
-            entries: &[texture_entry(0, wgpu::TextureViewDimension::D2), sampler_entry(1)],
+            entries: &[
+                texture_entry(0, wgpu::TextureViewDimension::D2),
+                sampler_entry(1),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -264,39 +334,107 @@ impl WorldRenderer {
             ],
         });
 
-        // One bind group per distinct texture name.
-        let mut by_name: HashMap<String, usize> = HashMap::new();
+        // Images by candidate list, shared between passes; a bind group per pass.
+        let mut views: HashMap<String, wgpu::TextureView> = HashMap::new();
         let mut texture_bind_groups = Vec::new();
-        let mut batches = Vec::new();
+        let mut keys: Vec<PipelineKey> = Vec::new();
+        let mut missing = Vec::new();
+        let mut opaque = Vec::new();
+        let mut blended = Vec::new();
         for batch in &geometry.batches {
-            let key = batch.texture_name.to_lowercase();
-            let bind_group = *by_name.entry(key).or_insert_with(|| {
-                let image = textures(&batch.texture_name).unwrap_or_else(Rgba8Image::white);
-                let texture = upload_texture(gpu, &batch.texture_name, &image);
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            for props in &batch.passes {
+                // Only the reflection captured at load draws here.
+                if props.generated_cubemap == Some(true) {
+                    continue;
+                }
+                let state = PassState::of(props);
+                let candidates = build_diffuse_candidates(&batch.texture_name, props);
+                let fallback = missing_image(props);
+                let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
+                let view = views.entry(key).or_insert_with(|| {
+                    let image = candidates.iter().find_map(|c| textures(c)).unwrap_or_else(|| {
+                        if fallback == MissingImage::Untextured {
+                            missing.push(batch.texture_name.clone());
+                        }
+                        match fallback {
+                            MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
+                            MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
+                            MissingImage::White | MissingImage::Untextured => Rgba8Image::white(),
+                        }
+                    });
+                    upload_texture(gpu, &batch.texture_name, &image)
+                        .create_view(&wgpu::TextureViewDescriptor::default())
+                });
+                let lighting = if state.unlit {
+                    1.0
+                } else if props.uses_vertex_rgb == Some(true) {
+                    2.0
+                } else if props.use_lightmap {
+                    0.0
+                } else {
+                    1.0
+                };
+                let uniform = MaterialUniform {
+                    params: [
+                        state.alpha_cutoff.unwrap_or(-1.0),
+                        if state.texture_alpha { 1.0 } else { 0.0 },
+                        lighting,
+                        if props.uses_vertex_alpha == Some(true) {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    ],
+                };
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("world material"),
+                    contents: bytemuck::bytes_of(&uniform),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
                 texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&batch.texture_name),
                     layout: &texture_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
+                            resource: wgpu::BindingResource::TextureView(view),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&base_sampler),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: buffer.as_entire_binding(),
+                        },
                     ],
                 }));
-                texture_bind_groups.len() - 1
-            });
-            batches.push(DrawBatch {
-                bind_group,
-                two_sided: batch.two_sided,
-                first_index: batch.first_index,
-                index_count: batch.index_count,
-            });
+                let key = PipelineKey {
+                    two_sided: batch.two_sided,
+                    blend: state.blend,
+                    depth_write: state.depth_write,
+                    polygon_offset: state.polygon_offset,
+                };
+                let pipeline = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    keys.len() - 1
+                });
+                let pass = DrawPass {
+                    pipeline,
+                    bind_group: texture_bind_groups.len() - 1,
+                    first_index: batch.first_index,
+                    index_count: batch.index_count,
+                };
+                if state.is_blended() {
+                    blended.push(pass);
+                } else {
+                    opaque.push(pass);
+                }
+            }
         }
+        let texture_count = views.len();
+        let mut passes = opaque;
+        passes.extend(blended);
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("world.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -304,7 +442,7 @@ impl WorldRenderer {
             bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
             immediate_size: 0,
         });
-        let pipeline = |cull: Option<wgpu::Face>| {
+        let pipeline = |key: &PipelineKey| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("world"),
                 layout: Some(&layout),
@@ -327,15 +465,24 @@ impl WorldRenderer {
                     // counter-clockwise on screen (checked on washoi_dm2:
                     // the other way culls the walls you look at).
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: cull,
+                    cull_mode: if key.two_sided { None } else { Some(wgpu::Face::Back) },
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
+                    depth_write_enabled: Some(key.depth_write),
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
+                    // Babylon's zOffset -2: glPolygonOffset(-2, 0).
+                    bias: if key.polygon_offset {
+                        wgpu::DepthBiasState {
+                            constant: 0,
+                            slope_scale: -2.0,
+                            clamp: 0.0,
+                        }
+                    } else {
+                        wgpu::DepthBiasState::default()
+                    },
                 }),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
@@ -344,7 +491,7 @@ impl WorldRenderer {
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: color_format,
-                        blend: None,
+                        blend: key.blend.state(),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -352,8 +499,7 @@ impl WorldRenderer {
                 cache: None,
             })
         };
-        let pipeline_culled = pipeline(Some(wgpu::Face::Back));
-        let pipeline_two_sided = pipeline(None);
+        let pipelines = keys.iter().map(pipeline).collect();
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("world vertices"),
@@ -371,9 +517,10 @@ impl WorldRenderer {
             globals_buffer,
             globals_bind_group,
             texture_bind_groups,
-            batches,
-            pipeline_culled,
-            pipeline_two_sided,
+            texture_count,
+            missing,
+            passes,
+            pipelines,
             lighting: [profile.gain as f32, if stride == 2 { 1.0 } else { 0.0 }, 0.0, 0.0],
             ambient: [
                 profile.ambient[0] as f32,
@@ -384,10 +531,22 @@ impl WorldRenderer {
         }
     }
 
-    /// How many base textures were uploaded.
+    /// How many base images were uploaded.
     #[must_use]
     pub fn texture_count(&self) -> usize {
-        self.texture_bind_groups.len()
+        self.texture_count
+    }
+
+    /// The textures with a pass that found no image and drew white.
+    #[must_use]
+    pub fn missing_images(&self) -> &[String] {
+        &self.missing
+    }
+
+    /// How many material passes are drawn.
+    #[must_use]
+    pub fn pass_count(&self) -> usize {
+        self.passes.len()
     }
 
     /// Writes this frame's camera.
@@ -406,18 +565,14 @@ impl WorldRenderer {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        let mut two_sided = None;
-        for batch in &self.batches {
-            if two_sided != Some(batch.two_sided) {
-                pass.set_pipeline(if batch.two_sided {
-                    &self.pipeline_two_sided
-                } else {
-                    &self.pipeline_culled
-                });
-                two_sided = Some(batch.two_sided);
+        let mut current = None;
+        for pass_ in &self.passes {
+            if current != Some(pass_.pipeline) {
+                pass.set_pipeline(&self.pipelines[pass_.pipeline]);
+                current = Some(pass_.pipeline);
             }
-            pass.set_bind_group(1, &self.texture_bind_groups[batch.bind_group], &[]);
-            pass.draw_indexed(batch.first_index..batch.first_index + batch.index_count, 0, 0..1);
+            pass.set_bind_group(1, &self.texture_bind_groups[pass_.bind_group], &[]);
+            pass.draw_indexed(pass_.first_index..pass_.first_index + pass_.index_count, 0, 0..1);
         }
     }
 }

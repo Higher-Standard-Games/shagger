@@ -3,10 +3,14 @@
 //! texture, lightmap page and patch-ness; layered lightmap pages share a
 //! batch, with the page folded into lightmap U as `u + 2 * layer`).
 //!
-//! Not yet followed from `buildAll` (they need the Q3 shader registry): sky
-//! faces named by a shader rather than the BSP's `SURF_SKY` flag, autosprites,
-//! liquids, cubemap objects, fog and spatial cells. Billboards are skipped, as
-//! SHAG skips them.
+//! Each texture's shader resolves to its material passes
+//! (`Q3ShaderRegistry.resolveMaterialPasses`); a face is sky when its shader
+//! says so or the BSP's `SURF_SKY` flag is set, as `buildAll` decides.
+//!
+//! Not yet followed from `buildAll`: autosprites (drawn here as the static
+//! faces they are in the BSP, where SHAG turns them to the camera), liquids,
+//! cubemap objects, fog and spatial cells. Billboards are skipped, as SHAG
+//! skips them.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -14,6 +18,7 @@ use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face, build_polygon_face};
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
+use crate::loader::shader::q3_shader_types::{ResolveMaterialOptions, ResolvedMaterialProps};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
 pub const NON_DRAWABLE_TEXTURES: [&str; 14] = [
@@ -51,13 +56,17 @@ pub struct WorldVertex {
     pub lightmapped: f32,
 }
 
-/// A run of indices drawn with one base texture.
+/// A run of indices drawn with one texture's material passes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldBatch {
     pub texture_index: i32,
     pub texture_name: String,
-    /// Patches draw both sides (`backFaceCulling: false`).
+    /// Patches draw both sides (`backFaceCulling: false`), as do shaders
+    /// with `cull none`.
     pub two_sided: bool,
+    /// The material passes, in drawing order (one unless the shader layers
+    /// several).
+    pub passes: Vec<ResolvedMaterialProps>,
     pub first_index: u32,
     pub index_count: u32,
 }
@@ -93,9 +102,15 @@ struct Group {
     indices: Vec<u32>,
 }
 
-/// Builds the world model's (model 0's) surfaces.
+/// Builds the world model's (model 0's) surfaces. `material_passes` resolves
+/// a texture name to its passes (a `Q3ShaderRegistry::resolve_material_passes`);
+/// it is asked once per texture, with `worldSurface` set and the map's
+/// deluxe state.
 #[must_use]
-pub fn build_world_geometry(bsp: &BspFile) -> WorldGeometry {
+pub fn build_world_geometry(
+    bsp: &BspFile,
+    mut material_passes: impl FnMut(&str, &ResolveMaterialOptions) -> Vec<ResolvedMaterialProps>,
+) -> WorldGeometry {
     let profile = bsp_lighting_profile(bsp);
     let stride = if profile.deluxe { 2 } else { 1 };
     let vertex_gain = if bsp.common.header.is_fbsp { profile.gain } else { 1.0 };
@@ -106,6 +121,13 @@ pub fn build_world_geometry(bsp: &BspFile) -> WorldGeometry {
     let Some(world) = bsp.common.models.first() else {
         return out;
     };
+    let options = ResolveMaterialOptions {
+        world_surface: true,
+        deluxe: profile.deluxe,
+        ..ResolveMaterialOptions::default()
+    };
+    let mut passes_by_texture: std::collections::HashMap<i32, Vec<ResolvedMaterialProps>> =
+        std::collections::HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
     let mut keys: std::collections::HashMap<(i32, i32, bool), usize> = std::collections::HashMap::new();
     let first = usize::try_from(world.first_face).unwrap_or(0);
@@ -116,7 +138,16 @@ pub fn build_world_geometry(bsp: &BspFile) -> WorldGeometry {
             continue;
         }
         let texture = &bsp.common.textures[face.texture_index as usize];
-        if texture.surface_flags & SURF_SKY != 0 {
+        let passes = passes_by_texture.entry(face.texture_index).or_insert_with(|| {
+            let mut passes = material_passes(&texture.name, &options);
+            if passes.is_empty() {
+                passes.push(ResolvedMaterialProps::default());
+            }
+            passes
+        });
+        // Every pass shares the shader-level flags (sky, cull).
+        let two_sided_shader = !passes[0].back_face_culling;
+        if passes[0].is_sky || texture.surface_flags & SURF_SKY != 0 {
             out.sky_faces.push(i);
             continue;
         }
@@ -136,7 +167,7 @@ pub fn build_world_geometry(bsp: &BspFile) -> WorldGeometry {
         let at = *keys.entry(key).or_insert_with(|| {
             groups.push(Group {
                 texture_index: face.texture_index,
-                two_sided: is_patch,
+                two_sided: is_patch || two_sided_shader,
                 vertices: Vec::new(),
                 indices: Vec::new(),
             });
@@ -169,6 +200,7 @@ pub fn build_world_geometry(bsp: &BspFile) -> WorldGeometry {
             texture_index: group.texture_index,
             texture_name: bsp.common.textures[group.texture_index as usize].name.clone(),
             two_sided: group.two_sided,
+            passes: passes_by_texture[&group.texture_index].clone(),
             first_index: out.indices.len() as u32,
             index_count: group.indices.len() as u32,
         });
