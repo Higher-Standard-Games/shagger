@@ -7,6 +7,7 @@
 //! Licensing: [`babylon`] holds code ported from Babylon.js and is
 //! Apache-2.0; everything else in this crate is MIT.
 
+pub mod animation;
 pub mod babylon;
 pub mod lighting;
 pub mod loader;

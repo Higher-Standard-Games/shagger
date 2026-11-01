@@ -6,5 +6,6 @@ pub mod clock_sync;
 pub mod connection_watchdog;
 pub mod hosts;
 pub mod network_session;
+pub mod snapshot_buffer;
 pub mod snapshot_receiver;
 pub mod tls;

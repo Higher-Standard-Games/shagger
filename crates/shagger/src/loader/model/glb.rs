@@ -46,6 +46,16 @@ pub struct Primitive {
     pub indices: Option<usize>,
     pub material: Option<usize>,
     pub mode: Option<u32>,
+    #[serde(default)]
+    pub extensions: Option<Value>,
+}
+
+/// A primitive's attributes as `KHR_draco_mesh_compression` decodes them:
+/// floats per attribute name, with their component count, and the indices.
+#[derive(Debug, Clone, Default)]
+pub struct DracoPrimitive {
+    pub attributes: std::collections::BTreeMap<String, (usize, Vec<f32>)>,
+    pub indices: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -371,6 +381,52 @@ impl Glb {
             }
         }
         Ok(())
+    }
+}
+
+impl Glb {
+    /// Decodes a primitive's `KHR_draco_mesh_compression` data, as Babylon's
+    /// `KHR_draco_mesh_compression` extension does with Draco's decoder: the
+    /// extension names each glTF attribute by its Draco unique id. `None`
+    /// when the primitive is not compressed.
+    pub fn decode_draco(&self, primitive: &Primitive) -> Result<Option<DracoPrimitive>, GlbError> {
+        let Some(ext) = primitive
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("KHR_draco_mesh_compression"))
+        else {
+            return Ok(None);
+        };
+        let view = ext
+            .get("bufferView")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| err("draco primitive has no buffer view"))?;
+        let bytes = self.view_bytes(view as usize)?;
+        let mut buffer = draco_core::decoder_buffer::DecoderBuffer::new(bytes);
+        let mut mesh = draco_core::mesh::Mesh::new();
+        draco_core::mesh_decoder::MeshDecoder::new()
+            .decode(&mut buffer, &mut mesh)
+            .map_err(|e| err(format!("draco: {e:?}")))?;
+        let points = mesh.num_points();
+        let mut out = DracoPrimitive::default();
+        if let Some(attributes) = ext.get("attributes").and_then(Value::as_object) {
+            for (name, id) in attributes {
+                let id = id.as_u64().ok_or_else(|| err("draco attribute id"))? as u32;
+                let attribute = mesh
+                    .attribute_by_unique_id(id)
+                    .ok_or_else(|| err(format!("draco attribute {name} missing")))?;
+                let components = attribute.num_components() as usize;
+                out.attributes
+                    .insert(name.clone(), (components, attribute.read_f32s(points, components)));
+            }
+        }
+        out.indices = (0..mesh.num_faces())
+            .flat_map(|f| {
+                let face = mesh.face(draco_core::geometry_indices::FaceIndex(f as u32));
+                [face[0].0, face[1].0, face[2].0]
+            })
+            .collect();
+        Ok(Some(out))
     }
 }
 

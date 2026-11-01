@@ -16,6 +16,13 @@
 //! flips the side orientation when the world matrix's determinant is
 //! negative.
 //!
+//! A rigged primitive ([`ModelPrimitive::skin`]) is skinned on the GPU from
+//! the frame's joint palette ([`ModelDraw::skin`]), a draw may replace its
+//! albedo colour ([`ModelDraw::tint`], a player's team colour) and may carry
+//! Babylon's outline ([`ModelDraw::outline`]): drawn just before the mesh
+//! without depth write and pulled forward by the renderer's z offset, then
+//! again after it into depth only, as `OutlineRenderer` does.
+//!
 //! Not yet drawn as SHAG draws them: normal and metallic-roughness maps,
 //! specular light, the clustered dynamic lights.
 
@@ -27,7 +34,7 @@ use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
-use crate::loader::model::gltf_model::{AlphaMode, GltfModel, ModelMaterial};
+use crate::loader::model::gltf_model::{AlphaMode, GltfModel, ModelMaterial, ModelPrimitive};
 use crate::loader::texture::decode_image;
 
 /// How a material draws.
@@ -80,12 +87,41 @@ impl Default for ImageProcessing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelHandle(usize);
 
+/// Babylon's mesh outline (`renderOutline`, `outlineColor`, `outlineWidth`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Outline {
+    pub color: Vec3,
+    /// How far the outline stands off the mesh, in the mesh's bind space.
+    pub width: f32,
+}
+
 /// One primitive drawn this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelDraw {
     pub model: ModelHandle,
     pub primitive: usize,
     pub world: Mat4,
+    /// Replaces the material's albedo colour.
+    pub tint: Option<Vec3>,
+    /// The primitive's first joint in the frame's palette (a rigged
+    /// primitive must have one; it is not drawn without).
+    pub skin: Option<u32>,
+    pub outline: Option<Outline>,
+}
+
+impl ModelDraw {
+    /// A plain draw: no tint, skin or outline.
+    #[must_use]
+    pub fn new(model: ModelHandle, primitive: usize, world: Mat4) -> Self {
+        Self {
+            model,
+            primitive,
+            world,
+            tint: None,
+            skin: None,
+            outline: None,
+        }
+    }
 }
 
 #[repr(C)]
@@ -94,6 +130,22 @@ struct ModelVertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct SkinVertex {
+    joints: [u32; 4],
+    weights: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct DrawUniform {
+    world: [f32; 16],
+    tint: [f32; 4],
+    outline: [f32; 4],
+    skin: [u32; 4],
 }
 
 #[repr(C)]
@@ -132,6 +184,17 @@ struct PipelineKey {
     cull: bool,
     /// Clockwise faces front: the world matrix mirrors.
     mirrored: bool,
+    skinned: bool,
+    pass: PassKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PassKind {
+    Color,
+    /// The outline's colour, before the mesh, no depth write.
+    Outline,
+    /// The outline into depth only, after the mesh.
+    OutlineDepth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -143,6 +206,7 @@ enum BlendKind {
 
 struct GpuPrimitive {
     vertex: wgpu::Buffer,
+    skin: Option<wgpu::Buffer>,
     index: wgpu::Buffer,
     count: u32,
     material: usize,
@@ -172,6 +236,8 @@ pub struct ModelRenderer {
     draw_layout: wgpu::BindGroupLayout,
     draw_buffer: wgpu::Buffer,
     draw_capacity: usize,
+    joint_buffer: wgpu::Buffer,
+    joint_capacity: usize,
     draw_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
@@ -184,26 +250,39 @@ pub struct ModelRenderer {
     burley: bool,
 }
 
-fn create_draw_buffer(gpu: &Gpu, layout: &wgpu::BindGroupLayout, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("model draws"),
-        size: DRAW_STRIDE * capacity.max(1) as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+fn create_buffer(gpu: &Gpu, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    });
-    let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    })
+}
+
+fn create_draw_bind_group(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    draws: &wgpu::Buffer,
+    joints: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("model draws"),
         layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer: &buffer,
-                offset: 0,
-                size: wgpu::BufferSize::new(64),
-            }),
-        }],
-    });
-    (buffer, bind_group)
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: draws,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(std::mem::size_of::<DrawUniform>() as u64),
+                }),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: joints.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 fn uniform_entry(binding: u32, dynamic: bool) -> wgpu::BindGroupLayoutEntry {
@@ -229,7 +308,19 @@ impl ModelRenderer {
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model draw"),
-            entries: &[uniform_entry(0, true)],
+            entries: &[
+                uniform_entry(0, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model material"),
@@ -260,7 +351,20 @@ impl ModelRenderer {
             }],
         });
         let draw_capacity = 64;
-        let (draw_buffer, draw_bind_group) = create_draw_buffer(gpu, &draw_layout, draw_capacity);
+        let draw_buffer = create_buffer(
+            gpu,
+            "model draws",
+            DRAW_STRIDE * draw_capacity as u64,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let joint_capacity = 128;
+        let joint_buffer = create_buffer(
+            gpu,
+            "model joints",
+            64 * joint_capacity as u64,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let draw_bind_group = create_draw_bind_group(gpu, &draw_layout, &draw_buffer, &joint_buffer);
         // glTF samplers on Washoi's models all repeat with trilinear filtering.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("model base"),
@@ -284,6 +388,8 @@ impl ModelRenderer {
             draw_layout,
             draw_buffer,
             draw_capacity,
+            joint_buffer,
+            joint_capacity,
             draw_bind_group,
             sampler,
             white,
@@ -423,6 +529,13 @@ impl ModelRenderer {
                         contents: bytemuck::cast_slice(&vertices),
                         usage: wgpu::BufferUsages::VERTEX,
                     }),
+                    skin: skin_vertices(p).map(|skin| {
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("model skin"),
+                            contents: bytemuck::cast_slice(&skin),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        })
+                    }),
                     index: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("model indices"),
                         contents: bytemuck::cast_slice(&p.indices),
@@ -460,18 +573,32 @@ impl ModelRenderer {
                 },
             }),
         };
+        let outline = key.pass != PassKind::Color;
+        let vertex_entry = match (outline, key.skinned) {
+            (false, false) => "vs_main",
+            (false, true) => "vs_skinned",
+            (true, false) => "vs_outline",
+            (true, true) => "vs_outline_skinned",
+        };
+        let mesh_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ModelVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+        };
+        let skin_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SkinVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![3 => Uint32x4, 4 => Float32x4],
+        };
+        let buffers = [Some(mesh_layout), Some(skin_layout)];
         let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("model"),
             layout: Some(&self.layout),
             vertex: wgpu::VertexState {
                 module: &self.shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(vertex_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ModelVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
-                })],
+                buffers: &buffers[..if key.skinned { 2 } else { 1 }],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -488,20 +615,37 @@ impl ModelRenderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(key.blend == BlendKind::Opaque),
+                depth_write_enabled: Some(match key.pass {
+                    PassKind::Color => key.blend == BlendKind::Opaque,
+                    PassKind::Outline => false,
+                    PassKind::OutlineDepth => true,
+                }),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // OutlineRenderer's zOffset 1 and zOffsetUnits 4, negated.
+                bias: if outline {
+                    wgpu::DepthBiasState {
+                        constant: -4,
+                        slope_scale: -1.0,
+                        clamp: 0.0,
+                    }
+                } else {
+                    wgpu::DepthBiasState::default()
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &self.shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(if outline { "fs_outline" } else { "fs_main" }),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.color_format,
                     blend,
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: if key.pass == PassKind::OutlineDepth {
+                        wgpu::ColorWrites::empty()
+                    } else {
+                        wgpu::ColorWrites::ALL
+                    },
                 })],
             }),
             multiview_mask: None,
@@ -510,8 +654,10 @@ impl ModelRenderer {
         self.pipelines.insert(key, pipeline);
     }
 
-    /// Writes this frame's camera, lights and draws.
-    pub fn prepare(&mut self, gpu: &Gpu, view_proj: Mat4, eye: Vec3, draws: &[ModelDraw]) {
+    /// Writes this frame's camera, lights, draws and joint palette (the
+    /// joint matrices skinned draws index, each already in model space:
+    /// joint global times inverse bind).
+    pub fn prepare(&mut self, gpu: &Gpu, view_proj: Mat4, eye: Vec3, draws: &[ModelDraw], joints: &[Mat4]) {
         let mut lights = [LightUniform::zeroed(); MAX_LIGHTS];
         for (slot, light) in lights.iter_mut().zip(&self.lights) {
             *slot = match *light {
@@ -565,14 +711,39 @@ impl ModelRenderer {
             let Some(primitive) = model.primitives.get(draw.primitive) else {
                 continue;
             };
+            let skinned = primitive.skin.is_some();
+            if skinned && draw.skin.is_none() {
+                continue;
+            }
             let material = &model.materials[primitive.material];
             let key = PipelineKey {
                 blend: material.blend,
                 cull: !material.two_sided,
                 mirrored: draw.world.determinant() < 0.0,
+                skinned,
+                pass: PassKind::Color,
             };
             if material.blend == BlendKind::Opaque {
+                let outlined = draw.outline.is_some_and(|o| o.width > 0.0);
+                if outlined {
+                    opaque.push((
+                        *draw,
+                        PipelineKey {
+                            pass: PassKind::Outline,
+                            ..key
+                        },
+                    ));
+                }
                 opaque.push((*draw, key));
+                if outlined {
+                    opaque.push((
+                        *draw,
+                        PipelineKey {
+                            pass: PassKind::OutlineDepth,
+                            ..key
+                        },
+                    ));
+                }
             } else {
                 let distance = draw.world.transform_point3(primitive.bounds_center).distance(eye);
                 blended.push((*draw, key, distance, primitive.creation_order));
@@ -586,19 +757,54 @@ impl ModelRenderer {
         for &(_, key) in &self.frame.clone() {
             self.pipeline(gpu, key);
         }
+        let mut rebind = false;
         if self.frame.len() > self.draw_capacity {
             self.draw_capacity = self.frame.len().next_power_of_two();
-            let (buffer, bind_group) = create_draw_buffer(gpu, &self.draw_layout, self.draw_capacity);
-            self.draw_buffer = buffer;
-            self.draw_bind_group = bind_group;
+            self.draw_buffer = create_buffer(
+                gpu,
+                "model draws",
+                DRAW_STRIDE * self.draw_capacity as u64,
+                wgpu::BufferUsages::UNIFORM,
+            );
+            rebind = true;
+        }
+        if joints.len() > self.joint_capacity {
+            self.joint_capacity = joints.len().next_power_of_two();
+            self.joint_buffer = create_buffer(
+                gpu,
+                "model joints",
+                64 * self.joint_capacity as u64,
+                wgpu::BufferUsages::STORAGE,
+            );
+            rebind = true;
+        }
+        if rebind {
+            self.draw_bind_group =
+                create_draw_bind_group(gpu, &self.draw_layout, &self.draw_buffer, &self.joint_buffer);
         }
         let mut bytes = vec![0u8; DRAW_STRIDE as usize * self.frame.len()];
+        let size = std::mem::size_of::<DrawUniform>();
         for (i, (draw, _)) in self.frame.iter().enumerate() {
             let at = i * DRAW_STRIDE as usize;
-            bytes[at..at + 64].copy_from_slice(bytemuck::cast_slice(&draw.world.to_cols_array()));
+            let outline = draw.outline.unwrap_or(Outline {
+                color: Vec3::ZERO,
+                width: 0.0,
+            });
+            let uniform = DrawUniform {
+                world: draw.world.to_cols_array(),
+                tint: draw.tint.map_or([0.0; 4], |t| t.extend(1.0).into()),
+                outline: outline.color.extend(outline.width).into(),
+                skin: [draw.skin.unwrap_or(0), 0, 0, 0],
+            };
+            bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }
         if !bytes.is_empty() {
             gpu.queue.write_buffer(&self.draw_buffer, 0, &bytes);
+        }
+        if !joints.is_empty() {
+            let flat: Vec<[f32; 16]> = joints.iter().map(Mat4::to_cols_array).collect();
+            gpu.queue
+                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&flat));
         }
     }
 
@@ -624,6 +830,9 @@ impl ModelRenderer {
             pass.set_bind_group(1, &self.draw_bind_group, &[(i as u64 * DRAW_STRIDE) as u32]);
             pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
             pass.set_vertex_buffer(0, primitive.vertex.slice(..));
+            if let Some(skin) = &primitive.skin {
+                pass.set_vertex_buffer(1, skin.slice(..));
+            }
             pass.set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..primitive.count, 0, 0..1);
         }
@@ -634,4 +843,17 @@ impl ModelRenderer {
     pub fn primitive_count(&self, model: ModelHandle) -> usize {
         self.models.get(model.0).map_or(0, |m| m.primitives.len())
     }
+}
+
+/// A rigged primitive's joints and weights as a vertex stream.
+fn skin_vertices(p: &ModelPrimitive) -> Option<Vec<SkinVertex>> {
+    let skin = p.skin.as_ref()?;
+    Some(
+        (0..p.positions.len())
+            .map(|i| SkinVertex {
+                joints: skin.joints.get(i).copied().unwrap_or([0; 4]),
+                weights: skin.weights.get(i).copied().unwrap_or([0.0; 4]),
+            })
+            .collect(),
+    )
 }

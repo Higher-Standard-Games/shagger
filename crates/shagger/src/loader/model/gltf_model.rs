@@ -90,6 +90,9 @@ pub struct ModelPrimitive {
     /// When Babylon created this mesh: its place in a depth-first walk of
     /// the scene's nodes, which breaks ties in the transparent sort.
     pub creation_order: usize,
+    /// The skin to pose this primitive with, when loaded rigged
+    /// ([`GltfModel::from_glb_rigged`]); `None` once skinned at load.
+    pub skin: Option<PrimitiveSkin>,
 }
 
 /// A `tag_*` node (`ModelAttachmentPoint`): its local position and rotation.
@@ -107,37 +110,42 @@ pub struct GltfModel {
     pub materials: Vec<ModelMaterial>,
     pub images: Vec<ModelImage>,
     pub attachment_points: BTreeMap<String, AttachmentPoint>,
+    pub skeleton: Skeleton,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Trs {
-    translation: Vec3,
-    rotation: Quat,
-    scale: Vec3,
+/// A node's local translation, rotation and scaling, as Babylon's
+/// `TransformNode` holds a glTF node's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodeTransform {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
 }
 
-impl Trs {
-    fn matrix(&self) -> Mat4 {
+impl NodeTransform {
+    #[must_use]
+    pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 }
 
-/// The posed local transforms of every node.
-fn posed_nodes(glb: &Glb) -> Result<Vec<Trs>, GlbError> {
+/// Every node's local transform: its rest transform, posed at the first
+/// frame of the model's animations when `pose` is set.
+fn node_transforms(glb: &Glb, pose: bool) -> Result<Vec<NodeTransform>, GlbError> {
     let doc = &glb.document;
-    let mut nodes: Vec<Trs> = doc
+    let mut nodes: Vec<NodeTransform> = doc
         .nodes
         .iter()
         .map(|n| {
             if let Some(m) = n.matrix {
                 let (scale, rotation, translation) = Mat4::from_cols_array(&m).to_scale_rotation_translation();
-                Trs {
+                NodeTransform {
                     translation,
                     rotation,
                     scale,
                 }
             } else {
-                Trs {
+                NodeTransform {
                     translation: n.translation.map_or(Vec3::ZERO, Vec3::from),
                     rotation: n.rotation.map_or(Quat::IDENTITY, Quat::from_array),
                     scale: n.scale.map_or(Vec3::ONE, Vec3::from),
@@ -145,6 +153,9 @@ fn posed_nodes(glb: &Glb) -> Result<Vec<Trs>, GlbError> {
             }
         })
         .collect();
+    if !pose {
+        return Ok(nodes);
+    }
     for animation in &doc.animations {
         for channel in &animation.channels {
             let Some(node) = channel.target.node.and_then(|n| nodes.get_mut(n)) else {
@@ -174,33 +185,92 @@ fn posed_nodes(glb: &Glb) -> Result<Vec<Trs>, GlbError> {
     Ok(nodes)
 }
 
-/// Each node's transform in glTF scene space.
-fn global_matrices(glb: &Glb, locals: &[Trs]) -> Vec<Mat4> {
-    let doc = &glb.document;
-    let mut parent = vec![None; doc.nodes.len()];
-    for (i, n) in doc.nodes.iter().enumerate() {
-        for &c in &n.children {
-            if let Some(p) = parent.get_mut(c) {
-                *p = Some(i);
-            }
-        }
+/// A glTF node in the model's hierarchy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkeletonNode {
+    pub name: String,
+    pub parent: Option<usize>,
+    /// The node's own transform in the file.
+    pub rest: NodeTransform,
+}
+
+/// A glTF skin: its joint nodes and their inverse bind matrices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinBinding {
+    pub joints: Vec<usize>,
+    pub inverse_binds: Vec<Mat4>,
+}
+
+/// The model's node hierarchy and skins, for posing it at run time.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Skeleton {
+    /// Every glTF node, by index; a parent always comes from the file's
+    /// `children` lists.
+    pub nodes: Vec<SkeletonNode>,
+    pub skins: Vec<SkinBinding>,
+}
+
+impl Skeleton {
+    /// The rest transforms of every node.
+    #[must_use]
+    pub fn rest(&self) -> Vec<NodeTransform> {
+        self.nodes.iter().map(|n| n.rest).collect()
     }
-    (0..doc.nodes.len())
-        .map(|i| {
-            let mut m = locals[i].matrix();
-            let mut at = parent[i];
-            let mut guard = 0;
-            while let Some(p) = at {
-                m = locals[p].matrix() * m;
-                at = parent[p];
-                guard += 1;
-                if guard > doc.nodes.len() {
-                    break;
-                }
-            }
-            m
-        })
-        .collect()
+
+    /// A node by name.
+    #[must_use]
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.name == name)
+    }
+
+    /// Each node's transform in glTF scene space, from local transforms.
+    #[must_use]
+    pub fn global_matrices(&self, locals: &[NodeTransform]) -> Vec<Mat4> {
+        let mut out: Vec<Option<Mat4>> = vec![None; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            self.global_into(i, locals, &mut out, 0);
+        }
+        out.into_iter().map(|m| m.unwrap_or(Mat4::IDENTITY)).collect()
+    }
+
+    fn global_into(&self, i: usize, locals: &[NodeTransform], out: &mut [Option<Mat4>], depth: usize) -> Mat4 {
+        if let Some(m) = out[i] {
+            return m;
+        }
+        let local = locals.get(i).map_or(Mat4::IDENTITY, NodeTransform::matrix);
+        let m = match self.nodes[i].parent {
+            Some(p) if depth <= self.nodes.len() => self.global_into(p, locals, out, depth + 1) * local,
+            _ => local,
+        };
+        out[i] = Some(m);
+        m
+    }
+
+    /// A skin's joint matrices (joint global times inverse bind), in glTF
+    /// scene space, for the given global node matrices.
+    #[must_use]
+    pub fn joint_matrices(&self, skin: usize, globals: &[Mat4]) -> Vec<Mat4> {
+        let Some(skin) = self.skins.get(skin) else {
+            return Vec::new();
+        };
+        skin.joints
+            .iter()
+            .enumerate()
+            .map(|(j, &node)| {
+                globals.get(node).copied().unwrap_or(Mat4::IDENTITY)
+                    * skin.inverse_binds.get(j).copied().unwrap_or(Mat4::IDENTITY)
+            })
+            .collect()
+    }
+}
+
+/// A primitive's skin, kept when the model is loaded rigged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimitiveSkin {
+    /// Index into [`Skeleton::skins`].
+    pub skin: usize,
+    pub joints: Vec<[u32; 4]>,
+    pub weights: Vec<[f32; 4]>,
 }
 
 fn vec3s(values: &[f32]) -> Vec<[f32; 3]> {
@@ -208,35 +278,64 @@ fn vec3s(values: &[f32]) -> Vec<[f32; 3]> {
 }
 
 impl GltfModel {
-    /// Loads a `.glb`.
+    /// Loads a `.glb` posed at its first animation frame, skinned once.
     pub fn from_glb(bytes: &[u8]) -> Result<Self, GlbError> {
+        Self::load(bytes, true)
+    }
+
+    /// Loads a `.glb` at rest with its skins kept for posing at run time
+    /// (a player model): vertices stay in bind space and each skinned
+    /// primitive carries [`ModelPrimitive::skin`].
+    pub fn from_glb_rigged(bytes: &[u8]) -> Result<Self, GlbError> {
+        Self::load(bytes, false)
+    }
+
+    fn load(bytes: &[u8], pose: bool) -> Result<Self, GlbError> {
         let glb = Glb::parse(bytes)?;
         let doc = &glb.document;
-        let locals = posed_nodes(&glb)?;
-        let globals = global_matrices(&glb, &locals);
+        let locals = node_transforms(&glb, pose)?;
+        let rest = node_transforms(&glb, false)?;
 
-        let mut skins = Vec::new();
+        let mut parents = vec![None; doc.nodes.len()];
+        for (i, n) in doc.nodes.iter().enumerate() {
+            for &c in &n.children {
+                if let Some(p) = parents.get_mut(c) {
+                    *p = Some(i);
+                }
+            }
+        }
+        let mut skeleton = Skeleton {
+            nodes: doc
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| SkeletonNode {
+                    name: n.name.clone().unwrap_or_else(|| format!("node{i}")),
+                    parent: parents[i],
+                    rest: rest[i],
+                })
+                .collect(),
+            skins: Vec::new(),
+        };
         for skin in &doc.skins {
             let inverse_binds = match skin.inverse_bind_matrices {
                 Some(a) => glb
                     .read_floats(a)?
                     .1
                     .chunks_exact(16)
-                    .map(|c| Mat4::from_cols_slice(c))
+                    .map(Mat4::from_cols_slice)
                     .collect(),
                 None => vec![Mat4::IDENTITY; skin.joints.len()],
             };
-            let joints: Vec<Mat4> = skin
-                .joints
-                .iter()
-                .enumerate()
-                .map(|(j, &node)| {
-                    globals.get(node).copied().unwrap_or(Mat4::IDENTITY)
-                        * inverse_binds.get(j).copied().unwrap_or(Mat4::IDENTITY)
-                })
-                .collect();
-            skins.push(joints);
+            skeleton.skins.push(SkinBinding {
+                joints: skin.joints.clone(),
+                inverse_binds,
+            });
         }
+        let globals = skeleton.global_matrices(&locals);
+        let skins: Vec<Vec<Mat4>> = (0..skeleton.skins.len())
+            .map(|s| skeleton.joint_matrices(s, &globals))
+            .collect();
 
         // Babylon loads the scene's nodes depth first, in the scene's order.
         let mut creation = vec![usize::MAX; doc.nodes.len()];
@@ -269,48 +368,70 @@ impl GltfModel {
                 if primitive.mode.unwrap_or(4) != 4 {
                     continue;
                 }
-                let Some(&position) = primitive.attributes.get("POSITION") else {
+                let draco = glb.decode_draco(primitive)?;
+                let read = |name: &str| -> Result<Option<(usize, Vec<f32>)>, GlbError> {
+                    if let Some(d) = &draco
+                        && let Some(a) = d.attributes.get(name)
+                    {
+                        return Ok(Some(a.clone()));
+                    }
+                    match primitive.attributes.get(name) {
+                        Some(&a) => glb.read_floats(a).map(Some),
+                        None => Ok(None),
+                    }
+                };
+                let Some((_, position)) = read("POSITION")? else {
                     continue;
                 };
-                let mut positions = vec3s(&glb.read_floats(position)?.1);
+                let mut positions = vec3s(&position);
                 if positions.is_empty() {
                     continue;
                 }
-                let mut normals = match primitive.attributes.get("NORMAL") {
-                    Some(&a) => vec3s(&glb.read_floats(a)?.1),
+                let mut normals = match read("NORMAL")? {
+                    Some((_, v)) => vec3s(&v),
                     None => vec![[0.0, 1.0, 0.0]; positions.len()],
                 };
-                let uvs = match primitive.attributes.get("TEXCOORD_0") {
-                    Some(&a) => glb.read_floats(a)?.1.chunks_exact(2).map(|c| [c[0], c[1]]).collect(),
+                let uvs = match read("TEXCOORD_0")? {
+                    Some((_, v)) => v.chunks_exact(2).map(|c| [c[0], c[1]]).collect(),
                     None => vec![[0.0, 0.0]; positions.len()],
                 };
-                let indices = match primitive.indices {
-                    Some(a) => glb.read_uints(a)?,
-                    None => (0..positions.len() as u32).collect(),
+                let indices = match (&draco, primitive.indices) {
+                    (Some(d), _) => d.indices.clone(),
+                    (None, Some(a)) => glb.read_uints(a)?,
+                    (None, None) => (0..positions.len() as u32).collect(),
                 };
                 let mut node_matrix = globals[node_index];
-                if let (Some(joints), Some(&ja), Some(&wa)) = (
-                    node.skin.and_then(|s| skins.get(s)),
-                    primitive.attributes.get("JOINTS_0"),
-                    primitive.attributes.get("WEIGHTS_0"),
-                ) {
+                let mut kept_skin = None;
+                if let (Some(skin_index), Some((4, joint_ids)), Some((4, weights))) =
+                    (node.skin, read("JOINTS_0")?, read("WEIGHTS_0")?)
+                    && let Some(joints) = skins.get(skin_index)
+                {
                     node_matrix = Mat4::IDENTITY;
-                    let joint_ids = glb.read_uints(ja)?;
-                    let weights = glb.read_floats(wa)?.1;
-                    for (v, (pos, nor)) in positions.iter_mut().zip(normals.iter_mut()).enumerate() {
-                        let mut skin = Mat4::ZERO;
-                        for k in 0..4 {
-                            let w = weights.get(v * 4 + k).copied().unwrap_or(0.0);
-                            if w == 0.0 {
-                                continue;
+                    if pose {
+                        for (v, (pos, nor)) in positions.iter_mut().zip(normals.iter_mut()).enumerate() {
+                            let mut skin = Mat4::ZERO;
+                            for k in 0..4 {
+                                let w = weights.get(v * 4 + k).copied().unwrap_or(0.0);
+                                if w == 0.0 {
+                                    continue;
+                                }
+                                let j = joint_ids.get(v * 4 + k).copied().unwrap_or(0.0) as usize;
+                                skin += joints.get(j).copied().unwrap_or(Mat4::IDENTITY) * w;
                             }
-                            let j = joint_ids.get(v * 4 + k).copied().unwrap_or(0) as usize;
-                            skin += joints.get(j).copied().unwrap_or(Mat4::IDENTITY) * w;
+                            let p = skin.transform_point3(Vec3::from(*pos));
+                            let n = skin.transform_vector3(Vec3::from(*nor)).normalize_or_zero();
+                            *pos = p.into();
+                            *nor = n.into();
                         }
-                        let p = skin.transform_point3(Vec3::from(*pos));
-                        let n = skin.transform_vector3(Vec3::from(*nor)).normalize_or_zero();
-                        *pos = p.into();
-                        *nor = n.into();
+                    } else {
+                        kept_skin = Some(PrimitiveSkin {
+                            skin: skin_index,
+                            joints: joint_ids
+                                .chunks_exact(4)
+                                .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32])
+                                .collect(),
+                            weights: weights.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect(),
+                        });
                     }
                 }
                 let bounds_center = {
@@ -342,6 +463,7 @@ impl GltfModel {
                     material: primitive.material,
                     bounds_center,
                     creation_order: creation[node_index].saturating_mul(64).saturating_add(p),
+                    skin: kept_skin,
                 });
             }
         }
@@ -410,6 +532,7 @@ impl GltfModel {
             materials,
             images,
             attachment_points,
+            skeleton,
         })
     }
 }
@@ -541,6 +664,25 @@ mod tests {
         assert_eq!(m.metallic, 0.0);
         assert_eq!(m.roughness, 1.0);
         assert_eq!(model.images[0].bytes, b"RIFF\0\0\0\0WEBP");
+    }
+
+    #[test]
+    fn rigged_keeps_the_bind_pose_and_the_skin() {
+        let model = GltfModel::from_glb_rigged(&glb()).unwrap();
+        let p = &model.primitives[0];
+        assert_eq!(p.positions, vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let skin = p.skin.as_ref().unwrap();
+        assert_eq!(skin.skin, 0);
+        assert_eq!(skin.joints[0], [0, 0, 0, 0]);
+        assert_eq!(skin.weights[0], [1.0, 0.0, 0.0, 0.0]);
+        let skeleton = &model.skeleton;
+        assert_eq!(skeleton.find("tag_barrel"), Some(1));
+        assert_eq!(skeleton.nodes[1].parent, Some(0));
+        // At rest the joint is where its inverse bind expects it.
+        assert_eq!(skeleton.nodes[0].rest.translation, Vec3::X);
+        let globals = skeleton.global_matrices(&skeleton.rest());
+        assert_eq!(skeleton.joint_matrices(0, &globals), vec![Mat4::IDENTITY]);
+        assert_eq!(globals[1].transform_point3(Vec3::ZERO), Vec3::new(1.0, 2.0, 0.0));
     }
 
     #[test]

@@ -35,6 +35,9 @@ wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
+# KHR_draco_mesh_compression for the player model (RUST.md 20.7): a pure
+# Rust port of Google's Draco decoder, Apache-2.0, decoding only.
+draco-core = { version = "2.3", default-features = false, features = ["decoder", "point_cloud_decode", "edgebreaker_valence_decode", "legacy_bitstream_decode"] }
 
 [lints]
 workspace = true
