@@ -16,3 +16,24 @@ Ported files, with the Babylon.js source each came from and its version:
     from packages/dev/core/src/Materials/Textures/texture.ts (Texture),
     Babylon.js 9.31.2: getTextureMatrix and _prepareRowForTextureGeneration,
     for the default rotation centre and a rotation about W.
+
+  materials/standard_material.rs, materials/standard.wgsl
+    from packages/dev/core/src/Materials/standardMaterial.ts and
+    fresnelParameters.ts, and the shaders default.vertex.fx,
+    default.fragment.fx, ShadersInclude/lightsFragmentFunctions.fx,
+    fresnelFunction.fx and defaultFragmentAlpha.fx, Babylon.js 9.31.2: the
+    StandardMaterial terms SHAG's procedural pickups use (hemispheric and
+    directional diffuse and specular, emissive colour and texture, emissive
+    and opacity Fresnel, diffuse alpha, RGB opacity, ambient and image
+    processing contrast), rewritten in WGSL.
+
+  meshes/vertex_data.rs
+    from packages/dev/core/src/Meshes/mesh.vertexData.ts (ComputeNormals,
+    transform, merge) and mesh.ts (MergeMeshes, bakeTransformIntoVertices,
+    convertToFlatShadedMesh), Babylon.js 9.31.2.
+
+  meshes/mesh_builder.rs
+    from packages/dev/core/src/Meshes/Builders/boxBuilder.ts,
+    sphereBuilder.ts, torusBuilder.ts, cylinderBuilder.ts and
+    planeBuilder.ts, Babylon.js 9.31.2: the vertex data for the options
+    SHAG's procedural pickups pass.

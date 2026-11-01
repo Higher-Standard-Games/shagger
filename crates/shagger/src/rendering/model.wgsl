@@ -24,6 +24,8 @@ struct Light {
     diffuse: vec4f,
     // Hemispheric ground colour times intensity.
     ground: vec4f,
+    // Specular colour times intensity (StandardMaterial only).
+    specular: vec4f,
 };
 
 struct Globals {
@@ -42,6 +44,9 @@ struct Draw {
     outline: vec4f,
     // x: the draw's first joint in the palette.
     skin: vec4u,
+    // StandardMaterial only: emissive override and texture offset.
+    emissive: vec4f,
+    uv: vec4f,
 };
 
 struct Material {

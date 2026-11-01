@@ -3,4 +3,8 @@
 
 //! Babylon's `Materials` folder, the parts SHAGGER needs.
 
+pub mod standard_material;
 pub mod texture;
+
+/// `StandardMaterial`'s shader (`standard.wgsl`), as source.
+pub const STANDARD_WGSL: &str = include_str!("standard.wgsl");

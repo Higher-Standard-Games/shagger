@@ -34,6 +34,8 @@ use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
+use crate::babylon::materials::STANDARD_WGSL;
+use crate::babylon::materials::standard_material::StandardMaterialParams;
 use crate::loader::model::gltf_model::{AlphaMode, GltfModel, ModelMaterial, ModelPrimitive};
 use crate::loader::texture::decode_image;
 
@@ -47,6 +49,9 @@ pub enum ModelMaterialMode {
     AddedLight,
     /// Lit, alpha blended at this alpha, both sides (a `_glass` layer).
     Glass(f32),
+    /// A Babylon `StandardMaterial` (`standard.wgsl`), with the material's
+    /// base colour image as its one texture.
+    Standard(StandardMaterialParams),
 }
 
 /// A light as Babylon hands it to the shader.
@@ -56,6 +61,9 @@ pub enum ModelLight {
         /// Up, as set; normalized when used.
         direction: Vec3,
         diffuse: Vec3,
+        /// What `StandardMaterial` takes for highlights; PBR models do not
+        /// use it yet.
+        specular: Vec3,
         ground: Vec3,
         intensity: f32,
     },
@@ -63,6 +71,7 @@ pub enum ModelLight {
         /// The way the light travels.
         direction: Vec3,
         diffuse: Vec3,
+        specular: Vec3,
         intensity: f32,
     },
 }
@@ -103,6 +112,11 @@ pub struct ModelDraw {
     pub world: Mat4,
     /// Replaces the material's albedo colour.
     pub tint: Option<Vec3>,
+    /// Replaces a standard material's emissive colour (a pulse).
+    pub emissive: Option<Vec3>,
+    /// Offsets a standard material's texture coordinates (`uOffset`,
+    /// `vOffset`).
+    pub uv_offset: Option<[f32; 2]>,
     /// The primitive's first joint in the frame's palette (a rigged
     /// primitive must have one; it is not drawn without).
     pub skin: Option<u32>,
@@ -118,6 +132,8 @@ impl ModelDraw {
             primitive,
             world,
             tint: None,
+            emissive: None,
+            uv_offset: None,
             skin: None,
             outline: None,
         }
@@ -146,6 +162,8 @@ struct DrawUniform {
     tint: [f32; 4],
     outline: [f32; 4],
     skin: [u32; 4],
+    emissive: [f32; 4],
+    uv: [f32; 4],
 }
 
 #[repr(C)]
@@ -155,6 +173,7 @@ struct LightUniform {
     direction: [f32; 4],
     diffuse: [f32; 4],
     ground: [f32; 4],
+    specular: [f32; 4],
 }
 
 const MAX_LIGHTS: usize = 4;
@@ -181,11 +200,21 @@ const DRAW_STRIDE: u64 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     blend: BlendKind,
-    cull: bool,
+    cull: Cull,
+    depth_write: bool,
+    /// Drawn with `standard.wgsl`.
+    standard: bool,
     /// Clockwise faces front: the world matrix mirrors.
     mirrored: bool,
     skinned: bool,
     pass: PassKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Cull {
+    None,
+    Back,
+    Front,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -218,6 +247,10 @@ struct GpuMaterial {
     bind_group: wgpu::BindGroup,
     blend: BlendKind,
     two_sided: bool,
+    standard: bool,
+    depth_write: bool,
+    /// Back faces, then front faces (`separateCullingPass`).
+    separate_culling: bool,
 }
 
 struct GpuModel {
@@ -228,6 +261,7 @@ struct GpuModel {
 pub struct ModelRenderer {
     color_format: wgpu::TextureFormat,
     shader: wgpu::ShaderModule,
+    standard_shader: wgpu::ShaderModule,
     layout: wgpu::PipelineLayout,
     material_layout: wgpu::BindGroupLayout,
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
@@ -336,6 +370,10 @@ impl ModelRenderer {
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::include_wgsl!("model.wgsl"));
+        let standard_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("standard.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(STANDARD_WGSL.into()),
+        });
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("model globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -380,6 +418,7 @@ impl ModelRenderer {
         Self {
             color_format,
             shader,
+            standard_shader,
             layout,
             material_layout,
             pipelines: HashMap::new(),
@@ -462,6 +501,26 @@ impl ModelRenderer {
                 views.insert(image, texture.create_view(&wgpu::TextureViewDescriptor::default()));
             }
             let view = m.base_color_image.and_then(|i| views.get(&i)).unwrap_or(&self.white);
+            if let ModelMaterialMode::Standard(params) = mode {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("standard material"),
+                    contents: bytemuck::bytes_of(&params.uniform()),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                materials.push(GpuMaterial {
+                    bind_group: self.material_bind_group(gpu, view, &buffer),
+                    blend: if params.blends() {
+                        BlendKind::Alpha
+                    } else {
+                        BlendKind::Opaque
+                    },
+                    two_sided: !params.back_face_culling,
+                    standard: true,
+                    depth_write: !params.disable_depth_write && !params.blends(),
+                    separate_culling: params.separate_culling_pass && !params.back_face_culling,
+                });
+                continue;
+            }
             let (blend, two_sided, alpha, unlit) = match mode {
                 ModelMaterialMode::Lit => (
                     if m.alpha_mode == AlphaMode::Blend {
@@ -475,6 +534,7 @@ impl ModelRenderer {
                 ),
                 ModelMaterialMode::AddedLight => (BlendKind::Add, true, 1.0, 1.0),
                 ModelMaterialMode::Glass(alpha) => (BlendKind::Alpha, true, alpha, 0.0),
+                ModelMaterialMode::Standard(_) => unreachable!("handled above"),
             };
             let uniform = MaterialUniform {
                 base_color: m.base_color,
@@ -485,28 +545,13 @@ impl ModelRenderer {
                 contents: bytemuck::bytes_of(&uniform),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("model material"),
-                layout: &self.material_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffer.as_entire_binding(),
-                    },
-                ],
-            });
             materials.push(GpuMaterial {
-                bind_group,
+                bind_group: self.material_bind_group(gpu, view, &buffer),
                 blend,
                 two_sided,
+                standard: false,
+                depth_write: blend == BlendKind::Opaque,
+                separate_culling: false,
             });
         }
         let primitives = model
@@ -552,6 +597,27 @@ impl ModelRenderer {
         ModelHandle(self.models.len() - 1)
     }
 
+    fn material_bind_group(&self, gpu: &Gpu, view: &wgpu::TextureView, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model material"),
+            layout: &self.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
     fn pipeline(&mut self, gpu: &Gpu, key: PipelineKey) {
         if self.pipelines.contains_key(&key) {
             return;
@@ -595,7 +661,11 @@ impl ModelRenderer {
             label: Some("model"),
             layout: Some(&self.layout),
             vertex: wgpu::VertexState {
-                module: &self.shader,
+                module: if key.standard {
+                    &self.standard_shader
+                } else {
+                    &self.shader
+                },
                 entry_point: Some(vertex_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &buffers[..if key.skinned { 2 } else { 1 }],
@@ -610,13 +680,17 @@ impl ModelRenderer {
                 } else {
                     wgpu::FrontFace::Cw
                 },
-                cull_mode: key.cull.then_some(wgpu::Face::Back),
+                cull_mode: match key.cull {
+                    Cull::None => None,
+                    Cull::Back => Some(wgpu::Face::Back),
+                    Cull::Front => Some(wgpu::Face::Front),
+                },
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(match key.pass {
-                    PassKind::Color => key.blend == BlendKind::Opaque,
+                    PassKind::Color => key.depth_write,
                     PassKind::Outline => false,
                     PassKind::OutlineDepth => true,
                 }),
@@ -635,7 +709,11 @@ impl ModelRenderer {
             }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &self.shader,
+                module: if key.standard {
+                    &self.standard_shader
+                } else {
+                    &self.shader
+                },
                 entry_point: Some(if outline { "fs_outline" } else { "fs_main" }),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -664,6 +742,7 @@ impl ModelRenderer {
                 ModelLight::Hemispheric {
                     direction,
                     diffuse,
+                    specular,
                     ground,
                     intensity,
                 } => {
@@ -673,17 +752,20 @@ impl ModelRenderer {
                         direction: [d.x, d.y, d.z, 0.0],
                         diffuse: (diffuse * intensity).extend(1.0).into(),
                         ground: (ground * intensity).extend(1.0).into(),
+                        specular: (specular * intensity).extend(1.0).into(),
                     }
                 }
                 ModelLight::Directional {
                     direction,
                     diffuse,
+                    specular,
                     intensity,
                 } => LightUniform {
                     kind: [2.0, 0.0, 0.0, 0.0],
                     direction: [direction.x, direction.y, direction.z, 1.0],
                     diffuse: (diffuse * intensity).extend(1.0).into(),
                     ground: [0.0; 4],
+                    specular: (specular * intensity).extend(1.0).into(),
                 },
             };
         }
@@ -718,7 +800,9 @@ impl ModelRenderer {
             let material = &model.materials[primitive.material];
             let key = PipelineKey {
                 blend: material.blend,
-                cull: !material.two_sided,
+                cull: if material.two_sided { Cull::None } else { Cull::Back },
+                depth_write: material.depth_write,
+                standard: material.standard,
                 mirrored: draw.world.determinant() < 0.0,
                 skinned,
                 pass: PassKind::Color,
@@ -746,7 +830,21 @@ impl ModelRenderer {
                 }
             } else {
                 let distance = draw.world.transform_point3(primitive.bounds_center).distance(eye);
-                blended.push((*draw, key, distance, primitive.creation_order));
+                if material.separate_culling {
+                    // Back faces first: culling the front ones.
+                    let back = PipelineKey {
+                        cull: Cull::Front,
+                        ..key
+                    };
+                    blended.push((*draw, back, distance, primitive.creation_order));
+                    let front = PipelineKey {
+                        cull: Cull::Back,
+                        ..key
+                    };
+                    blended.push((*draw, front, distance, primitive.creation_order));
+                } else {
+                    blended.push((*draw, key, distance, primitive.creation_order));
+                }
             }
         }
         blended.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.3.cmp(&b.3)));
@@ -795,6 +893,8 @@ impl ModelRenderer {
                 tint: draw.tint.map_or([0.0; 4], |t| t.extend(1.0).into()),
                 outline: outline.color.extend(outline.width).into(),
                 skin: [draw.skin.unwrap_or(0), 0, 0, 0],
+                emissive: draw.emissive.map_or([0.0; 4], |e| e.extend(1.0).into()),
+                uv: draw.uv_offset.map_or([0.0; 4], |[u, v]| [u, v, 0.0, 0.0]),
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }
