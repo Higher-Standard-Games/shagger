@@ -8,7 +8,7 @@
 // own simulation, so wash-fps must be checked out at <shag>/src/games/fps (the
 // SHAG submodule, or `git -C <wash-fps> archive <pinned commit> | tar -x -C ...`).
 // Set WASHOI_MAPS to a folder of the shipped BSPs to also regenerate the
-// movement vectors on real maps.
+// movement and render vectors on real maps.
 // Needs Node 22.18+ (TypeScript type stripping). Writes into crates/*/tests/golden/.
 // Commit the output together with the SHAG commit it was made from.
 import { execFileSync } from "node:child_process";
@@ -172,8 +172,13 @@ if (process.env.WASHOI_MAPS) {
     ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "movement_maps.mjs", shag, resolve(washoi, "tests/golden"), shagCommit, resolve(process.env.WASHOI_MAPS)],
     { cwd: import.meta.dirname, stdio: "inherit" },
   );
+  execFileSync(
+    process.execPath,
+    ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "render_maps.mjs", shag, resolve(washoi, "tests/golden"), shagCommit, resolve(process.env.WASHOI_MAPS)],
+    { cwd: import.meta.dirname, stdio: "inherit" },
+  );
 } else {
-  console.log("WASHOI_MAPS not set: movement_maps.json left as it is");
+  console.log("WASHOI_MAPS not set: movement_maps.json and render_maps.json left as they are");
 }
 
 console.log(`wrote ${round.length} round, ${hypot.length} hypot and ${texts.length} pk3IndexHash vectors`);
