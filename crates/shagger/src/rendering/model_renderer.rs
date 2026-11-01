@@ -525,7 +525,9 @@ impl ModelRenderer {
                     },
                     two_sided: !params.back_face_culling,
                     standard: true,
-                    depth_write: !params.disable_depth_write && !params.blends(),
+                    // Babylon writes depth for blended meshes too, unless
+                    // the material says not to.
+                    depth_write: !params.disable_depth_write,
                     separate_culling: params.separate_culling_pass && !params.back_face_culling,
                 });
                 continue;
@@ -581,7 +583,8 @@ impl ModelRenderer {
                     vertex: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("model vertices"),
                         contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
+                        // Effects (trails) rewrite theirs each frame.
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     }),
                     skin: skin_vertices(p).map(|skin| {
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -604,6 +607,46 @@ impl ModelRenderer {
             .collect();
         self.models.push(GpuModel { primitives, materials });
         ModelHandle(self.models.len() - 1)
+    }
+
+    /// Rewrites one primitive's vertices (an effect's geometry that moves
+    /// each frame), keeping its count, and recentres its bounds, which
+    /// order it among the transparent draws (`refreshBoundingInfo`).
+    pub fn update_vertices(
+        &mut self,
+        gpu: &Gpu,
+        model: ModelHandle,
+        primitive: usize,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+    ) {
+        let Some(p) = self
+            .models
+            .get_mut(model.0)
+            .and_then(|m| m.primitives.get_mut(primitive))
+        else {
+            return;
+        };
+        let vertices: Vec<ModelVertex> = positions
+            .iter()
+            .enumerate()
+            .map(|(i, &position)| ModelVertex {
+                position,
+                normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            })
+            .collect();
+        let bytes: &[u8] = bytemuck::cast_slice(&vertices);
+        if bytes.len() as u64 <= p.vertex.size() {
+            gpu.queue.write_buffer(&p.vertex, 0, bytes);
+        }
+        let (min, max) = positions
+            .iter()
+            .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
+                (lo.min(Vec3::from(*v)), hi.max(Vec3::from(*v)))
+            });
+        p.bounds_center = (min + max) * 0.5;
     }
 
     fn material_bind_group(&self, gpu: &Gpu, view: &wgpu::TextureView, buffer: &wgpu::Buffer) -> wgpu::BindGroup {

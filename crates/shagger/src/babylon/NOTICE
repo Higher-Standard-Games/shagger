@@ -38,3 +38,9 @@ Ported files, with the Babylon.js source each came from and its version:
     sphereBuilder.ts, torusBuilder.ts, cylinderBuilder.ts and
     planeBuilder.ts, Babylon.js 9.31.2: the vertex data for the options
     SHAG's procedural pickups pass.
+
+  meshes/ribbon_builder.rs
+    from packages/dev/core/src/Meshes/Builders/ribbonBuilder.ts
+    (CreateRibbonVertexData) and mesh.vertexData.ts (_ComputeSides),
+    Babylon.js 9.31.2: two open paths, double sided, as SHAG's projectile
+    trails build them.
