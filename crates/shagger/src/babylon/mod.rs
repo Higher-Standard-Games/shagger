@@ -12,8 +12,10 @@
 //! of SHAGGER may call into it but never copies from it.
 //!
 //! So far: the `Vector3` arithmetic the collision code runs through, whose
-//! operation order the simulation must reproduce bit for bit. The renderer
+//! operation order the simulation must reproduce bit for bit, and the
+//! texture matrix shader animation moves UVs with. The renderer
 //! milestone adds StandardMaterial's lighting terms, EXP fog and image
 //! processing (RUST.md 21.9).
 
+pub mod materials;
 pub mod maths;

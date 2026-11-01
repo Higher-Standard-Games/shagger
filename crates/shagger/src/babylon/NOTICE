@@ -11,3 +11,8 @@ Ported files, with the Babylon.js source each came from and its version:
     from packages/dev/core/src/Maths/math.vector.ts (Vector3), Babylon.js 9.31.2:
     the arithmetic of add, subtract, scale, dot, cross, length, normalize and
     distance, kept in Babylon's operation order.
+
+  materials/texture.rs
+    from packages/dev/core/src/Materials/Textures/texture.ts (Texture),
+    Babylon.js 9.31.2: getTextureMatrix and _prepareRowForTextureGeneration,
+    for the default rotation centre and a rotation about W.

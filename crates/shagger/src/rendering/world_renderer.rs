@@ -5,22 +5,34 @@
 //! ([`super::world_materials`]). Opaque passes draw first, then blended ones
 //! in batch and pass order (Babylon's transparent queue, unsorted).
 //!
-//! Not yet drawn as SHAG draws them: tcMod/rgbGen animation, environment and
-//! `$cubemap` reflections (a reflection pass is left out, an environment
-//! material draws its base image), normal, gloss and glow maps, and the sky.
+//! A pass whose primary stage animates (`tcMod`, `rgbGen`/`alphaGen` waves,
+//! `animMap`) is stepped by [`WorldRenderer::animate`] as SHAG's
+//! `ShaderAnimationSystem` steps it ([`q3_stage_evaluation`]), its UVs moved
+//! by Babylon's texture matrix. `rgbGen const`, `alphaGen const` and
+//! distance ramps (`Q3StageColorPlugin`, `Q3DistanceRampPlugin`) apply to
+//! every pass.
+//!
+//! Not yet drawn as SHAG draws them: environment and `$cubemap` reflections
+//! (a reflection pass is left out, an environment material draws its base
+//! image), normal, gloss and glow maps, and the sky.
 
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
 use super::world_geometry::{WorldGeometry, WorldVertex};
-use super::world_materials::{Blend, MissingImage, PassState, build_diffuse_candidates, missing_image};
+use super::world_materials::{
+    Blend, MissingImage, PassState, add_texture_prefixes, build_diffuse_candidates, missing_image,
+};
+use crate::babylon::materials::texture::get_texture_matrix;
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
+use crate::loader::shader::q3_shader_types::{AlphaGenType, DistanceRamp, RgbGenType, TcMod, WaveFunc};
+use crate::loader::shader::q3_stage_evaluation::{TcState, create_tc_state, evaluate_wave_func, step_tc_mods_into};
 
 /// The depth buffer format.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -31,6 +43,8 @@ struct Globals {
     view_proj: [[f32; 4]; 4],
     lighting: [f32; 4],
     ambient: [f32; 4],
+    /// The camera position (distance ramps).
+    eye: [f32; 4],
 }
 
 /// One pass's material uniform.
@@ -41,6 +55,54 @@ struct MaterialUniform {
     /// image, z: lighting (0 baked, 1 full bright, 2 vertex colour),
     /// w: 1 to multiply alpha by the vertex alpha.
     params: [f32; 4],
+    /// The texture matrix: U row (xy) and V row (zw).
+    uv_rows: [f32; 4],
+    /// The texture matrix origin (xy).
+    uv_origin: [f32; 4],
+    /// Colour and alpha multipliers (`rgbGen`/`alphaGen` const and waves).
+    color: [f32; 4],
+    /// Distance ramps (from, to, near, far); from = to = 1 when absent.
+    ramp_rgb: [f32; 4],
+    ramp_alpha: [f32; 4],
+}
+
+impl MaterialUniform {
+    fn set_tc_state(&mut self, state: &TcState) {
+        let m = get_texture_matrix(
+            state.u_offset,
+            state.v_offset,
+            state.u_scale,
+            state.v_scale,
+            state.rotation,
+        );
+        self.uv_rows = [
+            m.u_row[0] as f32,
+            m.u_row[1] as f32,
+            m.v_row[0] as f32,
+            m.v_row[1] as f32,
+        ];
+        self.uv_origin = [m.origin[0] as f32, m.origin[1] as f32, 0.0, 0.0];
+    }
+}
+
+fn ramp(ramp: Option<DistanceRamp>) -> [f32; 4] {
+    ramp.map_or([1.0, 1.0, 0.0, 1.0], |r| {
+        [r.from as f32, r.to as f32, r.near as f32, r.far as f32]
+    })
+}
+
+/// What `ShaderAnimationSystem.registerMaterial` steps for a pass.
+struct PassAnimation {
+    pass: usize,
+    tc_mods: Vec<TcMod>,
+    tc_state: TcState,
+    rgb_wave: Option<WaveFunc>,
+    alpha_wave: Option<WaveFunc>,
+    /// `animMap`: the frames' bind groups and their rate.
+    frames: Vec<usize>,
+    frequency: f64,
+    /// The colour the waves scale (`baseColor`, with any `rgbGen const`).
+    base_color: [f32; 4],
 }
 
 /// A decoded RGBA8 image.
@@ -102,6 +164,8 @@ struct PipelineKey {
 struct DrawPass {
     pipeline: usize,
     bind_group: usize,
+    uniform: MaterialUniform,
+    buffer: wgpu::Buffer,
     first_index: u32,
     index_count: u32,
 }
@@ -115,6 +179,11 @@ pub struct WorldRenderer {
     texture_count: usize,
     missing: Vec<String>,
     passes: Vec<DrawPass>,
+    animations: Vec<PassAnimation>,
+    /// `ShaderAnimationSystem.totalTime`.
+    total_time: f64,
+    /// `Math.random` for `noise` waves (xorshift).
+    noise_seed: u64,
     pipelines: Vec<wgpu::RenderPipeline>,
     lighting: [f32; 4],
     ambient: [f32; 4],
@@ -294,7 +363,7 @@ impl WorldRenderer {
                 sampler_entry(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -350,23 +419,44 @@ impl WorldRenderer {
                 let state = PassState::of(props);
                 let candidates = build_diffuse_candidates(&batch.texture_name, props);
                 let fallback = missing_image(props);
-                let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
-                let view = views.entry(key).or_insert_with(|| {
-                    let image = candidates.iter().find_map(|c| textures(c)).unwrap_or_else(|| {
-                        if fallback == MissingImage::Untextured {
-                            missing.push(batch.texture_name.clone());
-                        }
-                        match fallback {
-                            MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
-                            MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
-                            MissingImage::White | MissingImage::Untextured => Rgba8Image::white(),
-                        }
-                    });
-                    upload_texture(gpu, &batch.texture_name, &image)
-                        .create_view(&wgpu::TextureViewDescriptor::default())
-                });
+                let mut view_for = |candidates: &[String], fallback: Option<MissingImage>| -> Option<String> {
+                    let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
+                    if !views.contains_key(&key) {
+                        let image = match candidates.iter().find_map(|c| textures(c)) {
+                            Some(image) => image,
+                            None => match fallback? {
+                                MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
+                                MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
+                                MissingImage::White => Rgba8Image::white(),
+                                MissingImage::Untextured => {
+                                    missing.push(batch.texture_name.clone());
+                                    Rgba8Image::white()
+                                }
+                            },
+                        };
+                        let view = upload_texture(gpu, &batch.texture_name, &image)
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        views.insert(key.clone(), view);
+                    }
+                    Some(key)
+                };
+                let base_view = view_for(&candidates, Some(fallback)).expect("a fallback always gives an image");
+                let stage = props.primary_stage.as_ref();
+                // animMap frames (missing ones left out, as SHAG filters them).
+                let frame_views: Vec<String> = stage
+                    .filter(|_| props.needs_animation)
+                    .and_then(|s| s.anim_map.as_ref())
+                    .map(|a| {
+                        a.frames
+                            .iter()
+                            .filter_map(|f| view_for(&add_texture_prefixes(f), None))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 let lighting = if state.unlit {
-                    1.0
+                    // Q3StageColorPlugin's vertex variant, for additive vertex-coloured stages.
+                    if props.uses_vertex_rgb == Some(true) { 2.0 } else { 1.0 }
                 } else if props.uses_vertex_rgb == Some(true) {
                     2.0
                 } else if props.use_lightmap {
@@ -374,7 +464,17 @@ impl WorldRenderer {
                 } else {
                     1.0
                 };
-                let uniform = MaterialUniform {
+                let rgb_const = props
+                    .rgb_gen
+                    .filter(|g| g.kind == RgbGenType::Const)
+                    .and_then(|g| g.color)
+                    .map_or([1.0; 3], |c| c.map(|v| v as f32));
+                let alpha_const = stage
+                    .and_then(|s| s.alpha_gen)
+                    .filter(|g| g.kind == AlphaGenType::Const)
+                    .map_or(1.0, |g| g.value.unwrap_or(1.0) as f32);
+                let base_color = [rgb_const[0], rgb_const[1], rgb_const[2], alpha_const];
+                let mut uniform = MaterialUniform {
                     params: [
                         state.alpha_cutoff.unwrap_or(-1.0),
                         if state.texture_alpha { 1.0 } else { 0.0 },
@@ -385,30 +485,63 @@ impl WorldRenderer {
                             0.0
                         },
                     ],
+                    uv_rows: [1.0, 0.0, 0.0, 1.0],
+                    uv_origin: [0.0; 4],
+                    color: base_color,
+                    ramp_rgb: ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
+                    ramp_alpha: ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
                 };
-                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("world material"),
-                    contents: bytemuck::bytes_of(&uniform),
-                    usage: wgpu::BufferUsages::UNIFORM,
+                    size: std::mem::size_of::<MaterialUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
                 });
-                texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&batch.texture_name),
-                    layout: &texture_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&base_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: buffer.as_entire_binding(),
-                        },
-                    ],
-                }));
+                let mut bind_group_for = |key: &str| {
+                    texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&batch.texture_name),
+                        layout: &texture_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&views[key]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&base_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: buffer.as_entire_binding(),
+                            },
+                        ],
+                    }));
+                    texture_bind_groups.len() - 1
+                };
+                let bind_group = bind_group_for(&base_view);
+                let frames: Vec<usize> = frame_views.iter().map(|k| bind_group_for(k)).collect();
+                let animation = stage.filter(|_| props.needs_animation).map(|stage| {
+                    let tc_mods = stage.tc_mod.clone().unwrap_or_default();
+                    let tc_state = create_tc_state(&tc_mods);
+                    uniform.set_tc_state(&tc_state);
+                    PassAnimation {
+                        pass: 0,
+                        tc_mods,
+                        tc_state,
+                        rgb_wave: stage
+                            .rgb_gen
+                            .filter(|g| g.kind == RgbGenType::Wave)
+                            .and_then(|g| g.wave),
+                        alpha_wave: stage
+                            .alpha_gen
+                            .filter(|g| g.kind == AlphaGenType::Wave)
+                            .and_then(|g| g.wave),
+                        frames,
+                        frequency: stage.anim_map.as_ref().map_or(0.0, |a| a.frequency),
+                        base_color,
+                    }
+                });
+                gpu.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
                 let key = PipelineKey {
                     two_sided: batch.two_sided,
                     blend: state.blend,
@@ -421,20 +554,29 @@ impl WorldRenderer {
                 });
                 let pass = DrawPass {
                     pipeline,
-                    bind_group: texture_bind_groups.len() - 1,
+                    bind_group,
+                    uniform,
+                    buffer,
                     first_index: batch.first_index,
                     index_count: batch.index_count,
                 };
                 if state.is_blended() {
-                    blended.push(pass);
+                    blended.push((pass, animation));
                 } else {
-                    opaque.push(pass);
+                    opaque.push((pass, animation));
                 }
             }
         }
         let texture_count = views.len();
-        let mut passes = opaque;
-        passes.extend(blended);
+        let mut passes = Vec::new();
+        let mut animations = Vec::new();
+        for (pass, animation) in opaque.into_iter().chain(blended) {
+            if let Some(mut animation) = animation {
+                animation.pass = passes.len();
+                animations.push(animation);
+            }
+            passes.push(pass);
+        }
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("world.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -454,7 +596,8 @@ impl WorldRenderer {
                         array_stride: std::mem::size_of::<WorldVertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32
+                            0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32,
+                            6 => Float32x4, 7 => Float32x4, 8 => Float32x4
                         ],
                     })],
                 },
@@ -520,6 +663,9 @@ impl WorldRenderer {
             texture_count,
             missing,
             passes,
+            animations,
+            total_time: 0.0,
+            noise_seed: 0x9e37_79b9_7f4a_7c15,
             pipelines,
             lighting: [profile.gain as f32, if stride == 2 { 1.0 } else { 0.0 }, 0.0, 0.0],
             ambient: [
@@ -549,12 +695,64 @@ impl WorldRenderer {
         self.passes.len()
     }
 
+    /// How many passes animate.
+    #[must_use]
+    pub fn animated_pass_count(&self) -> usize {
+        self.animations.len()
+    }
+
+    /// Advances shader animation by `delta_seconds`, as
+    /// `ShaderAnimationSystem.update` does each frame: tcMods stepped,
+    /// waves sampled at the total time, `animMap` frames chosen.
+    pub fn animate(&mut self, gpu: &Gpu, delta_seconds: f64) {
+        self.total_time += delta_seconds;
+        let total = self.total_time;
+        let seed = &mut self.noise_seed;
+        let mut rng = move || {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            (*seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for animation in &mut self.animations {
+            let pass = &mut self.passes[animation.pass];
+            if !animation.frames.is_empty() {
+                let index = ((total * animation.frequency).floor() as usize) % animation.frames.len();
+                pass.bind_group = animation.frames[index];
+            }
+            if !animation.tc_mods.is_empty() {
+                step_tc_mods_into(
+                    &mut animation.tc_state,
+                    &animation.tc_mods,
+                    delta_seconds,
+                    total,
+                    &mut rng,
+                );
+                pass.uniform.set_tc_state(&animation.tc_state);
+            }
+            let mut color = animation.base_color;
+            if let Some(wave) = &animation.rgb_wave {
+                let value = evaluate_wave_func(wave, total, &mut rng).clamp(0.0, 1.0) as f32;
+                for c in &mut color[..3] {
+                    *c *= value;
+                }
+            }
+            if let Some(wave) = &animation.alpha_wave {
+                color[3] = evaluate_wave_func(wave, total, &mut rng).clamp(0.0, 1.0) as f32;
+            }
+            pass.uniform.color = color;
+            gpu.queue
+                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+        }
+    }
+
     /// Writes this frame's camera.
-    pub fn prepare(&self, gpu: &Gpu, view_proj: Mat4) {
+    pub fn prepare(&self, gpu: &Gpu, view_proj: Mat4, eye: Vec3) {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             lighting: self.lighting,
             ambient: self.ambient,
+            eye: [eye.x, eye.y, eye.z, 0.0],
         };
         gpu.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));

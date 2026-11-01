@@ -3,3 +3,4 @@
 pub mod q3_shader_parser;
 pub mod q3_shader_registry;
 pub mod q3_shader_types;
+pub mod q3_stage_evaluation;

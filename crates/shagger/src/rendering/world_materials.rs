@@ -16,8 +16,9 @@ fn is_special_texture_token(path: &str) -> bool {
     path.starts_with('$')
 }
 
-/// `addTexturePrefixes` (the builder's own, which drops special tokens).
-fn add_texture_prefixes(path: &str) -> Vec<String> {
+/// `addTexturePrefixes` (the builder's own, which drops special tokens): the
+/// candidates for a path a stage names, such as an `animMap` frame.
+pub fn add_texture_prefixes(path: &str) -> Vec<String> {
     let normalized = normalize_texture_path(path);
     if is_special_texture_token(&normalized) {
         return Vec::new();
