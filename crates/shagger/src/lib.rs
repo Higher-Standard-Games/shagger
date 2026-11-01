@@ -9,6 +9,7 @@
 
 pub mod babylon;
 pub mod loader;
+pub mod lobby;
 pub mod network;
 pub mod physics;
 

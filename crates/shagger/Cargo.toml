@@ -14,6 +14,9 @@ shagger_shared.workspace = true
 # The game server and lobby connections (RUST.md 4.1): WebSocket over rustls,
 # trusting the Mozilla roots bundled by webpki-roots, on a tokio runtime that
 # runs on the network thread.
+# Lobby messages are JSON text frames (RUST.md 4.10).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
