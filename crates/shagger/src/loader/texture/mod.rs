@@ -1,5 +1,6 @@
 //! Textures (SHAG `src/engine/loader/texture`).
 
+pub mod ktx1_loader;
 pub mod texture_extensions;
 
 use super::pk3::pk3_loader::Pk3Loader;
@@ -17,17 +18,13 @@ pub struct DecodedTexture {
 
 /// The file behind a texture name, tried in `resolveAndLoadTexture`'s order
 /// (see [`texture_candidates`]), decoded by its content rather than its
-/// extension, as `PK3TextureLoader` sniffs magic bytes. KTX (ETC1) is not
-/// decoded natively (RUST.md 20.6), so it only counts when nothing else is
-/// there, and then gives `None`.
+/// extension, as `PK3TextureLoader` sniffs magic bytes. KTX comes last, as
+/// it does there, and is decoded on the CPU ([`ktx1_loader`]).
 #[must_use]
 pub fn resolve_and_load_texture(pk3: &mut Pk3Loader, base_path: &str) -> Option<DecodedTexture> {
     for candidate in texture_candidates(base_path) {
         if !pk3.has_file(&candidate) {
             continue;
-        }
-        if candidate.to_lowercase().ends_with(".ktx") {
-            return None;
         }
         let bytes = pk3.get_file(&candidate)?;
         let decoded = decode_image(&candidate, &bytes)?;
@@ -39,10 +36,20 @@ pub fn resolve_and_load_texture(pk3: &mut Pk3Loader, base_path: &str) -> Option<
     None
 }
 
-/// Decodes WebP, TGA, PNG or JPEG bytes. TGA has no magic number, so it is
-/// tried by name when the content is not recognized.
+/// Decodes KTX, WebP, TGA, PNG or JPEG bytes. TGA has no magic number, so it
+/// is tried by name when the content is not recognized.
 #[must_use]
 pub fn decode_image(name: &str, bytes: &[u8]) -> Option<DecodedTexture> {
+    if bytes.starts_with(&[0xab, 0x4b, 0x54, 0x58]) {
+        let ktx = ktx1_loader::parse_ktx1(bytes).ok()?;
+        let (width, height, pixels) = ktx1_loader::ktx1_rgba(&ktx)?;
+        return Some(DecodedTexture {
+            path: name.to_owned(),
+            width,
+            height,
+            pixels,
+        });
+    }
     let format = image::guess_format(bytes)
         .ok()
         .or_else(|| name.to_lowercase().ends_with(".tga").then_some(image::ImageFormat::Tga))?;

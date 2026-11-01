@@ -187,8 +187,13 @@ if (process.env.WASHOI_MAPS) {
     ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "shader_materials.mjs", shag, resolve(washoi, "tests/golden"), shagCommit, resolve(process.env.WASHOI_MAPS)],
     { cwd: import.meta.dirname, stdio: "inherit" },
   );
+  execFileSync(
+    process.execPath,
+    ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "ktx.mjs", shag, resolve(washoi, "tests/golden"), shagCommit, resolve(process.env.WASHOI_MAPS, "pk3")],
+    { cwd: import.meta.dirname, stdio: "inherit" },
+  );
 } else {
-  console.log("WASHOI_MAPS not set: movement_maps.json, render_maps.json, shaders.json and shader_materials.json left as they are");
+  console.log("WASHOI_MAPS not set: movement_maps.json, render_maps.json, shaders.json, shader_materials.json and ktx.json left as they are");
 }
 
 console.log(`wrote ${round.length} round, ${hypot.length} hypot and ${texts.length} pk3IndexHash vectors`);
