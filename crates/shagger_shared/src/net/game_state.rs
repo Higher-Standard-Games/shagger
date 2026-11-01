@@ -74,12 +74,7 @@ impl<T> OrderedMap<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Vec3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
+pub use crate::server::simulation::types::Vec3;
 
 /// `transform`: position, and rotation as `{ x: pitch, y: yaw, z: 0, w: 1 }`.
 #[derive(Debug, Clone, Copy, PartialEq)]

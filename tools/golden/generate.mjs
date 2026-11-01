@@ -121,4 +121,11 @@ execFileSync(
   { cwd: import.meta.dirname, stdio: "inherit" },
 );
 
+// --- Collision (imports @babylonjs/core: SHAG needs its node_modules) -------------
+execFileSync(
+  process.execPath,
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "collision.mjs", shag, resolve(root, "crates/shagger/tests/golden"), shagCommit],
+  { cwd: import.meta.dirname, stdio: "inherit" },
+);
+
 console.log(`wrote ${round.length} round, ${hypot.length} hypot and ${texts.length} pk3IndexHash vectors`);

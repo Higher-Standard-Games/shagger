@@ -259,9 +259,61 @@ fn radix_value(digits: &str, radix: u32) -> f64 {
     m * 2f64.powi(exponent)
 }
 
+/// `Math.max(a, b)`: NaN if either is NaN, and +0 above -0.
+#[must_use]
+pub fn js_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a == 0.0 && a.is_sign_negative() { b } else { a }
+    } else if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `Math.min(a, b)`: NaN if either is NaN, and -0 below +0.
+#[must_use]
+pub fn js_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a == 0.0 && a.is_sign_negative() { a } else { b }
+    } else if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `Math.sign(x)`: -1, 1, or x itself for ±0 and NaN.
+#[must_use]
+pub fn js_sign(x: f64) -> f64 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        x
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn min_max_follow_math_min_max() {
+        assert!(js_max(-0.0, 0.0).is_sign_positive());
+        assert!(js_max(0.0, -0.0).is_sign_positive());
+        assert!(js_min(0.0, -0.0).is_sign_negative());
+        assert!(js_min(-0.0, 0.0).is_sign_negative());
+        assert!(js_max(f64::NAN, 1.0).is_nan());
+        assert!(js_min(1.0, f64::NAN).is_nan());
+        assert_eq!(js_max(1.0, 2.0), 2.0);
+        assert!(js_sign(-0.0).is_sign_negative());
+    }
 
     #[test]
     fn round_ties_go_up() {

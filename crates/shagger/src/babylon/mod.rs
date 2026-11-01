@@ -11,6 +11,9 @@
 //! Babylon file and version it came from, and is listed in `NOTICE`. The rest
 //! of SHAGGER may call into it but never copies from it.
 //!
-//! Empty for now. The first ports are planned for the renderer milestone:
-//! StandardMaterial's lighting terms, Babylon's EXP fog and image processing
-//! (RUST.md 21.9).
+//! So far: the `Vector3` arithmetic the collision code runs through, whose
+//! operation order the simulation must reproduce bit for bit. The renderer
+//! milestone adds StandardMaterial's lighting terms, EXP fog and image
+//! processing (RUST.md 21.9).
+
+pub mod maths;

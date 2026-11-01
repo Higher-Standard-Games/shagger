@@ -4,6 +4,9 @@
 //! simulation, the protocol codec and their parity tests build anywhere.
 //! See `docs/research/RUST.md` in wash-fps-rust, section 14.
 
+pub mod bsp;
+pub mod collision;
 pub mod js;
 pub mod json;
 pub mod net;
+pub mod server;
