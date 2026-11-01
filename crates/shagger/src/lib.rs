@@ -12,5 +12,6 @@ pub mod loader;
 pub mod lobby;
 pub mod network;
 pub mod physics;
+pub mod rendering;
 
 pub use shagger_shared as shared;

@@ -10,7 +10,8 @@
 // Each face's canonical line holds its index, its type and every array (f64 as
 // hex bits); the vectors keep the FNV-1a hash of each run of 256 lines, and
 // DUMP=map,face prints a line. The IBSP transfer curve is tabulated for all
-// 256 inputs, and scaleBspVertexColors is checked on the maps' vertex colours.
+// 256 inputs, scaleBspVertexColors is checked on the maps' vertex colours, and
+// bspLightingProfile (BspLightingProfile.ts) on each map's worldspawn.
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -23,6 +24,7 @@ const load = (path) => import(pathToFileURL(resolve(shag, path)).href);
 const { BspLoader } = await load("src/engine/loader/bsp/BspLoader.ts");
 const { buildPolygonFace, buildPatchFace, buildMeshFace } = await load("src/engine/loader/bsp/mesh/faceBuilders.ts");
 const { createBspLightmapTexture, scaleBspVertexColors } = await load("src/engine/loader/bsp/mesh/lightmaps.ts");
+const { bspLightingProfile } = await load("src/engine/loader/bsp/BspLightingProfile.ts");
 const { NullEngine } = await load("node_modules/@babylonjs/core/Engines/nullEngine.js");
 const { Scene } = await load("node_modules/@babylonjs/core/scene.js");
 console.warn = () => {};
@@ -77,7 +79,9 @@ for (const file of files) {
   }
   const scaled = [0.5, 1, 1.7, 2, 4].map((gain) => fnv(scaleBspVertexColors(colors, gain).map(num).join(",")));
 
-  maps.push({ map: file.replace(/\.bsp$/, ""), sha256: sha(bytes), faceCount: bsp.faces.length, counts, faces, lightmapSize: size, pages, scaled });
+  const p = bspLightingProfile(bsp);
+  const profile = { gain: num(p.gain), ambient: p.ambient.map(num), deluxe: p.deluxe };
+  maps.push({ map: file.replace(/\.bsp$/, ""), sha256: sha(bytes), profile, faceCount: bsp.faces.length, counts, faces, lightmapSize: size, pages, scaled });
   process.stderr.write(`${file}: ${bsp.faces.length} faces, ${bsp.lightmaps.length} lightmap pages\n`);
 }
 

@@ -208,12 +208,11 @@ async fn run<C: EventCodec>(
             }
             attempt += 1;
             let _ = events.send(SessionEvent::Resuming { attempt });
-            if let Ok(mut s) = open(&config.url).await {
-                if let Some(resume) = host.resume(mono()) {
-                    if s.send(Message::binary(resume.data)).await.is_ok() {
-                        break s;
-                    }
-                }
+            if let Ok(mut s) = open(&config.url).await
+                && let Some(resume) = host.resume(mono())
+                && s.send(Message::binary(resume.data)).await.is_ok()
+            {
+                break s;
             }
             tokio::time::sleep(Duration::from_millis(RESUME_RETRY_MS as u64)).await;
         };

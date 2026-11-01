@@ -26,8 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87
-      - run: cargo +1.87 check --workspace --all-targets
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: cargo +1.88 check --workspace --all-targets
 
   deny:
     runs-on: ubuntu-latest

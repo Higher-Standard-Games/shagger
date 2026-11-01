@@ -913,12 +913,12 @@ pub fn parse_entity_string(text: &str) -> Vec<BspEntity> {
             if let Some(entity) = current.take() {
                 entities.push(entity);
             }
-        } else if let Some(entity) = current.as_mut() {
-            if let Some((key, value)) = match_key_value(trimmed) {
-                entity.properties.set(key, value);
-                if key == "classname" {
-                    value.clone_into(&mut entity.classname);
-                }
+        } else if let Some(entity) = current.as_mut()
+            && let Some((key, value)) = match_key_value(trimmed)
+        {
+            entity.properties.set(key, value);
+            if key == "classname" {
+                value.clone_into(&mut entity.classname);
             }
         }
     }
@@ -1045,10 +1045,11 @@ pub fn bsp_texture_names(bsp: &BspCommon) -> Vec<&str> {
 pub fn bsp_used_textures(bsp: &BspCommon) -> Vec<&str> {
     let mut used: Vec<usize> = Vec::new();
     for face in &bsp.faces {
-        if let Ok(i) = usize::try_from(face.texture_index) {
-            if i < bsp.textures.len() && !used.contains(&i) {
-                used.push(i);
-            }
+        if let Ok(i) = usize::try_from(face.texture_index)
+            && i < bsp.textures.len()
+            && !used.contains(&i)
+        {
+            used.push(i);
         }
     }
     used.into_iter()

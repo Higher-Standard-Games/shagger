@@ -25,6 +25,16 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # beyond cc and is the provider RUST.md 4.1 names.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
+# Packages (RUST.md 20.8): zip with deflate only, in pure Rust.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# Texture decoding (RUST.md 20.6): WebP, TGA, PNG and JPEG.
+image = { version = "0.25", default-features = false, features = ["webp", "tga", "png", "jpeg"] }
+# The renderer (RUST.md 8.2, 21). wgpu 30 is the release egui 0.37 builds on,
+# so the HUD can share the device later (RUST.md 12 asks the versions agree).
+wgpu = "30"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
 
 [lints]
 workspace = true

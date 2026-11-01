@@ -308,10 +308,10 @@ impl SweepCollisionBackend {
                 for i in range(leaf.first_leaf_brush, leaf.num_leaf_brushes) {
                     if let Some(&bi) = get(&bsp.leaf_brushes, i) {
                         refs.insert(i64::from(bi));
-                        if let Some(l) = idx(i64::from(bi)).and_then(|b| leaves.get_mut(b)) {
-                            if !l.contains(&li) {
-                                l.push(li);
-                            }
+                        if let Some(l) = idx(i64::from(bi)).and_then(|b| leaves.get_mut(b))
+                            && !l.contains(&li)
+                        {
+                            l.push(li);
                         }
                     }
                 }
@@ -1140,10 +1140,10 @@ impl SweepCollisionBackend {
                 }
                 continue;
             }
-            if trace.start_solid {
-                if let Some(n) = trace.normal {
-                    pos.add_in_place(n.scale(0.05));
-                }
+            if trace.start_solid
+                && let Some(n) = trace.normal
+            {
+                pos.add_in_place(n.scale(0.05));
             }
             if trace.fraction > 0.0 {
                 pos = trace.end_pos;
@@ -1231,10 +1231,10 @@ impl SweepCollisionBackend {
         if !step_down.all_solid {
             let stepped = step_down.end_pos;
             let mut velocity = raised.velocity;
-            if step_down.fraction < 1.0 {
-                if let Some(n) = step_down.normal {
-                    velocity = Self::clip_velocity(raised.velocity, n, OVERCLIP);
-                }
+            if step_down.fraction < 1.0
+                && let Some(n) = step_down.normal
+            {
+                velocity = Self::clip_velocity(raised.velocity, n, OVERCLIP);
             }
             let flat = Vector3::distance(start_o, first.end_pos);
             let climbed = Vector3::distance(start_o, stepped);
@@ -1312,10 +1312,10 @@ impl SweepCollisionBackend {
             let Some(brush) = get(&self.bsp.brushes, i) else {
                 continue;
             };
-            if let Some(texture) = self.brush_texture(brush) {
-                if self.point_in_brush(local, brush, None) {
-                    contents |= self.collision_textures[texture].content_flags;
-                }
+            if let Some(texture) = self.brush_texture(brush)
+                && self.point_in_brush(local, brush, None)
+            {
+                contents |= self.collision_textures[texture].content_flags;
             }
         }
         contents
@@ -1369,10 +1369,10 @@ impl SweepCollisionBackend {
             content_mask: options.content_mask,
         };
         let r = self.trace(point, end, options);
-        if r.fraction < 1.0 {
-            if let Some(n) = r.normal {
-                return Some((r.end_pos, n));
-            }
+        if r.fraction < 1.0
+            && let Some(n) = r.normal
+        {
+            return Some((r.end_pos, n));
         }
         None
     }
