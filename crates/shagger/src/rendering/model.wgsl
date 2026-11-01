@@ -1,0 +1,132 @@
+// Models: glTF meshes drawn as Babylon's PBRMaterial draws them with no
+// environment texture (MIT; written from Babylon's pbr shader includes, not
+// copied). Base colour is sampled in display space and taken to linear with
+// toLinearSpace (pow 2.2); each scene light adds its diffuse share:
+//   hemispheric: mix(ground, diffuse, dot(N, L) * 0.5 + 0.5)
+//   directional: diffuse * NdotL * the diffuse BRDF
+// The sum times the albedo goes back to display space (pow 1 / 2.2), clamps,
+// and takes the image processing contrast. Unlit materials skip the lights.
+
+struct Light {
+    // x: 0 none, 1 hemispheric, 2 directional
+    kind: vec4f,
+    // Hemispheric: the normalized up direction. Directional: the direction
+    // the light travels.
+    direction: vec4f,
+    // Colour times intensity.
+    diffuse: vec4f,
+    // Hemispheric ground colour times intensity.
+    ground: vec4f,
+};
+
+struct Globals {
+    view_proj: mat4x4f,
+    eye: vec4f,
+    // x: contrast, y: exposure, z: diffuse model (0 Lambert, 1 Burley)
+    image: vec4f,
+    lights: array<Light, 4>,
+};
+
+struct Draw {
+    world: mat4x4f,
+};
+
+struct Material {
+    base_color: vec4f,
+    // x: metallic, y: roughness, z: 1 unlit, w: alpha
+    params: vec4f,
+};
+
+@group(0) @binding(0) var<uniform> globals: Globals;
+@group(1) @binding(0) var<uniform> draw: Draw;
+@group(2) @binding(0) var base_texture: texture_2d<f32>;
+@group(2) @binding(1) var base_sampler: sampler;
+@group(2) @binding(2) var<uniform> material: Material;
+
+struct VertexIn {
+    @location(0) position: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) uv: vec2f,
+};
+
+struct VertexOut {
+    @builtin(position) clip: vec4f,
+    @location(0) world_position: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) uv: vec2f,
+};
+
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    let world = draw.world * vec4f(in.position, 1.0);
+    out.clip = globals.view_proj * world;
+    out.world_position = world.xyz;
+    // The world matrices here scale uniformly or mirror an axis, so their
+    // upper 3x3 turns normals as the inverse transpose would.
+    out.normal = (draw.world * vec4f(in.normal, 0.0)).xyz;
+    out.uv = in.uv;
+    return out;
+}
+
+const PI: f32 = 3.141592653589793;
+
+fn pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    return x2 * x2 * x;
+}
+
+fn diffuse_brdf(n_dot_l: f32, n_dot_v: f32, v_dot_h: f32, roughness: f32) -> f32 {
+    if globals.image.z < 0.5 {
+        return 1.0 / PI;
+    }
+    // diffuseBRDF_Burley
+    let fresnel90 = 0.5 + 2.0 * v_dot_h * v_dot_h * roughness;
+    let fl = 1.0 + (fresnel90 - 1.0) * pow5(clamp(1.0 - n_dot_v, 1e-6, 1.0));
+    let fv = 1.0 + (fresnel90 - 1.0) * pow5(clamp(1.0 - n_dot_l, 1e-6, 1.0));
+    return fl * fv / PI;
+}
+
+@fragment
+fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+    let texel = textureSample(base_texture, base_sampler, in.uv);
+    let albedo = pow(texel.rgb, vec3f(2.2)) * material.base_color.rgb;
+    let alpha = material.base_color.a * material.params.w;
+    var color: vec3f;
+    if material.params.z > 0.5 {
+        color = albedo;
+    } else {
+        var n = normalize(in.normal);
+        if !front {
+            n = -n;
+        }
+        let v = normalize(globals.eye.xyz - in.world_position);
+        let n_dot_v = clamp(abs(dot(n, v)), 1e-6, 1.0);
+        var diffuse = vec3f(0.0);
+        for (var i = 0; i < 4; i++) {
+            let light = globals.lights[i];
+            if light.kind.x == 1.0 {
+                let ndl = clamp(dot(n, light.direction.xyz) * 0.5 + 0.5, 1e-6, 1.0);
+                diffuse += mix(light.ground.rgb, light.diffuse.rgb, ndl);
+            } else if light.kind.x == 2.0 {
+                let l = normalize(-light.direction.xyz);
+                let h = normalize(v + l);
+                let ndl = clamp(dot(n, l), 1e-6, 1.0);
+                let vdh = clamp(dot(v, h), 0.0, 1.0);
+                diffuse += light.diffuse.rgb * ndl * diffuse_brdf(ndl, n_dot_v, vdh, material.params.y);
+            }
+        }
+        color = diffuse * albedo * (1.0 - material.params.x);
+    }
+    color *= globals.image.y;
+    color = clamp(pow(max(color, vec3f(0.0)), vec3f(1.0 / 2.2)), vec3f(0.0), vec3f(1.0));
+    // Image processing contrast.
+    let contrast = globals.image.x;
+    let high = color * color * (3.0 - 2.0 * color);
+    if contrast < 1.0 {
+        color = mix(vec3f(0.5), color, contrast);
+    } else {
+        color = mix(color, high, contrast - 1.0);
+    }
+    return vec4f(color, alpha);
+}

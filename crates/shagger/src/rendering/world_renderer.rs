@@ -181,6 +181,8 @@ pub struct WorldRenderer {
     texture_count: usize,
     missing: Vec<String>,
     passes: Vec<DrawPass>,
+    /// The opaque passes lead `passes`; this many of them.
+    opaque_count: usize,
     animations: Vec<PassAnimation>,
     /// `ShaderAnimationSystem.totalTime`.
     total_time: f64,
@@ -207,7 +209,7 @@ fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
     levels
 }
 
-fn upload_texture(gpu: &Gpu, label: &str, image: &Rgba8Image) -> wgpu::Texture {
+pub(crate) fn upload_texture(gpu: &Gpu, label: &str, image: &Rgba8Image) -> wgpu::Texture {
     let levels = mip_chain(image);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -571,6 +573,7 @@ impl WorldRenderer {
             }
         }
         let texture_count = views.len();
+        let opaque_count = opaque.len();
         let mut passes = Vec::new();
         let mut animations = Vec::new();
         for (pass, animation) in opaque.into_iter().chain(blended) {
@@ -666,6 +669,7 @@ impl WorldRenderer {
             texture_count,
             missing,
             passes,
+            opaque_count,
             animations,
             total_time: 0.0,
             noise_seed: 0x9e37_79b9_7f4a_7c15,
@@ -771,11 +775,26 @@ impl WorldRenderer {
     /// end is drawn), as [`WorldCulling`](super::world_culling::WorldCulling)
     /// gives them.
     pub fn draw_visible(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, 0..self.passes.len());
+    }
+
+    /// Records the opaque passes of the batches `visible` keeps.
+    pub fn draw_visible_opaque(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, 0..self.opaque_count);
+    }
+
+    /// Records the blended passes of the batches `visible` keeps, which
+    /// draw after every opaque surface (the world's and the models').
+    pub fn draw_visible_blended(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, self.opaque_count..self.passes.len());
+    }
+
+    fn draw_passes(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool], range: std::ops::Range<usize>) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
-        for pass_ in &self.passes {
+        for pass_ in &self.passes[range] {
             if !visible.get(pass_.batch).copied().unwrap_or(true) {
                 continue;
             }
@@ -789,7 +808,7 @@ impl WorldRenderer {
     }
 }
 
-fn texture_entry(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn texture_entry(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -802,7 +821,7 @@ fn texture_entry(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::B
     }
 }
 
-fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,

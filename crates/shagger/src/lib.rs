@@ -8,10 +8,13 @@
 //! Apache-2.0; everything else in this crate is MIT.
 
 pub mod babylon;
+pub mod lighting;
 pub mod loader;
 pub mod lobby;
 pub mod network;
 pub mod physics;
 pub mod rendering;
+pub mod weapon;
+pub mod world;
 
 pub use shagger_shared as shared;
