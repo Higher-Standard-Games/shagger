@@ -525,9 +525,9 @@ impl ModelRenderer {
                     },
                     two_sided: !params.back_face_culling,
                     standard: true,
-                    // Babylon writes depth for blended meshes too, unless
-                    // the material says not to.
-                    depth_write: !params.disable_depth_write,
+                    // Babylon's transparent pass sets the alpha mode, which
+                    // turns depth writes off (`setAlphaMode`).
+                    depth_write: !params.disable_depth_write && !params.blends(),
                     separate_culling: params.separate_culling_pass && !params.back_face_culling,
                 });
                 continue;

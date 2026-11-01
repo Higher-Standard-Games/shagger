@@ -3,6 +3,7 @@
 
 //! Babylon's `Meshes` folder, the parts SHAGGER needs.
 
+pub mod ico_sphere_builder;
 pub mod mesh_builder;
 pub mod ribbon_builder;
 pub mod vertex_data;

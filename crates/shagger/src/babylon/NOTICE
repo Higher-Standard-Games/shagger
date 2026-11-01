@@ -39,6 +39,11 @@ Ported files, with the Babylon.js source each came from and its version:
     planeBuilder.ts, Babylon.js 9.31.2: the vertex data for the options
     SHAG's procedural pickups pass.
 
+  meshes/ico_sphere_builder.rs
+    from packages/dev/core/src/Meshes/Builders/icoSphereBuilder.ts
+    (CreateIcoSphereVertexData), Babylon.js 9.31.2: positions and indices,
+    as SHAG's explosion fireball takes them.
+
   meshes/ribbon_builder.rs
     from packages/dev/core/src/Meshes/Builders/ribbonBuilder.ts
     (CreateRibbonVertexData) and mesh.vertexData.ts (_ComputeSides),
