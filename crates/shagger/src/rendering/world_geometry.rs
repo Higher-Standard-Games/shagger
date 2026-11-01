@@ -22,7 +22,7 @@ use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::autosprite_records::{autosprite_record, autosprite_vertex_data};
 use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face, build_polygon_face};
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
-use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps};
+use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
 pub const NON_DRAWABLE_TEXTURES: [&str; 14] = [
@@ -80,6 +80,13 @@ pub struct WorldBatch {
     pub index_count: u32,
 }
 
+/// A sky shader `BspMeshBuilder.applySkybox` can draw the sky from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkyShader {
+    pub texture_name: String,
+    pub sky_parms: Option<SkyParms>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WorldGeometry {
     pub vertices: Vec<WorldVertex>,
@@ -87,6 +94,9 @@ pub struct WorldGeometry {
     pub batches: Vec<WorldBatch>,
     /// Faces left out because they are sky.
     pub sky_faces: Vec<usize>,
+    /// The sky shaders, one per texture, in the order their first face is
+    /// met (`skyShaders` in `BspMeshBuilder.build`).
+    pub sky_shaders: Vec<SkyShader>,
     /// Lightmap pages per layer (2 when deluxe pages sit between them).
     pub lightmap_stride: usize,
     /// Faces drawn as autosprites.
@@ -174,6 +184,12 @@ pub fn build_world_geometry(
         // Every pass shares the shader-level flags (sky, cull).
         let two_sided_shader = !passes[0].back_face_culling;
         if passes[0].is_sky || texture.surface_flags & SURF_SKY != 0 {
+            if !out.sky_shaders.iter().any(|s| s.texture_name == texture.name) {
+                out.sky_shaders.push(SkyShader {
+                    texture_name: texture.name.clone(),
+                    sky_parms: passes[0].sky_parms.clone(),
+                });
+            }
             out.sky_faces.push(i);
             continue;
         }

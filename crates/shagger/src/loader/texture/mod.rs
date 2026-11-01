@@ -1,6 +1,7 @@
 //! Textures (SHAG `src/engine/loader/texture`).
 
 pub mod ktx1_loader;
+pub mod skybox_loader;
 pub mod texture_extensions;
 
 use super::pk3::pk3_loader::Pk3Loader;
