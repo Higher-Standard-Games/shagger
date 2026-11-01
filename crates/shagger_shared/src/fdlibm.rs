@@ -21,6 +21,7 @@
     clippy::approx_constant,
     clippy::eq_op,
     clippy::explicit_counter_loop,
+    clippy::needless_late_init,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap
