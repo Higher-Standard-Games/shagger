@@ -9,6 +9,7 @@
 
 pub mod babylon;
 pub mod loader;
+pub mod network;
 pub mod physics;
 
 pub use shagger_shared as shared;

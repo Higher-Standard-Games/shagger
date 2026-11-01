@@ -299,6 +299,63 @@ pub fn js_sign(x: f64) -> f64 {
     }
 }
 
+/// `Number.parseInt(s, 10)`: leading whitespace, an optional sign, then the
+/// longest run of decimal digits; NaN when there are none.
+#[must_use]
+pub fn js_parse_int10(s: &str) -> f64 {
+    let s = s.trim_start_matches(is_js_whitespace);
+    let (negative, rest) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return f64::NAN;
+    }
+    let value: f64 = rest[..digits].parse().unwrap_or(f64::NAN);
+    if negative { -value } else { value }
+}
+
+/// `Number.prototype.toString()`: the shortest digits that round-trip,
+/// placed as ECMAScript's Number::toString places them (plain notation for
+/// exponents from -6 to 20, exponential outside).
+#[must_use]
+pub fn js_number_to_string(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x == 0.0 {
+        return "0".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+    }
+    let sign = if x < 0.0 { "-" } else { "" };
+    // Rust's `{:e}` is also the shortest round-trip form: "d.ddde[-]n".
+    let formatted = format!("{:e}", x.abs());
+    let (mantissa, exponent) = formatted.split_once('e').expect("exponent");
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let k = digits.len() as i32;
+    let n = exponent.parse::<i32>().expect("exponent digits") + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let e = if e < 0 { format!("-{}", -e) } else { format!("+{e}") };
+        if k == 1 {
+            format!("{digits}e{e}")
+        } else {
+            format!("{}.{}e{e}", &digits[..1], &digits[1..])
+        }
+    };
+    format!("{sign}{body}")
+}
+
 /// `Math.sin`: V8's fdlibm port. The platform `sin` differs from it in the
 /// last bit for about 3% of inputs, and differs again across platforms.
 #[must_use]

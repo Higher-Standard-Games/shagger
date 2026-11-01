@@ -4,7 +4,9 @@
 //   node tools/golden/generate.mjs <path to a SHAG checkout> [<path to wash-fps-rust>]
 //
 // Washoi's own vectors (its snapshot events) go into the second checkout, by
-// default ../wash-fps-rust next to this one.
+// default ../wash-fps-rust next to this one. The movement vectors run wash-fps's
+// own simulation, so wash-fps must be checked out at <shag>/src/games/fps (the
+// SHAG submodule, or `git -C <wash-fps> archive <pinned commit> | tar -x -C ...`).
 // Needs Node 22.18+ (TypeScript type stripping). Writes into crates/*/tests/golden/.
 // Commit the output together with the SHAG commit it was made from.
 import { execFileSync } from "node:child_process";
@@ -150,6 +152,13 @@ execFileSync(
 execFileSync(
   process.execPath,
   ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "collision.mjs", shag, resolve(root, "crates/shagger/tests/golden"), shagCommit],
+  { cwd: import.meta.dirname, stdio: "inherit" },
+);
+
+// --- Washoi movement (needs wash-fps at <shag>/src/games/fps) ---------------------
+execFileSync(
+  process.execPath,
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "movement.mjs", shag, resolve(washoi, "tests/golden"), shagCommit],
   { cwd: import.meta.dirname, stdio: "inherit" },
 );
 

@@ -11,18 +11,27 @@ pub trait EntityLike {
     fn property(&self, key: &str) -> Option<&str>;
 }
 
-/// `text.trim().split(/\\s+/).map(Number)`.
+/// `text.split(/\\s+/)`: untrimmed, so leading or trailing whitespace gives
+/// an empty first or last part, and `""` gives `[""]`.
 #[must_use]
-pub fn split_numbers(text: &str) -> Vec<f64> {
-    let text = js_trim(text);
+pub fn split_whitespace_runs(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find(is_js_whitespace) {
-        parts.push(js_string_to_number(&rest[..start]));
+        parts.push(&rest[..start]);
         rest = rest[start..].trim_start_matches(is_js_whitespace);
     }
-    parts.push(js_string_to_number(rest));
+    parts.push(rest);
     parts
+}
+
+/// `text.trim().split(/\\s+/).map(Number)`.
+#[must_use]
+pub fn split_numbers(text: &str) -> Vec<f64> {
+    split_whitespace_runs(js_trim(text))
+        .into_iter()
+        .map(js_string_to_number)
+        .collect()
 }
 
 /// `(origin ?? "0 0 0").trim().split(/\\s+/).map(Number)`, accepted only as
