@@ -599,3 +599,29 @@ function demoVectors() {
   const doc = { generator: "tools/golden/protocol.mjs", shag: shagCommit, node: process.version, vectors: demoVectors() };
   writeFileSync(resolve(out, "demos.json"), `${JSON.stringify(doc).replaceAll('},{"bytes"', '},\n{"bytes"')}\n`);
 }
+
+// --- Washoi's recorded demos (read from and written to wash-fps-rust) ---------
+// Real matches recorded with wash-fps's `demo:record` (bots on the shipped
+// maps), kept in <wash-fps-rust>/tests/golden/demos/. Every frame with its
+// Washoi events, as SHAG's DemoReader reads it.
+const demoDir = eventsOutArg && resolve(eventsOutArg, "demos");
+if (demoDir && (await import("node:fs")).existsSync(demoDir)) {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const dir = demoDir;
+  const demos = readdirSync(dir).filter((f) => f.endsWith(".shagdemo")).sort().map((file) => {
+    const reader = new DemoReader(readFileSync(resolve(dir, file)));
+    const h = reader.readHeader();
+    const header = { version: h.version, map: h.map, gametype: h.gametype, tickRate: h.tickRate, snapshotRate: h.snapshotRate,
+      startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null,
+      players: h.players.map((p) => [p.playerId, p.name, p.team, p.accountId === undefined ? null : num(p.accountId)]) };
+    const index = reader.readIndex();
+    const frames = reader.readAllFrames().map((f) => ({
+      tick: f.tick, state: canonicalState(f.state), events: canon(f.state.events), inputs: canonicalInputs(f.inputs),
+    }));
+    return { file, header, frameCount: index.frameCount, durationMs: index.durationMs, frames };
+  });
+  const doc = { generator: "shagger tools/golden/protocol.mjs", shag: shagCommit, node: process.version, demos };
+  // About 14 MB of JSON, so it is stored gzip (level 9 is deterministic).
+  const text = `${JSON.stringify(doc).replaceAll('},{"tick"', '},\n{"tick"')}\n`;
+  writeFileSync(resolve(eventsOutArg, "demo_frames.json.gz"), gzipSync(text, { level: 9 }));
+}
