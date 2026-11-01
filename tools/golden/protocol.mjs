@@ -457,3 +457,145 @@ if (eventsOutArg) {
   const doc = { generator: "shagger tools/golden/protocol.mjs", shag: shagCommit, node: process.version, vectors: eventVectors() };
   writeFileSync(resolve(eventsOutArg, "snapshot_events.json"), `${JSON.stringify(doc).replaceAll('},{"bytes"', '},\n{"bytes"')}\n`);
 }
+
+// --- Demo files ----------------------------------------------------------------
+// Synthetic .shagdemo files of every version, raw and gzip, with damage, read
+// by SHAG's own DemoReader. Their own seed, so the files above stay unchanged.
+// DemoReader takes zlib through a CommonJS require, which an ES module lacks.
+globalThis.require ??= (await import("node:module")).createRequire(import.meta.url);
+const { DemoReader } = await load("src/shared/demo/DemoReader.ts");
+const { encodeInputs } = await load("src/shared/demo/DemoInputs.ts");
+const { gzipSync } = await import("node:zlib");
+
+function demoFile() {
+  const e = new BinaryEncoder();
+  const version = pick([1, 2, 3, 4, 5, 6, 6, 6, 6, 0, 7]);
+  for (const b of chance(0.03) ? [0x53, 0x48, 0x41, 0x48] : [0x53, 0x48, 0x41, 0x47]) e.writeUint8(b);
+  e.writeUint8(version);
+  e.writeString(pick(["washoi_dm2", "maps/WDM7.bsp", "日本", ""]));
+  e.writeString(pick(["duel", "ffa", "deathmatch", ""]));
+  e.writeUint8(pick([125, 0, 255]));
+  e.writeUint8(pick([62, 63, 0]));
+  e.writeUint32(pick([0, 0x19a, 0x1fffff, 0xffffffff]));
+  e.writeUint32(int(0x1_0000_0000));
+  if (version >= 2) e.writeString(pick(["", "m_123", "é", "550e8400-e29b-41d4-a716-446655440000"]));
+  if (version >= 4) e.writeUint8(pick([0, 1, 1, 0, 2]));
+  const players = int(4);
+  e.writeUint8(players);
+  for (let i = 0; i < players; i++) {
+    e.writeString(pick(ids));
+    e.writeString(pick(strings));
+    e.writeString(pick(["udon", "soba", "", "red"]));
+    if (version >= 2) {
+      e.writeString(pick(["", "12", "0", "-3", "1e3", " 7 ", "9007199254740991", "9007199254740993", "abc", "0x1f", "1.5", "Infinity", " 42\n"]));
+    }
+  }
+  const frames = int(6);
+  const entries = [];
+  let state = null;
+  for (let i = 0; i < frames; i++) {
+    const tick = 1000 + i * 2 + int(3);
+    entries.push([tick, e.getData().length]);
+    state = serverState(tick, state);
+    Date.now = () => 1_761_900_000_000 + i * 16;
+    let bytes = Uint8Array.from(BinaryProtocol.encodeSnapshot(state));
+    if (chance(0.1)) bytes = bytes.subarray(0, int(bytes.length));
+    if (chance(0.05)) bytes = Uint8Array.from({ length: int(12) }, () => int(256));
+    e.writeUint32(tick);
+    e.writeUint32(chance(0.03) ? bytes.length + 1 + int(40) : bytes.length);
+    e.writeBytes(bytes);
+    if (version >= 3 && !chance(0.05)) {
+      const records = Array.from({ length: int(4) }, () => ({
+        playerId: pick(ids), buttons: int(0x1_0000_0000), yaw: float(), pitch: float(), forward: float(), right: float(),
+        weaponSlot: int(300) - 20, commands: int(300) - 20,
+      }));
+      let inputs = encodeInputs(records);
+      if (chance(0.1)) inputs = inputs.subarray(0, int(inputs.length));
+      e.writeUint32(chance(0.03) ? inputs.length + 100 : inputs.length);
+      e.writeBytes(inputs);
+    }
+  }
+  const indexOffset = e.getData().length;
+  const listed = chance(0.05) ? frames + 1 + int(3) : frames;
+  e.writeUint32(listed);
+  for (let i = 0; i < listed; i++) {
+    const [tick, offset] = entries[i] ?? [9999, int(indexOffset + 50)];
+    e.writeUint32(tick);
+    e.writeUint32(chance(0.03) ? int(indexOffset + 50) : offset);
+  }
+  e.writeUint32(int(60_000));
+  e.writeUint32(chance(0.04) ? pick([0xffffffff, indexOffset + 4 * listed + 9, int(indexOffset)]) : indexOffset);
+  let bytes = Uint8Array.from(e.getData());
+  if (chance(0.06)) bytes = bytes.subarray(0, int(bytes.length));
+  if (chance(0.3)) {
+    const level = pick([0, 1, 6, 9]);
+    let gz = Uint8Array.from(gzipSync(bytes, { level }));
+    const damage = int(10);
+    if (damage === 0) gz = gz.subarray(0, int(gz.length));
+    else if (damage === 1) gz = Uint8Array.of(...gz, ...gzipSync(Uint8Array.of(1, 2, 3)));
+    else if (damage === 2) gz = Uint8Array.of(...gz, 0, 0, 0, 0);
+    else if (damage === 3) gz = Uint8Array.of(...gz, 0x1f, 0x8b, 0x08);
+    else if (damage === 4) gz[gz.length - 6] ^= 0x40; // CRC
+    bytes = gz;
+  }
+  return bytes;
+}
+
+function canonicalInputs(inputs) {
+  return inputs.map((r) => [r.playerId, r.buttons, num(r.yaw), num(r.pitch), num(r.forward), num(r.right), r.weaponSlot, r.commands]);
+}
+
+function attempt(f) {
+  try {
+    return f();
+  } catch (error) {
+    return { error: String(error.message) };
+  }
+}
+
+function demoVectors() {
+  seed = 0x1b873593;
+  console.warn = () => {};
+  const vectors = [];
+  for (let k = 0; k < 400; k++) {
+    const bytes = k === 0 ? new Uint8Array(0) : k === 1 ? Uint8Array.of(0x53, 0x48, 0x41, 0x47, 6) : demoFile();
+    const vector = { bytes: hex(bytes) };
+    let reader;
+    try {
+      reader = new DemoReader(bytes);
+    } catch (error) {
+      vector.error = String(error.message);
+      vectors.push(vector);
+      continue;
+    }
+    vector.header = attempt(() => {
+      const h = reader.readHeader();
+      return {
+        version: h.version, map: h.map, gametype: h.gametype, tickRate: h.tickRate, snapshotRate: h.snapshotRate,
+        startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null,
+        players: h.players.map((p) => [p.playerId, p.name, p.team, p.accountId === undefined ? null : num(p.accountId)]),
+      };
+    });
+    vector.index = attempt(() => {
+      const i = reader.readIndex();
+      return { frameCount: i.frameCount, entries: i.entries.map((x) => [x.tick, x.offset]), durationMs: i.durationMs, indexOffset: i.indexOffset };
+    });
+    if (vector.index.error) {
+      vectors.push(vector);
+      continue;
+    }
+    vector.frames = reader.readIndex().entries.map((_, i) => attempt(() => {
+      const f = reader.readFrame(i);
+      return f && { tick: f.tick, state: canonicalState(f.state), inputs: canonicalInputs(f.inputs) };
+    }));
+    vector.all = attempt(() => reader.readAllFrames().map((f) => f.tick));
+    vector.find = [-1, 0, 1000, 1003, 1005, 1011, 99999].map((t) => reader.findFrameByTick(t));
+    vectors.push(vector);
+  }
+  return vectors;
+}
+
+{
+  const doc = { generator: "tools/golden/protocol.mjs", shag: shagCommit, node: process.version, vectors: demoVectors() };
+  writeFileSync(resolve(out, "demos.json"), `${JSON.stringify(doc).replaceAll('},{"bytes"', '},\n{"bytes"')}\n`);
+}
