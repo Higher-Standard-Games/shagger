@@ -6,4 +6,5 @@
 
 pub mod font;
 pub mod glyph_atlas;
+pub mod hud;
 pub mod hud_2d;

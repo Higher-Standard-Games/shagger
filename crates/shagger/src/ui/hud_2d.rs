@@ -222,6 +222,35 @@ impl Hud2d {
         }
     }
 
+    /// A canvas `createRadialGradient` from one centre: `stops` are
+    /// (radius, colour) in CSS pixels, ascending. Inside the first radius
+    /// is its colour; past the last, nothing is drawn.
+    pub fn radial_gradient(&mut self, cx: f32, cy: f32, stops: &[(f32, [f32; 4])]) {
+        const SEGMENTS: usize = 64;
+        let Some(&(r0, c0)) = stops.first() else {
+            return;
+        };
+        let at = |r: f32, i: usize| {
+            let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            [cx + r * a.cos(), cy + r * a.sin()]
+        };
+        if c0[3] > 0.0 && r0 > 0.0 {
+            let mut points = Vec::with_capacity(SEGMENTS + 1);
+            points.push([cx, cy]);
+            points.extend((0..=SEGMENTS).map(|i| at(r0, i)));
+            self.polygon(&points, &vec![c0; points.len()]);
+        }
+        for pair in stops.windows(2) {
+            let ((ra, ca), (rb, cb)) = (pair[0], pair[1]);
+            if ca[3] <= 0.0 && cb[3] <= 0.0 {
+                continue;
+            }
+            for i in 0..SEGMENTS {
+                self.polygon(&[at(ra, i), at(rb, i), at(rb, i + 1), at(ra, i + 1)], &[ca, cb, cb, ca]);
+            }
+        }
+    }
+
     /// The width of `text` in CSS pixels.
     #[must_use]
     pub fn measure(&self, text: &str, style: &TextStyle) -> f32 {
