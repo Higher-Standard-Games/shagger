@@ -47,6 +47,8 @@ use crate::loader::texture::decode_image;
 pub enum ModelMaterialMode {
     /// Lit; opaque unless its glTF alpha mode blends.
     Lit,
+    /// Lit with `backFaceCulling` off (a view model's gun layers).
+    LitTwoSided,
     /// Babylon's `drawAsAddedLight`: unlit, added over what is behind it
     /// (`ALPHA_ADD`), both sides.
     AddedLight,
@@ -527,6 +529,16 @@ impl ModelRenderer {
                         BlendKind::Opaque
                     },
                     m.double_sided,
+                    1.0,
+                    0.0,
+                ),
+                ModelMaterialMode::LitTwoSided => (
+                    if m.alpha_mode == AlphaMode::Blend {
+                        BlendKind::Alpha
+                    } else {
+                        BlendKind::Opaque
+                    },
+                    true,
                     1.0,
                     0.0,
                 ),

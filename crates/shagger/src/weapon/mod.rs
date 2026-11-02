@@ -13,3 +13,6 @@ pub mod rail;
 pub mod tracer;
 pub mod voltaic;
 pub mod weapon_barrels;
+pub mod weapon_bob;
+pub mod weapon_recoil;
+pub mod weapon_view_manager;

@@ -4,6 +4,10 @@
 // toLinearSpace (pow 2.2); each scene light adds its diffuse share:
 //   hemispheric: mix(ground, diffuse, dot(N, L) * 0.5 + 0.5)
 //   directional: diffuse * NdotL * the diffuse BRDF
+// and its GGX specular share (computeSpecularLighting: Schlick fresnel from
+// F0 = mix(0.04, albedo, metallic) to 1, Trowbridge-Reitz distribution and
+// height-correlated Smith visibility, times NdotL and the light colour;
+// hemispheric lights use their half-Lambert NdotL there too).
 // The cluster's dynamic point lights add theirs with an inverse-square
 // falloff. The sum times the albedo stays linear, clamped to 30, for the HDR
 // target and its image processing. Unlit materials skip the lights.
@@ -160,6 +164,23 @@ fn diffuse_brdf(n_dot_l: f32, n_dot_v: f32, v_dot_h: f32, roughness: f32) -> f32
     return fl * fv / PI;
 }
 
+// computeSpecularLighting, with convertRoughnessToAverageSlope's
+// minimum variance.
+fn specular_brdf(n: vec3f, v: vec3f, l: vec3f, n_dot_l: f32, n_dot_v: f32, roughness: f32, f0: vec3f) -> vec3f {
+    let h = normalize(v + l);
+    let n_dot_h = clamp(dot(n, h), 1e-6, 1.0);
+    let v_dot_h = clamp(dot(v, h), 0.0, 1.0);
+    let alpha_g = roughness * roughness + 0.0005;
+    let a2 = alpha_g * alpha_g;
+    let fresnel = f0 + (vec3f(1.0) - f0) * pow5(1.0 - v_dot_h);
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    let distribution = a2 / (PI * d * d);
+    let ggx_v = n_dot_l * sqrt(n_dot_v * (n_dot_v - a2 * n_dot_v) + a2);
+    let ggx_l = n_dot_v * sqrt(n_dot_l * (n_dot_l - a2 * n_dot_l) + a2);
+    let visibility = 0.5 / (ggx_v + ggx_l);
+    return fresnel * distribution * visibility * n_dot_l;
+}
+
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let texel = textureSample(base_texture, base_sampler, in.uv);
@@ -177,17 +198,23 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         let v = normalize(globals.eye.xyz - in.world_position);
         let n_dot_v = clamp(abs(dot(n, v)), 1e-6, 1.0);
         var diffuse = vec3f(0.0);
+        var specular = vec3f(0.0);
+        let roughness = material.params.y;
+        let f0 = mix(vec3f(0.04), albedo, material.params.x);
         for (var i = 0; i < 4; i++) {
             let light = globals.lights[i];
             if light.kind.x == 1.0 {
                 let ndl = clamp(dot(n, light.direction.xyz) * 0.5 + 0.5, 1e-6, 1.0);
                 diffuse += mix(light.ground.rgb, light.diffuse.rgb, ndl);
+                let l = normalize(light.direction.xyz);
+                specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light.diffuse.rgb;
             } else if light.kind.x == 2.0 {
                 let l = normalize(-light.direction.xyz);
                 let h = normalize(v + l);
                 let ndl = clamp(dot(n, l), 1e-6, 1.0);
                 let vdh = clamp(dot(v, h), 0.0, 1.0);
-                diffuse += light.diffuse.rgb * ndl * diffuse_brdf(ndl, n_dot_v, vdh, material.params.y);
+                diffuse += light.diffuse.rgb * ndl * diffuse_brdf(ndl, n_dot_v, vdh, roughness);
+                specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light.diffuse.rgb;
             }
         }
         // The cluster's point lights: physical (inverse square) falloff,
@@ -204,10 +231,11 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             let ndl = clamp(dot(n, l), 1e-6, 1.0);
             let vdh = clamp(dot(v, h), 0.0, 1.0);
             let attenuation = 1.0 / max(distance_squared, 1e-6);
-            diffuse += globals.dynamic.lights[3u * i + 1u].rgb * attenuation * ndl
-                * diffuse_brdf(ndl, n_dot_v, vdh, material.params.y);
+            let light_color = globals.dynamic.lights[3u * i + 1u].rgb * attenuation;
+            diffuse += light_color * ndl * diffuse_brdf(ndl, n_dot_v, vdh, roughness);
+            specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light_color;
         }
-        color = diffuse * albedo * (1.0 - material.params.x);
+        color = diffuse * albedo * (1.0 - material.params.x) + specular;
     }
     // Image processing runs as a post-process (`applyByPostProcess`), so the
     // output stays linear: pbr.fragment's clamp to 30 for the HDR target.

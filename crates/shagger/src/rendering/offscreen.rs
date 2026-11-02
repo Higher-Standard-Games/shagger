@@ -69,6 +69,38 @@ pub fn render_hdr_to_rgba(
     read_back(gpu, encoder, &color, width, height)
 }
 
+/// [`render_hdr_to_rgba`] with a second pass after the scene: `overlay`
+/// draws over its colour with the depth cleared, as the first-person
+/// weapon's rendering group does.
+#[allow(clippy::too_many_arguments)]
+pub fn render_hdr_with_overlay_to_rgba(
+    gpu: &Gpu,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+    post: &ImageProcessingPostProcess,
+    config: &ImageProcessingConfiguration,
+    record: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    overlay: impl FnOnce(&mut wgpu::RenderPass<'_>),
+) -> Vec<u8> {
+    let hdr = HdrTarget::new(gpu, width, height);
+    let color = output_texture(gpu, width, height);
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
+    {
+        let mut pass = begin_main_pass(&mut encoder, &hdr.color, &hdr.depth, clear);
+        record(&mut pass);
+    }
+    {
+        let mut pass = begin_overlay_pass(&mut encoder, &hdr.color, &hdr.depth);
+        overlay(&mut pass);
+    }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
+    read_back(gpu, encoder, &color, width, height)
+}
+
 fn extent(width: u32, height: u32) -> wgpu::Extent3d {
     wgpu::Extent3d {
         width,
@@ -141,6 +173,38 @@ pub fn begin_main_pass<'e>(
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(clear),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
+/// Begins a pass over what the main pass drew: colour kept, depth cleared
+/// to 1 (`setRenderingAutoClearDepthStencil(1, true, true, false)`).
+pub fn begin_overlay_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("overlay"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
         })],
