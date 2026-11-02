@@ -3,8 +3,9 @@
 //! to the picture lands with the renderer work that reads it (milestone 11);
 //! the settings screen and the console already read and write them.
 //!
-//! `register_render_vars` also registers `r_cel_outlines`, which SHAG's
-//! `PostProcessingManager.ts` owns.
+//! `register_render_vars` also registers the cvars SHAG's
+//! `PostProcessingManager.ts` owns: `r_cel_outlines` and the colour-blindness
+//! correction (`r_colorcorrection`, its strength, `r_colorsimulation`).
 
 use crate::core::cvar::{CvarOptions, CvarType, Cvars};
 
@@ -495,6 +496,28 @@ pub fn register_render_vars(cvars: &mut Cvars) {
         cvars.register(def.name, def.default_value, options);
     }
     // PostProcessingManager.ts.
+    let int = |d: &str, max: f64| CvarOptions::describe(d).range(0.0, max).kind(CvarType::Int);
+    cvars.register(
+        "r_colorcorrection",
+        0,
+        int(
+            "Colour-blindness correction: 0 off, 1 protanopia, 2 deuteranopia, 3 tritanopia",
+            3.0,
+        ),
+    );
+    cvars.register(
+        "r_colorcorrection_strength",
+        1,
+        CvarOptions::describe("How strongly r_colorcorrection shifts colours (0-1)")
+            .range(0.0, 1.0)
+            .kind(CvarType::Float),
+    );
+    let mut simulation = int(
+        "Show the screen as colour-blind eyes see it, for checking maps: 1 protanopia, 2 deuteranopia, 3 tritanopia",
+        3.0,
+    );
+    simulation.flags.persist = false;
+    cvars.register("r_colorsimulation", 0, simulation);
     cvars.register(
         "r_cel_outlines",
         0,
