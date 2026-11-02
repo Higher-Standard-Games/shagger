@@ -3,4 +3,5 @@
 pub mod brush_model_state;
 pub mod lift_system;
 pub mod map_entities;
+pub mod spawn_point_table;
 pub mod trigger_table;
