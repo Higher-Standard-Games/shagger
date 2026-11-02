@@ -804,7 +804,9 @@ impl<'a> Loader<'a> {
             return err("[BspLoader] Invalid FBSP lightgrid record size");
         }
         let records: Vec<BspLightVol> =
-            l.0.chunks_exact(30)
+            l.0.as_chunks::<30>()
+                .0
+                .iter()
                 .map(|r| {
                     let mut ambient = [0u16; 3];
                     let mut directional = [0u16; 3];

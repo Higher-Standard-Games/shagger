@@ -12,7 +12,7 @@ pub fn build_bsp_tangents(positions: &[f32], normals: &[f32], uvs: &[f32], indic
     let mut t = vec![0.0f64; count * 3];
     let p = |i: usize| f64::from(positions[i]);
     let uv = |i: usize| f64::from(uvs[i]);
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0.iter() {
         let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let du1 = uv(b * 2) - uv(a * 2);
         let dv1 = uv(b * 2 + 1) - uv(a * 2 + 1);

@@ -153,7 +153,7 @@ impl Group {
         let normals = attribute(|v| &v.normal);
         let uvs = attribute(|v| &v.uv);
         let tangents = build_bsp_tangents(&positions, &normals, &uvs, &self.indices);
-        for (vertex, tangent) in self.vertices.iter_mut().zip(tangents.chunks_exact(4)) {
+        for (vertex, tangent) in self.vertices.iter_mut().zip(tangents.as_chunks::<4>().0.iter()) {
             vertex.tangent.copy_from_slice(tangent);
         }
     }
@@ -277,7 +277,7 @@ pub fn build_world_geometry(
             let start = group.vertices.len();
             let n = g.vertex_count();
             let mut sum = [0.0f64; 3];
-            for v in g.positions.chunks_exact(3) {
+            for v in g.positions.as_chunks::<3>().0.iter() {
                 for k in 0..3 {
                     sum[k] += v[k];
                 }
@@ -288,7 +288,9 @@ pub fn build_world_geometry(
             // farthest corner in any direction.
             let reach = g
                 .positions
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|p| ((p[0] - center[0]).powi(2) + (p[1] - center[1]).powi(2) + (p[2] - center[2]).powi(2)).sqrt())
                 .fold(0.0f64, f64::max);
             group.grow(center.map(|c| c as f32), reach as f32 + 1.0);
@@ -345,7 +347,7 @@ pub fn build_world_geometry(
         let colors = scale_bsp_vertex_colors(&g.colors, vertex_gain);
         let base = group.vertices.len() as u32;
         group.add_clusters(face_clusters.get(i).map_or(&[-1][..], Vec::as_slice));
-        for p in g.positions.chunks_exact(3) {
+        for p in g.positions.as_chunks::<3>().0.iter() {
             group.grow([p[0] as f32, p[1] as f32, p[2] as f32], 0.0);
         }
         for v in 0..g.vertex_count() {

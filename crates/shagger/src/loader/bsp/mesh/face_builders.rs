@@ -40,7 +40,7 @@ pub fn build_polygon_face(bsp: &BspFile, face: &BspFace) -> Option<FaceGeometry>
     if raw.len() % 3 != 0 {
         return None;
     }
-    for t in raw.chunks_exact(3) {
+    for t in raw.as_chunks::<3>().0.iter() {
         g.indices.extend([t[0], t[2], t[1]]);
     }
     Some(g)

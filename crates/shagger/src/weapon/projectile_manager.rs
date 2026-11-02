@@ -165,7 +165,13 @@ pub fn load_projectile_model(
             uvs: mesh.uvs,
             // Babylon's counter-clockwise front, turned to the renderer's
             // clockwise one.
-            indices: mesh.indices.chunks_exact(3).flat_map(|t| [t[2], t[1], t[0]]).collect(),
+            indices: mesh
+                .indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|t| [t[2], t[1], t[0]])
+                .collect(),
             material: Some(index),
             bounds_center: (min + max) * 0.5,
             creation_order: index,
@@ -363,8 +369,13 @@ impl ProjectileTrail {
                     .iter()
                     .map(|d| {
                         (
-                            d.normals.chunks_exact(3).map(|n| [n[0], n[1], n[2]]).collect(),
-                            d.uvs.chunks_exact(2).map(|t| [t[0], t[1]]).collect(),
+                            d.normals
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
+                                .map(|n| [n[0], n[1], n[2]])
+                                .collect(),
+                            d.uvs.as_chunks::<2>().0.iter().map(|t| [t[0], t[1]]).collect(),
                         )
                     })
                     .collect();
@@ -417,7 +428,13 @@ fn upload_trail(
         .iter()
         .enumerate()
         .map(|(i, data)| {
-            let positions: Vec<[f32; 3]> = data.positions.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+            let positions: Vec<[f32; 3]> = data
+                .positions
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| [p[0], p[1], p[2]])
+                .collect();
             ModelPrimitive {
                 name: if i == 0 { "trail" } else { "trailCross" }.to_owned(),
                 node: 0,
@@ -425,11 +442,23 @@ fn upload_trail(
                 node_matrix: Mat4::IDENTITY,
                 bounds_center: bounds_center(&positions),
                 positions,
-                normals: data.normals.chunks_exact(3).map(|n| [n[0], n[1], n[2]]).collect(),
-                uvs: data.uvs.chunks_exact(2).map(|t| [t[0], t[1]]).collect(),
+                normals: data
+                    .normals
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|n| [n[0], n[1], n[2]])
+                    .collect(),
+                uvs: data.uvs.as_chunks::<2>().0.iter().map(|t| [t[0], t[1]]).collect(),
                 // Babylon's counter-clockwise front, turned to the renderer's
                 // clockwise one.
-                indices: data.indices.chunks_exact(3).flat_map(|t| [t[2], t[1], t[0]]).collect(),
+                indices: data
+                    .indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .flat_map(|t| [t[2], t[1], t[0]])
+                    .collect(),
                 material: Some(0),
                 creation_order: i,
                 skin: None,

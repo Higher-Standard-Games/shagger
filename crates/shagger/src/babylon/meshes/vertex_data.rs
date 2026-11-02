@@ -46,7 +46,7 @@ impl VertexData {
     /// faces' normals, a face's normal `(p1 - p2) x (p3 - p2)`.
     pub fn compute_normals(&mut self) {
         let mut normals = vec![0.0f64; self.positions.len()];
-        for face in self.indices.chunks_exact(3) {
+        for face in self.indices.as_chunks::<3>().0.iter() {
             let [a, b, c] = [face[0] as usize, face[1] as usize, face[2] as usize];
             let n = face_normal(self.position(a), self.position(b), self.position(c));
             for v in [a, b, c] {
@@ -55,7 +55,7 @@ impl VertexData {
                 normals[v * 3 + 2] += n.z;
             }
         }
-        for n in normals.chunks_exact_mut(3) {
+        for n in normals.as_chunks_mut::<3>().0.iter_mut() {
             let mut length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             if length == 0.0 {
                 length = 1.0;
@@ -80,11 +80,11 @@ impl VertexData {
     }
 
     fn transform_with(&mut self, matrix: DMat4, normalize: bool) {
-        for p in self.positions.chunks_exact_mut(3) {
+        for p in self.positions.as_chunks_mut::<3>().0.iter_mut() {
             let v = matrix.transform_point3(DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])));
             p.copy_from_slice(&[v.x as f32, v.y as f32, v.z as f32]);
         }
-        for n in self.normals.chunks_exact_mut(3) {
+        for n in self.normals.as_chunks_mut::<3>().0.iter_mut() {
             let mut v = matrix.transform_vector3(DVec3::new(f64::from(n[0]), f64::from(n[1]), f64::from(n[2])));
             if normalize {
                 v = v.normalize_or_zero();
@@ -92,7 +92,7 @@ impl VertexData {
             n.copy_from_slice(&[v.x as f32, v.y as f32, v.z as f32]);
         }
         if matrix.determinant() < 0.0 {
-            for face in self.indices.chunks_exact_mut(3) {
+            for face in self.indices.as_chunks_mut::<3>().0.iter_mut() {
                 face.swap(0, 2);
             }
         }
@@ -126,7 +126,7 @@ impl VertexData {
     #[must_use]
     pub fn flat_shaded(&self) -> VertexData {
         let mut out = VertexData::default();
-        for face in self.indices.chunks_exact(3) {
+        for face in self.indices.as_chunks::<3>().0.iter() {
             let [a, b, c] = [face[0] as usize, face[1] as usize, face[2] as usize];
             let n = face_normal(self.position(a), self.position(b), self.position(c)).normalize_or_zero();
             for v in [a, b, c] {

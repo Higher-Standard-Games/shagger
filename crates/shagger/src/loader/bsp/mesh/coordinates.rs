@@ -15,5 +15,10 @@ pub fn q3_to_babylon<T>(x: T, y: T, z: T) -> [T; 3] {
 /// `undefined`; here it is dropped.
 #[must_use]
 pub fn reverse_triangle_winding(indices: &[u32]) -> Vec<u32> {
-    indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect()
+    indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[2], t[1]])
+        .collect()
 }

@@ -274,7 +274,7 @@ pub struct PrimitiveSkin {
 }
 
 fn vec3s(values: &[f32]) -> Vec<[f32; 3]> {
-    values.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+    values.as_chunks::<3>().0.iter().map(|c| [c[0], c[1], c[2]]).collect()
 }
 
 impl GltfModel {
@@ -322,8 +322,10 @@ impl GltfModel {
                 Some(a) => glb
                     .read_floats(a)?
                     .1
-                    .chunks_exact(16)
-                    .map(Mat4::from_cols_slice)
+                    .as_chunks::<16>()
+                    .0
+                    .iter()
+                    .map(Mat4::from_cols_array)
                     .collect(),
                 None => vec![Mat4::IDENTITY; skin.joints.len()],
             };
@@ -392,7 +394,7 @@ impl GltfModel {
                     None => vec![[0.0, 1.0, 0.0]; positions.len()],
                 };
                 let uvs = match read("TEXCOORD_0")? {
-                    Some((_, v)) => v.chunks_exact(2).map(|c| [c[0], c[1]]).collect(),
+                    Some((_, v)) => v.as_chunks::<2>().0.iter().map(|c| [c[0], c[1]]).collect(),
                     None => vec![[0.0, 0.0]; positions.len()],
                 };
                 let indices = match (&draco, primitive.indices) {
@@ -427,10 +429,17 @@ impl GltfModel {
                         kept_skin = Some(PrimitiveSkin {
                             skin: skin_index,
                             joints: joint_ids
-                                .chunks_exact(4)
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
                                 .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32])
                                 .collect(),
-                            weights: weights.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect(),
+                            weights: weights
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .map(|c| [c[0], c[1], c[2], c[3]])
+                                .collect(),
                         });
                     }
                 }

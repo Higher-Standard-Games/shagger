@@ -86,7 +86,7 @@ mod tests {
     fn every_vertex_lies_on_the_sphere() {
         let ico = create_ico_sphere(2.5, 3);
         assert_eq!(ico.vertex_count(), 20 * 9 * 3);
-        for p in ico.positions.chunks_exact(3) {
+        for p in ico.positions.as_chunks::<3>().0.iter() {
             let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
             assert!((r - 2.5).abs() < 1e-5);
         }

@@ -100,19 +100,27 @@ fn decode_wav(bytes: &[u8]) -> Result<(usize, u32, Vec<f32>), String> {
             let samples: Vec<f32> = match (float, bits) {
                 (false, 8) => data.iter().map(|&b| (f32::from(b) - 128.0) / 128.0).collect(),
                 (false, 16) => data
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
                     .collect(),
                 (false, 24) => data
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|c| (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f32 / 8_388_608.0)
                     .collect(),
                 (false, 32) => data
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32 / 2_147_483_648.0)
                     .collect(),
                 (true, 32) => data
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect(),
                 _ => return Err(format!("unsupported WAV format {tag} at {bits} bits")),

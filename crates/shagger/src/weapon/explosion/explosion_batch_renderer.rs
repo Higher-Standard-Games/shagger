@@ -122,7 +122,9 @@ fn fireball_shape() -> (Vec<Vertex>, Vec<u32>) {
     let sphere = create_ico_sphere(2.5, 3);
     let vertices = sphere
         .positions
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|p| Vertex {
             position: [p[0], p[1], p[2]],
             uv: [0.0; 2],
@@ -135,8 +137,10 @@ fn ray_shape() -> (Vec<Vertex>, Vec<u32>) {
     let cone = create_cylinder(1.0, 0.0, 1.0, 6);
     let vertices = cone
         .positions
-        .chunks_exact(3)
-        .zip(cone.uvs.chunks_exact(2))
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(cone.uvs.as_chunks::<2>().0.iter())
         .map(|(p, t)| Vertex {
             position: [p[0], p[1], p[2]],
             uv: [t[0], t[1]],
