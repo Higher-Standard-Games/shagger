@@ -160,16 +160,19 @@ impl EffectQuadBatch {
             label: Some(label),
             source: wgpu::ShaderSource::Wgsl(format!("{EFFECT_QUAD_WGSL}\n{effect_wgsl}").into()),
         });
+        let vertex_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+        let instance_attributes =
+            wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4];
         let buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<QuadVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+                attributes: &vertex_attributes,
             }),
             Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<EffectInstance>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4],
+                attributes: &instance_attributes,
             }),
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
