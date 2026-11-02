@@ -6,6 +6,7 @@
 //! [`EguiLayer::run`], then [`EguiLayer::paint`] it into a render pass over
 //! whatever the game drew.
 
+pub use egui;
 use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
 use winit::event::WindowEvent;
 use winit::window::Window;
