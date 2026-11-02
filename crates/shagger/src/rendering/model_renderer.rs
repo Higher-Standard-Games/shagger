@@ -204,6 +204,51 @@ struct PipelineKey {
     pass: PassKind,
 }
 
+/// The pipelines one draw of `material` takes, in draw order: an opaque
+/// outlined mesh draws its outline colour, itself, then the outline into
+/// depth; a blended mesh with separate culling draws its back faces first.
+fn pipeline_keys(material: &GpuMaterial, mirrored: bool, skinned: bool, outlined: bool) -> Vec<PipelineKey> {
+    let key = PipelineKey {
+        blend: material.blend,
+        cull: if material.two_sided { Cull::None } else { Cull::Back },
+        depth_write: material.depth_write,
+        standard: material.standard,
+        mirrored,
+        skinned,
+        pass: PassKind::Color,
+    };
+    if material.blend == BlendKind::Opaque {
+        if outlined {
+            vec![
+                PipelineKey {
+                    pass: PassKind::Outline,
+                    ..key
+                },
+                key,
+                PipelineKey {
+                    pass: PassKind::OutlineDepth,
+                    ..key
+                },
+            ]
+        } else {
+            vec![key]
+        }
+    } else if material.separate_culling {
+        vec![
+            PipelineKey {
+                cull: Cull::Front,
+                ..key
+            },
+            PipelineKey {
+                cull: Cull::Back,
+                ..key
+            },
+        ]
+    } else {
+        vec![key]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Cull {
     None,
@@ -798,6 +843,32 @@ impl ModelRenderer {
     /// Writes this frame's camera, lights, draws and joint palette (the
     /// joint matrices skinned draws index, each already in model space:
     /// joint global times inverse bind).
+    /// Builds every pipeline the uploaded models can take (21.10's
+    /// precompile at load), mirrored or not, outlined or not, so the first
+    /// frame that shows a model does not stall on a pipeline. Returns how
+    /// many pipelines exist.
+    pub fn precompile(&mut self, gpu: &Gpu) -> usize {
+        let mut keys = Vec::new();
+        for model in &self.models {
+            for primitive in &model.primitives {
+                let material = &model.materials[primitive.material];
+                let skinned = primitive.skin.is_some();
+                // StandardMaterial meshes (the procedural pickups) take no
+                // outline, and their shader has no outline entry points.
+                let outlines: &[bool] = if material.standard { &[false] } else { &[false, true] };
+                for mirrored in [false, true] {
+                    for &outlined in outlines {
+                        keys.extend(pipeline_keys(material, mirrored, skinned, outlined));
+                    }
+                }
+            }
+        }
+        for key in keys {
+            self.pipeline(gpu, key);
+        }
+        self.pipelines.len()
+    }
+
     pub fn prepare(&mut self, gpu: &Gpu, view_proj: Mat4, eye: Vec3, draws: &[ModelDraw], joints: &[Mat4]) {
         let mut lights = [LightUniform::zeroed(); MAX_LIGHTS];
         for (slot, light) in lights.iter_mut().zip(&self.lights) {
@@ -857,53 +928,17 @@ impl ModelRenderer {
                 continue;
             }
             let material = &model.materials[primitive.material];
-            let key = PipelineKey {
-                blend: material.blend,
-                cull: if material.two_sided { Cull::None } else { Cull::Back },
-                depth_write: material.depth_write,
-                standard: material.standard,
-                mirrored: draw.world.determinant() < 0.0,
-                skinned,
-                pass: PassKind::Color,
-            };
+            let mirrored = draw.world.determinant() < 0.0;
+            let outlined = draw.outline.is_some_and(|o| o.width > 0.0);
+            let keys = pipeline_keys(material, mirrored, skinned, outlined);
             if material.blend == BlendKind::Opaque {
-                let outlined = draw.outline.is_some_and(|o| o.width > 0.0);
-                if outlined {
-                    opaque.push((
-                        *draw,
-                        PipelineKey {
-                            pass: PassKind::Outline,
-                            ..key
-                        },
-                    ));
-                }
-                opaque.push((*draw, key));
-                if outlined {
-                    opaque.push((
-                        *draw,
-                        PipelineKey {
-                            pass: PassKind::OutlineDepth,
-                            ..key
-                        },
-                    ));
-                }
+                opaque.extend(keys.into_iter().map(|key| (*draw, key)));
             } else {
                 let distance = draw.world.transform_point3(primitive.bounds_center).distance(eye);
-                if material.separate_culling {
-                    // Back faces first: culling the front ones.
-                    let back = PipelineKey {
-                        cull: Cull::Front,
-                        ..key
-                    };
-                    blended.push((*draw, back, distance, primitive.creation_order));
-                    let front = PipelineKey {
-                        cull: Cull::Back,
-                        ..key
-                    };
-                    blended.push((*draw, front, distance, primitive.creation_order));
-                } else {
-                    blended.push((*draw, key, distance, primitive.creation_order));
-                }
+                blended.extend(
+                    keys.into_iter()
+                        .map(|key| (*draw, key, distance, primitive.creation_order)),
+                );
             }
         }
         blended.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.3.cmp(&b.3)));
