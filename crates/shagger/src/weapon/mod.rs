@@ -1,6 +1,6 @@
 //! Weapons (SHAG `src/engine/weapon`): world barrel mounts, projectiles
-//! with their trails and explosions, bullet streaks, muzzle flashes and
-//! impact sparks so far.
+//! with their trails and explosions, bullet streaks, muzzle flashes,
+//! impact sparks and the rail so far.
 
 pub mod effect_geometry;
 pub mod explosion;
@@ -8,5 +8,7 @@ pub mod explosion_effect;
 pub mod impact;
 pub mod muzzle;
 pub mod projectile_manager;
+pub mod rail;
 pub mod tracer;
+pub mod voltaic;
 pub mod weapon_barrels;

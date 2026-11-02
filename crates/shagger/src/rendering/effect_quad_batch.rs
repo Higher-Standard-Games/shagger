@@ -1,7 +1,7 @@
 //! The GPU half of SHAG's instanced quad effects (bullet streaks, muzzle
 //! flashes, impact sparks): what Babylon does for a thin-instanced quad mesh
-//! with a `ShaderMaterial`. One quad, four vec4s per instance, the uniforms
-//! those materials take, premultiplied alpha (`ALPHA_PREMULTIPLIED`), no
+//! with a `ShaderMaterial`. One quad (or another template mesh, as the rail
+//! has), up to five vec4s per instance, the uniforms those materials take, premultiplied alpha (`ALPHA_PREMULTIPLIED`), no
 //! depth writes, both sides. Each effect's own shader follows
 //! `effect_quad.wgsl`.
 
@@ -12,8 +12,30 @@ use wgpu::util::DeviceExt;
 use super::gpu::Gpu;
 use super::world_renderer::DEPTH_FORMAT;
 
-/// One instance: four vec4s.
-pub type EffectInstance = [f32; 16];
+/// One instance: five vec4s (`i0` to `i4`; the quads use four).
+pub type EffectInstance = [f32; 20];
+
+/// A template mesh drawn once per instance: `position` and `uv` per vertex.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EffectTemplate {
+    pub positions: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+impl EffectTemplate {
+    /// The quads' template: uv in [-1, 1]; x runs tail to head on the
+    /// streaks.
+    #[must_use]
+    pub fn quad() -> Self {
+        let corners = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
+        Self {
+            positions: corners.map(|[x, y]| [x, y, 0.0]).to_vec(),
+            uvs: corners.to_vec(),
+            indices: vec![0, 1, 2, 2, 1, 3],
+        }
+    }
+}
 
 /// The shared shader half: uniforms, quad input and helpers.
 pub const EFFECT_QUAD_WGSL: &str = include_str!("effect_quad.wgsl");
@@ -57,6 +79,7 @@ pub struct EffectQuadBatch {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     capacity: usize,
+    index_count: u32,
     count: u32,
 }
 
@@ -65,20 +88,34 @@ impl EffectQuadBatch {
     /// `fs_main`.
     #[must_use]
     pub fn new(gpu: &Gpu, color_format: wgpu::TextureFormat, label: &str, effect_wgsl: &str, capacity: usize) -> Self {
+        Self::with_template(gpu, color_format, label, effect_wgsl, capacity, &EffectTemplate::quad())
+    }
+
+    /// The same batch over another template mesh.
+    #[must_use]
+    pub fn with_template(
+        gpu: &Gpu,
+        color_format: wgpu::TextureFormat,
+        label: &str,
+        effect_wgsl: &str,
+        capacity: usize,
+        template: &EffectTemplate,
+    ) -> Self {
         let device = &gpu.device;
-        // uv in [-1, 1]; x runs tail to head on the streaks.
-        let quad = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]].map(|[x, y]| QuadVertex {
-            position: [x, y, 0.0],
-            uv: [x, y],
-        });
+        let template_vertices: Vec<QuadVertex> = template
+            .positions
+            .iter()
+            .zip(&template.uvs)
+            .map(|(&position, &uv)| QuadVertex { position, uv })
+            .collect();
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::cast_slice(&quad),
+            contents: bytemuck::cast_slice(&template_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
-            contents: bytemuck::cast_slice(&[0u32, 1, 2, 2, 1, 3]),
+            contents: bytemuck::cast_slice(&template.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -132,7 +169,7 @@ impl EffectQuadBatch {
             Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<EffectInstance>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4],
+                attributes: &wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4],
             }),
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -191,6 +228,7 @@ impl EffectQuadBatch {
             globals,
             bind_group,
             capacity: capacity.max(1),
+            index_count: template.indices.len() as u32,
             count: 0,
         }
     }
@@ -227,7 +265,7 @@ impl EffectQuadBatch {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_vertex_buffer(1, self.instances.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..6, 0, 0..self.count);
+        pass.draw_indexed(0..self.index_count, 0, 0..self.count);
     }
 }
 
@@ -296,10 +334,20 @@ impl EffectSlots {
     }
 }
 
-/// Packs four vec4s as `Float32Array` stores them.
+/// Packs four vec4s as `Float32Array` stores them (`i4` stays zero).
 #[must_use]
 pub fn instance(values: [[f64; 4]; 4]) -> EffectInstance {
-    let mut out = [0.0f32; 16];
+    let mut out = [0.0f32; 20];
+    for (i, v) in values.iter().flatten().enumerate() {
+        out[i] = *v as f32;
+    }
+    out
+}
+
+/// Packs five vec4s.
+#[must_use]
+pub fn instance5(values: [[f64; 4]; 5]) -> EffectInstance {
+    let mut out = [0.0f32; 20];
     for (i, v) in values.iter().flatten().enumerate() {
         out[i] = *v as f32;
     }

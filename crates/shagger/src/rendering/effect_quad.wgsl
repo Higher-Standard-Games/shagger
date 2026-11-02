@@ -1,6 +1,6 @@
 // The shared half of SHAG's instanced quad effects (MIT): the uniforms
-// Babylon's ShaderMaterial binds for them, one quad with its uv in [-1, 1],
-// four vec4s per instance, and the helpers each shader repeats.
+// Babylon's ShaderMaterial binds for them, one quad with its uv in [-1, 1]
+// (or another template), up to five vec4s per instance, and the helpers each shader repeats.
 
 struct Globals {
     view_proj: mat4x4f,
@@ -21,6 +21,7 @@ struct QuadIn {
     @location(3) i1: vec4f,
     @location(4) i2: vec4f,
     @location(5) i3: vec4f,
+    @location(6) i4: vec4f,
 };
 
 fn safe_normalize(value: vec3f, fallback: vec3f) -> vec3f {
