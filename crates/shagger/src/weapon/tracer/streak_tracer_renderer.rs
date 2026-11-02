@@ -53,18 +53,26 @@ impl StreakTracerRenderer {
         let d = shot.end - shot.start;
         let distance = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
         let length = STREAK_LENGTH.min((distance * 0.6).max(8.0));
+        self.fire_segment(now, shot, STREAK_SPEED, length, STREAK_HALF_WIDTH);
+        distance / STREAK_SPEED
+    }
+
+    /// A streak with its own speed, length and half-width (a shotgun's
+    /// traveling pellet, which `HitscanEffects` draws as a mesh).
+    pub fn fire_segment(&mut self, now: f64, shot: &StreakTracerShot, speed: f64, length: f64, half_width: f64) {
+        let d = shot.end - shot.start;
+        let distance = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
         let c = shot.color.as_dvec3();
         self.slots.push(
             now,
-            (distance + length) / STREAK_SPEED,
+            (distance + length) / speed,
             instance([
                 [shot.start.x, shot.start.y, shot.start.z, now],
-                [shot.end.x, shot.end.y, shot.end.z, STREAK_SPEED],
+                [shot.end.x, shot.end.y, shot.end.z, speed],
                 [c.x, c.y, c.z, length],
-                [STREAK_HALF_WIDTH, shot.intensity.unwrap_or(18.0), 0.0, 0.0],
+                [half_width, shot.intensity.unwrap_or(18.0), 0.0, 0.0],
             ]),
         );
-        distance / STREAK_SPEED
     }
 
     /// Drops the streaks whose tails have reached their ends.

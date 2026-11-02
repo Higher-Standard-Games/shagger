@@ -5,6 +5,7 @@
 pub mod effect_geometry;
 pub mod explosion;
 pub mod explosion_effect;
+pub mod hitscan_effects;
 pub mod impact;
 pub mod muzzle;
 pub mod point_light_pool;
