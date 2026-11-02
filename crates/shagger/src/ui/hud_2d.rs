@@ -200,6 +200,28 @@ impl Hud2d {
             .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
 
+    /// A convex polygon in CSS pixels, a colour per point, filled as a fan
+    /// from the first (a `clip-path: polygon(...)` with its background
+    /// sampled at the points).
+    pub fn polygon(&mut self, points: &[[f32; 2]], colors: &[[f32; 4]]) {
+        if points.len() < 3 || colors.len() != points.len() {
+            return;
+        }
+        let s = self.scale;
+        let uv = self.atlas.white_uv();
+        let base = self.vertices.len() as u32;
+        for (p, &color) in points.iter().zip(colors) {
+            self.vertices.push(HudVertex {
+                position: [p[0] * s, p[1] * s],
+                uv,
+                color,
+            });
+        }
+        for i in 1..points.len() as u32 - 1 {
+            self.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+        }
+    }
+
     /// The width of `text` in CSS pixels.
     #[must_use]
     pub fn measure(&self, text: &str, style: &TextStyle) -> f32 {
@@ -325,6 +347,9 @@ mod tests {
         assert_eq!(hud.vertices[0].position, [20.0, 10.0]);
         assert_eq!(hud.vertices[3].position, [60.0, 30.0]);
         assert_eq!(hud.indices.len(), 6 * 5);
+        hud.polygon(&[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]], &[[1.0; 4]; 4]);
+        assert_eq!(hud.indices.len(), 6 * 6);
+        assert_eq!(hud.vertices.last().unwrap().position, [0.0, 8.0]);
         // Text without a font draws nothing and measures nothing.
         let style = TextStyle::new(FontId(0), 16.0, [1.0; 4]);
         assert_eq!(hud.text(0.0, 0.0, "x", &style), 0.0);
