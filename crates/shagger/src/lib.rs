@@ -14,6 +14,7 @@ pub mod camera;
 pub mod console;
 pub mod core;
 pub mod debug;
+pub mod input;
 pub mod lighting;
 pub mod loader;
 pub mod lobby;

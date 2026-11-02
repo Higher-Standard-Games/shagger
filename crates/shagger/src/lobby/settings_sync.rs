@@ -174,6 +174,20 @@ pub fn load_synced_storage(dir: &Path) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Write one synced storage entry in `dir` (`localStorage.setItem`), or
+/// remove it with `None`.
+pub fn save_synced_storage_entry(dir: &Path, key: &str, value: Option<&str>) {
+    let mut storage = load_synced_storage(dir);
+    match value {
+        Some(value) => storage.insert(key.to_owned(), value.to_owned()),
+        None => storage.remove(key),
+    };
+    write_text(
+        &dir.join("synced-storage.json"),
+        &serde_json::to_string(&storage).unwrap_or_default(),
+    );
+}
+
 /// One login's sync (`startSettingsSync` to `stopSettingsSync`).
 #[derive(Debug)]
 pub struct SettingsSync {
@@ -381,6 +395,10 @@ impl SettingsSync {
     }
 
     fn check(&mut self, cvars: &Cvars, now: Instant) {
+        // The file is the browser's local storage: bindings saved elsewhere count.
+        if let Some(storage) = read_json(&self.files.storage).and_then(|v| serde_json::from_value(v).ok()) {
+            self.storage = storage;
+        }
         let text = serialize_synced_settings(&collect_settings(cvars, &self.storage));
         if text != self.last {
             self.last = text.clone();
