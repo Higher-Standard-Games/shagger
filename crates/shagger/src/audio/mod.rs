@@ -2,6 +2,7 @@
 //! 9 and 22): decoding, the spatial model, the mixer and its buses, the
 //! sound card, and `AudioV2Sfx` in front of them.
 
+pub mod audio_cvars;
 pub mod audio_v2_sfx;
 pub mod decode;
 pub mod device;

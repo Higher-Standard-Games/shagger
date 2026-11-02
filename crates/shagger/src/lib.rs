@@ -10,9 +10,12 @@
 pub mod animation;
 pub mod audio;
 pub mod babylon;
+pub mod camera;
+pub mod core;
 pub mod lighting;
 pub mod loader;
 pub mod lobby;
+pub mod movement;
 pub mod network;
 pub mod physics;
 pub mod rendering;
