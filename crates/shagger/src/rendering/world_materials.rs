@@ -229,9 +229,101 @@ impl PassState {
     }
 }
 
+/// `loadOptionalTexture`'s candidates for a companion image (normal, gloss,
+/// glow): none when the shader blanks it, the named image's when it names
+/// one, otherwise the found base image's path with each suffix.
+#[must_use]
+pub fn optional_texture_candidates(
+    explicit_path: Option<&str>,
+    explicit_blank: bool,
+    fallback_base_path: &str,
+    suffixes: &[&str],
+) -> Vec<String> {
+    if explicit_blank {
+        return Vec::new();
+    }
+    if let Some(path) = explicit_path.filter(|p| !p.is_empty()) {
+        return add_texture_prefixes(path);
+    }
+    if fallback_base_path.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for suffix in suffixes {
+        candidates.extend(add_texture_prefixes(&format!("{fallback_base_path}{suffix}")));
+    }
+    dedupe_paths(candidates)
+}
+
+/// The normal map suffixes `loadTextures` tries.
+pub const NORMAL_SUFFIXES: [&str; 3] = ["_norm", "_normal", "_bump"];
+/// The gloss map suffixes `loadTextures` tries.
+pub const GLOSS_SUFFIXES: [&str; 2] = ["_gloss", "_spec"];
+
+/// `shouldUseGeneratedPBR`: an opaque surface with both a normal and a gloss
+/// map draws with the generated specular-gloss PBR material.
+#[must_use]
+pub fn should_use_generated_pbr(props: &ResolvedMaterialProps, has_normal_map: bool, has_gloss_map: bool) -> bool {
+    if !has_normal_map || !has_gloss_map {
+        return false;
+    }
+    if props.is_transparent || props.alpha_mode != AlphaMode::Opaque {
+        return false;
+    }
+    if props.alpha_cutoff.is_some() {
+        return false;
+    }
+    !(props.is_sky || props.is_fullbright)
+}
+
+/// Qfusion's gloss strength (`glossIntensity`, default 1.5).
+#[must_use]
+pub fn gloss_intensity(props: &ResolvedMaterialProps) -> f64 {
+    props.gloss_intensity.unwrap_or(1.5)
+}
+
+/// Qfusion's gloss lobe (`glossExponent`, default 24).
+#[must_use]
+pub fn gloss_exponent(props: &ResolvedMaterialProps) -> f64 {
+    props.gloss_exponent.unwrap_or(24.0)
+}
+
+/// `createGeneratedPBRMaterial`'s microsurface for a gloss exponent.
+#[must_use]
+pub fn pbr_micro_surface(exponent: f64) -> f64 {
+    1.0 - (2.0 / (exponent + 2.0)).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_candidates() {
+        assert!(optional_texture_candidates(Some("x"), true, "textures/a/b", &NORMAL_SUFFIXES).is_empty());
+        assert_eq!(
+            optional_texture_candidates(Some("a/b_n"), false, "textures/a/b", &NORMAL_SUFFIXES),
+            ["a/b_n", "textures/a/b_n"]
+        );
+        assert_eq!(
+            optional_texture_candidates(None, false, "textures/a/b", &GLOSS_SUFFIXES),
+            ["textures/a/b_gloss", "textures/a/b_spec"]
+        );
+        assert!(optional_texture_candidates(None, false, "", &GLOSS_SUFFIXES).is_empty());
+    }
+
+    #[test]
+    fn generated_pbr_needs_both_maps_on_an_opaque_surface() {
+        let props = ResolvedMaterialProps::default();
+        assert!(should_use_generated_pbr(&props, true, true));
+        assert!(!should_use_generated_pbr(&props, true, false));
+        let cutout = ResolvedMaterialProps {
+            alpha_cutoff: Some(0.5),
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(!should_use_generated_pbr(&cutout, true, true));
+        assert!((pbr_micro_surface(24.0) - (1.0 - (2.0f64 / 26.0).sqrt())).abs() < 1e-15);
+    }
 
     #[test]
     fn candidates_follow_the_builder() {

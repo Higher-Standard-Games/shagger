@@ -23,6 +23,7 @@ use crate::loader::bsp::mesh::autosprite_records::{autosprite_record, autosprite
 use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face, build_polygon_face};
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
 use crate::loader::bsp::mesh::pvs::build_face_clusters;
+use crate::loader::bsp::mesh::tangents::build_bsp_tangents;
 use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
@@ -64,6 +65,9 @@ pub struct WorldVertex {
     pub sprite_center: [f32; 4],
     pub sprite_frame: [f32; 4],
     pub sprite_right: [f32; 4],
+    /// `buildBspTangents` over the vertex's mesh: tangent and handedness,
+    /// for normal maps.
+    pub tangent: [f32; 4],
 }
 
 /// A run of indices drawn with one texture's material passes.
@@ -138,6 +142,22 @@ struct Group {
 const EMPTY_BOUNDS: [[f32; 3]; 2] = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
 
 impl Group {
+    /// `buildBspTangents` over the group's mesh, as `loadTextures` adds them
+    /// to a mesh with a normal map (here to every mesh; only normal-mapped
+    /// passes read them).
+    fn add_tangents(&mut self) {
+        let attribute = |f: fn(&WorldVertex) -> &[f32]| -> Vec<f32> {
+            self.vertices.iter().flat_map(|v| f(v).iter().copied()).collect()
+        };
+        let positions = attribute(|v| &v.position);
+        let normals = attribute(|v| &v.normal);
+        let uvs = attribute(|v| &v.uv);
+        let tangents = build_bsp_tangents(&positions, &normals, &uvs, &self.indices);
+        for (vertex, tangent) in self.vertices.iter_mut().zip(tangents.chunks_exact(4)) {
+            vertex.tangent.copy_from_slice(tangent);
+        }
+    }
+
     fn add_clusters(&mut self, clusters: &[i32]) {
         for &c in clusters {
             if !self.pvs_clusters.contains(&c) {
@@ -286,6 +306,7 @@ pub fn build_world_geometry(
                     sprite_center: [0.0; 4],
                     sprite_frame: [0.0; 4],
                     sprite_right: [0.0; 4],
+                    tangent: [0.0; 4],
                 });
             }
             let own: Vec<u32> = g.indices.iter().map(|i| i + start as u32).collect();
@@ -339,6 +360,7 @@ pub fn build_world_geometry(
                 sprite_center: [0.0; 4],
                 sprite_frame: [0.0; 4],
                 sprite_right: [0.0; 4],
+                tangent: [0.0; 4],
             });
         }
         group.indices.extend(g.indices.iter().map(|i| i + base));
@@ -361,7 +383,8 @@ pub fn build_world_geometry(
         }
         out.sprite_faces += sprites.faces.len();
     }
-    for group in groups.into_iter().chain(sprite_groups) {
+    for mut group in groups.into_iter().chain(sprite_groups) {
+        group.add_tangents();
         let base = out.vertices.len() as u32;
         out.batches.push(WorldBatch {
             texture_index: group.texture_index,

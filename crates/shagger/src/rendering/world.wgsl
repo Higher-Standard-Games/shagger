@@ -6,6 +6,12 @@
 // Each material pass adds its alpha test, image alpha and lighting mode
 // (full bright for surfaces without a lightmap stage, as Q3's rgbGen
 // identity draws them, and unlit for additive passes).
+//
+// Companion surfaces (BspMeshBuilder's loadTextures): a normal map bends
+// the surface normal through the mesh's tangent frame (Babylon's bump
+// include), and a gloss map with deluxe pages adds Qfusion's baked
+// Blinn-Phong gloss (bspSpec). Surfaces with both maps draw as SHAG's
+// generated specular-gloss PBR material, whose dynamic lights are GGX.
 
 // The dynamic point lights (rendering::dynamic_lights): per light, position
 // and range, diffuse, specular.
@@ -42,8 +48,15 @@ struct Material {
     // Distance ramps: from, to, near, far (Q3DistanceRampPlugin).
     ramp_rgb: vec4f,
     ramp_alpha: vec4f,
+    // x: normal map, y: gloss map, z: generated PBR material
+    surface: vec4f,
+    // x: baked gloss strength, y: gloss exponent, z: PBR roughness,
+    // w: PBR reflectivity colour
+    gloss: vec4f,
 };
 @group(1) @binding(2) var<uniform> material: Material;
+@group(1) @binding(3) var normal_texture: texture_2d<f32>;
+@group(1) @binding(4) var gloss_texture: texture_2d<f32>;
 
 struct VertexIn {
     @location(0) position: vec3f,
@@ -55,6 +68,7 @@ struct VertexIn {
     @location(6) sprite_center: vec4f,
     @location(7) sprite_frame: vec4f,
     @location(8) sprite_right: vec4f,
+    @location(9) tangent: vec4f,
 };
 
 struct VertexOut {
@@ -66,6 +80,12 @@ struct VertexOut {
     @location(4) lightmapped: f32,
     @location(5) fade: vec2f,
     @location(6) world_position: vec3f,
+    // bumpVertex's TBN columns (the world matrix is the identity)
+    @location(7) tbn0: vec3f,
+    @location(8) tbn1: vec3f,
+    // The untransformed UV the companion maps read (their own texture
+    // matrices are the identity).
+    @location(9) uv0: vec2f,
 };
 
 // computeLighting's diffuse for every dynamic light: N.L times a linear
@@ -147,46 +167,137 @@ fn vs_main(v: VertexIn) -> VertexOut {
     o.uv = v.uv.x * material.uv_rows.xy + v.uv.y * material.uv_rows.zw + material.uv_origin.xy;
     let depth = dot(globals.eye.xyz - billboard.position, normalize(normal));
     o.fade = vec2f(ramp(material.ramp_rgb, depth), ramp(material.ramp_alpha, depth));
+    o.uv0 = v.uv;
     o.uv2 = v.uv2;
     o.color = v.color;
     o.lightmapped = v.lightmapped;
     o.world_position = billboard.position;
+    let tbn_normal = normalize(normal);
+    let tbn_tangent = normalize(v.tangent.xyz);
+    o.tbn0 = tbn_tangent;
+    o.tbn1 = cross(tbn_normal, tbn_tangent) * v.tangent.w;
     return o;
+}
+
+const PI: f32 = 3.141592653589793;
+const EPSILON: f32 = 0.0000001;
+
+// The generated PBR material's dynamic lights (pbrClusteredLightingFunctions
+// with Babylon's defaults: Lambert diffuse at zero diffuse roughness,
+// height-correlated Smith GGX, legacy specular energy conservation, the
+// standard linear falloff since usePhysicalLightFalloff is off).
+struct PbrLighting {
+    diffuse: vec3f,
+    specular: vec3f,
+};
+
+fn pbr_dynamic(position: vec3f, n: vec3f, v: vec3f, reflectivity: vec3f, roughness: f32) -> PbrLighting {
+    var out = PbrLighting(vec3f(0.0), vec3f(0.0));
+    let n_dot_v = abs(dot(n, v)) + EPSILON;
+    let alpha_g = roughness * roughness + 0.0005;
+    let a2 = alpha_g * alpha_g;
+    for (var i = 0u; i < globals.dynamic.count.x; i++) {
+        let data = globals.dynamic.lights[3u * i];
+        let offset = data.xyz - position;
+        let distance = length(offset);
+        let attenuation = max(0.0, 1.0 - distance / data.w);
+        let l = offset / max(distance, EPSILON);
+        let h = normalize(v + l);
+        let n_dot_l = clamp(dot(n, l), EPSILON, 1.0);
+        let v_dot_h = clamp(dot(v, h), 0.0, 1.0);
+        let n_dot_h = clamp(dot(n, h), EPSILON, 1.0);
+        let color = globals.dynamic.lights[3u * i + 1u].rgb;
+        out.diffuse += (1.0 / PI) * attenuation * n_dot_l * color;
+        let fresnel = reflectivity + (vec3f(1.0) - reflectivity) * pow(1.0 - v_dot_h, 5.0);
+        let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+        let distribution = a2 / (PI * d * d);
+        let ggx_v = n_dot_l * sqrt(n_dot_v * (n_dot_v - a2 * n_dot_v) + a2);
+        let ggx_l = n_dot_v * sqrt(n_dot_l * (n_dot_l - a2 * n_dot_l) + a2);
+        let visibility = 0.5 / (ggx_v + ggx_l);
+        out.specular += fresnel * distribution * visibility * attenuation * n_dot_l * color;
+    }
+    return out;
+}
+
+// StandardMaterial's computeLighting specular for every dynamic light
+// (Blinn-Phong at the gloss exponent, the light's specular colour).
+fn dynamic_specular(position: vec3f, n: vec3f, v: vec3f, glossiness: f32) -> vec3f {
+    var sum = vec3f(0.0);
+    for (var i = 0u; i < globals.dynamic.count.x; i++) {
+        let data = globals.dynamic.lights[3u * i];
+        let direction = data.xyz - position;
+        let attenuation = max(0.0, 1.0 - length(direction) / data.w);
+        let angle = normalize(v + normalize(direction));
+        let spec = pow(max(0.0, dot(n, angle)), max(1.0, glossiness));
+        sum += spec * globals.dynamic.lights[3u * i + 2u].rgb * attenuation;
+    }
+    return sum;
 }
 
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let base = textureSample(base_texture, base_sampler, in.uv);
+    // Sampled in uniform control flow; the masks below choose what counts.
+    let bump = textureSample(normal_texture, base_sampler, in.uv0).xyz;
+    let gloss_map = textureSample(gloss_texture, base_sampler, in.uv).rgb;
+    let specular_map = textureSample(gloss_texture, base_sampler, in.uv0).rgb;
     var alpha = material.color.a;
     if (material.params.y > 0.5) { alpha = alpha * base.a; }
     if (material.params.w > 0.5) { alpha = alpha * in.color.a; }
     if (material.params.x >= 0.0 && alpha < material.params.x) { discard; }
-    var light = in.color.rgb;
-    if (material.params.z > 1.5) {
-        light = in.color.rgb;
-    } else if (material.params.z > 0.5) {
-        light = vec3f(1.0);
-    } else if (in.lightmapped > 0.5) {
-        // A layered page: the layer in lightmap U above 1, the page's U below it.
-        let layer = floor(in.uv2.x * 0.5);
-        let uv = vec2f(in.uv2.x - layer * 2.0, in.uv2.y);
-        light = textureSampleLevel(lightmap, lightmap_sampler, uv, i32(layer), 0.0).rgb * globals.lighting.x;
-        if (globals.lighting.y > 0.5) {
-            let encoded = textureSampleLevel(lightmap_direction, lightmap_sampler, uv, i32(layer), 0.0).rgb - vec3f(0.5);
-            let dir = encoded / max(length(encoded), 0.0001);
-            var n = normalize(in.normal);
-            if (!front) { n = -n; }
-            let n_dot_l = max(dot(n, dir), 0.0);
-            light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
-        }
-        // Game lights stay additive: StandardMaterial's computeLighting per
-        // light, summed into diffuseBase.
-        var n = normalize(in.normal);
-        if (!front) { n = -n; }
-        light += dynamic_diffuse(in.world_position, n);
+    let tint = material.color.rgb * in.fade.x;
+    if (material.params.z > 0.5 || in.lightmapped < 0.5) {
+        var light = in.color.rgb;
+        if (material.params.z < 1.5 && material.params.z > 0.5) { light = vec3f(1.0); }
+        let color = max(base.rgb * light * tint, vec3f(0.0));
+        return vec4f(pow(color, vec3f(2.2)), alpha * in.fade.y);
     }
-    // SHAG's BSP materials are StandardMaterials; with image processing as a
-    // post-process, default.fragment hands the HDR target linear colour.
-    let color = max(base.rgb * light * material.color.rgb * in.fade.x, vec3f(0.0));
+
+    // normalW, bent by the normal map (perturbNormal), then turned to the
+    // side seen.
+    var n = normalize(in.normal);
+    if (material.surface.x > 0.5) {
+        let tbn = mat3x3f(in.tbn0, in.tbn1, in.normal);
+        n = normalize(tbn * (bump * 2.0 - 1.0));
+    }
+    if (!front) { n = -n; }
+    let view = normalize(globals.eye.xyz - in.world_position);
+
+    // A layered page: the layer in lightmap U above 1, the page's U below it.
+    let layer = floor(in.uv2.x * 0.5);
+    let uv = vec2f(in.uv2.x - layer * 2.0, in.uv2.y);
+    var light = textureSampleLevel(lightmap, lightmap_sampler, uv, i32(layer), 0.0).rgb * globals.lighting.x;
+    var spec = vec3f(0.0);
+    if (globals.lighting.y > 0.5) {
+        let encoded = textureSampleLevel(lightmap_direction, lightmap_sampler, uv, i32(layer), 0.0).rgb - vec3f(0.5);
+        let dir = encoded / max(length(encoded), 0.0001);
+        let n_dot_l = max(dot(n, dir), 0.0);
+        light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
+        if (material.surface.y > 0.5) {
+            let half_vector = normalize(dir + view);
+            spec = gloss_map * material.gloss.x * pow(max(dot(n, half_vector), 0.0), material.gloss.y);
+        }
+    }
+
+    if (material.surface.z > 0.5) {
+        // The generated PBR material: linear albedo and dynamic terms, the
+        // baked terms multiplied in display space.
+        let albedo = pow(base.rgb, vec3f(2.2)) * tint;
+        let lit = pbr_dynamic(in.world_position, n, view, specular_map * material.gloss.w, material.gloss.z);
+        let baked = pow(max(pow(max(albedo, vec3f(0.0)), vec3f(1.0 / 2.2)) * (light + spec), vec3f(0.0)), vec3f(2.2));
+        let color = baked + max(lit.diffuse * albedo, vec3f(0.0)) + max(lit.specular, vec3f(0.0));
+        return vec4f(clamp(color, vec3f(0.0), vec3f(30.0)), alpha * in.fade.y);
+    }
+
+    // StandardMaterial: game lights stay additive in diffuseBase, and a
+    // gloss map is the specular colour (specularTexture replaces it).
+    let diffuse_base = dynamic_diffuse(in.world_position, n);
+    var final_specular = vec3f(0.0);
+    if (material.surface.y > 0.5) {
+        final_specular = dynamic_specular(in.world_position, n, view, material.gloss.y) * specular_map;
+    }
+    // With image processing as a post-process, default.fragment hands the
+    // HDR target linear colour.
+    let color = max(base.rgb * tint * (light + spec + diffuse_base) + final_specular, vec3f(0.0));
     return vec4f(pow(color, vec3f(2.2)), alpha * in.fade.y);
 }

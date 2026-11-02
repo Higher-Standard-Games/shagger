@@ -12,9 +12,14 @@
 //! distance ramps (`Q3StageColorPlugin`, `Q3DistanceRampPlugin`) apply to
 //! every pass.
 //!
+//! A lightmapped pass finds its companion images as `loadTextures` does:
+//! a normal map (read through [`build_bsp_tangents`](crate::loader::bsp::mesh::tangents::build_bsp_tangents)'s
+//! frame) and a gloss map, which with deluxe pages adds Qfusion's baked
+//! gloss; an opaque pass with both draws as SHAG's generated PBR material.
+//!
 //! Not yet drawn as SHAG draws them: environment and `$cubemap` reflections
 //! (a reflection pass is left out, an environment material draws its base
-//! image), normal, gloss and glow maps, and the sky.
+//! image), glow maps, and the sky.
 
 use std::collections::HashMap;
 
@@ -26,7 +31,9 @@ use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
 use super::world_geometry::{WorldGeometry, WorldVertex};
 use super::world_materials::{
-    Blend, MissingImage, PassState, add_texture_prefixes, build_diffuse_candidates, missing_image,
+    Blend, GLOSS_SUFFIXES, MissingImage, NORMAL_SUFFIXES, PassState, add_texture_prefixes, build_diffuse_candidates,
+    gloss_exponent, gloss_intensity, missing_image, optional_texture_candidates, pbr_micro_surface,
+    should_use_generated_pbr,
 };
 use crate::babylon::materials::texture::get_texture_matrix;
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
@@ -34,6 +41,7 @@ use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
 use crate::loader::shader::q3_shader_types::{AlphaGenType, DistanceRamp, RgbGenType, TcMod, WaveFunc};
 use crate::loader::shader::q3_stage_evaluation::{TcState, create_tc_state, evaluate_wave_func, step_tc_mods_into};
+use crate::loader::texture::texture_extensions::strip_texture_extension;
 
 /// The depth buffer format.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -66,6 +74,12 @@ struct MaterialUniform {
     /// Distance ramps (from, to, near, far); from = to = 1 when absent.
     ramp_rgb: [f32; 4],
     ramp_alpha: [f32; 4],
+    /// Companion surfaces (`tuneCompanionSurfaceMaterial`): x 1 with a
+    /// normal map, y 1 with a gloss map, z 1 for the generated PBR material.
+    surface: [f32; 4],
+    /// x: baked gloss strength (`glossIntensity`), y: gloss exponent,
+    /// z: PBR roughness (`1 - microSurface`), w: PBR reflectivity colour.
+    gloss: [f32; 4],
 }
 
 impl MaterialUniform {
@@ -368,6 +382,8 @@ impl WorldRenderer {
             entries: &[
                 texture_entry(0, wgpu::TextureViewDimension::D2),
                 sampler_entry(1),
+                texture_entry(3, wgpu::TextureViewDimension::D2),
+                texture_entry(4, wgpu::TextureViewDimension::D2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -410,8 +426,17 @@ impl WorldRenderer {
             ],
         });
 
-        // Images by candidate list, shared between passes; a bind group per pass.
+        // Images by candidate list, shared between passes; a bind group per
+        // pass. Surfaces without companions read a flat normal and no gloss.
         let mut views: HashMap<String, wgpu::TextureView> = HashMap::new();
+        let mut found: HashMap<String, String> = HashMap::new();
+        const FLAT_NORMAL: &str = "@flat_normal";
+        const NO_GLOSS: &str = "@no_gloss";
+        for (key, rgba) in [(FLAT_NORMAL, [128, 128, 255, 255]), (NO_GLOSS, [0, 0, 0, 255])] {
+            let view =
+                upload_texture(gpu, key, &Rgba8Image::solid(rgba)).create_view(&wgpu::TextureViewDescriptor::default());
+            views.insert(key.to_owned(), view);
+        }
         let mut texture_bind_groups = Vec::new();
         let mut keys: Vec<PipelineKey> = Vec::new();
         let mut missing = Vec::new();
@@ -426,28 +451,38 @@ impl WorldRenderer {
                 let state = PassState::of(props);
                 let candidates = build_diffuse_candidates(&batch.texture_name, props);
                 let fallback = missing_image(props);
-                let mut view_for = |candidates: &[String], fallback: Option<MissingImage>| -> Option<String> {
-                    let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
-                    if !views.contains_key(&key) {
-                        let image = match candidates.iter().find_map(|c| textures(c)) {
-                            Some(image) => image,
-                            None => match fallback? {
-                                MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
-                                MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
-                                MissingImage::White => Rgba8Image::white(),
-                                MissingImage::Untextured => {
-                                    missing.push(batch.texture_name.clone());
-                                    Rgba8Image::white()
-                                }
-                            },
-                        };
-                        let view = upload_texture(gpu, &batch.texture_name, &image)
-                            .create_view(&wgpu::TextureViewDescriptor::default());
-                        views.insert(key.clone(), view);
-                    }
-                    Some(key)
-                };
-                let base_view = view_for(&candidates, Some(fallback)).expect("a fallback always gives an image");
+                // The view's key and the base path of the image found (none for a fallback).
+                let mut view_for =
+                    |candidates: &[String], fallback: Option<MissingImage>| -> Option<(String, Option<String>)> {
+                        let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
+                        if !views.contains_key(&key) {
+                            let hit = candidates.iter().find_map(|c| textures(c).map(|image| (c, image)));
+                            if let Some((candidate, _)) = &hit {
+                                found.insert(key.clone(), strip_texture_extension(candidate).to_owned());
+                            }
+                            let image = match hit {
+                                Some((_, image)) => image,
+                                None => match fallback? {
+                                    MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
+                                    MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
+                                    MissingImage::White => Rgba8Image::white(),
+                                    MissingImage::Untextured => {
+                                        missing.push(batch.texture_name.clone());
+                                        Rgba8Image::white()
+                                    }
+                                },
+                            };
+                            let view = upload_texture(gpu, &batch.texture_name, &image)
+                                .create_view(&wgpu::TextureViewDescriptor::default());
+                            views.insert(key.clone(), view);
+                        }
+                        let path = found.get(&key).cloned();
+                        Some((key, path))
+                    };
+                let (base_view, base_path) =
+                    view_for(&candidates, Some(fallback)).expect("a fallback always gives an image");
+                // Companion images (`loadOptionalTexture`): the normal and
+                // gloss maps of a lit surface, beside its found base image.
                 let stage = props.primary_stage.as_ref();
                 // animMap frames (missing ones left out, as SHAG filters them).
                 let frame_views: Vec<String> = stage
@@ -456,7 +491,7 @@ impl WorldRenderer {
                     .map(|a| {
                         a.frames
                             .iter()
-                            .filter_map(|f| view_for(&add_texture_prefixes(f), None))
+                            .filter_map(|f| view_for(&add_texture_prefixes(f), None).map(|(key, _)| key))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -471,6 +506,44 @@ impl WorldRenderer {
                 } else {
                     1.0
                 };
+                // Only the baked lighting path reads them.
+                let base_path = base_path.unwrap_or_default();
+                let mut companion = |explicit: Option<&str>, blank: bool, suffixes: &[&str]| {
+                    if lighting != 0.0 {
+                        return None;
+                    }
+                    let candidates = optional_texture_candidates(explicit, blank, &base_path, suffixes);
+                    if candidates.is_empty() {
+                        return None;
+                    }
+                    view_for(&candidates, None).and_then(|(key, path)| path.map(|_| key))
+                };
+                let normal_view = companion(
+                    props.normal_texture.as_deref(),
+                    props.normal_texture_explicitly_blank,
+                    &NORMAL_SUFFIXES,
+                );
+                let gloss_view = companion(
+                    props.gloss_texture.as_deref(),
+                    props.gloss_texture_explicitly_blank,
+                    &GLOSS_SUFFIXES,
+                );
+                let pbr = should_use_generated_pbr(props, normal_view.is_some(), gloss_view.is_some());
+                let exponent = gloss_exponent(props);
+                let surface = [
+                    f32::from(u8::from(normal_view.is_some())),
+                    f32::from(u8::from(gloss_view.is_some())),
+                    f32::from(u8::from(pbr)),
+                    0.0,
+                ];
+                let gloss = [
+                    gloss_intensity(props) as f32,
+                    exponent as f32,
+                    (1.0 - pbr_micro_surface(exponent).clamp(0.0, 1.0)) as f32,
+                    gloss_intensity(props) as f32,
+                ];
+                let normal_view = normal_view.unwrap_or_else(|| FLAT_NORMAL.to_owned());
+                let gloss_view = gloss_view.unwrap_or_else(|| NO_GLOSS.to_owned());
                 let rgb_const = props
                     .rgb_gen
                     .filter(|g| g.kind == RgbGenType::Const)
@@ -497,6 +570,8 @@ impl WorldRenderer {
                     color: base_color,
                     ramp_rgb: ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
                     ramp_alpha: ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
+                    surface,
+                    gloss,
                 };
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("world material"),
@@ -520,6 +595,14 @@ impl WorldRenderer {
                             wgpu::BindGroupEntry {
                                 binding: 2,
                                 resource: buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&views[&normal_view]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(&views[&gloss_view]),
                             },
                         ],
                     }));
@@ -575,7 +658,7 @@ impl WorldRenderer {
                 }
             }
         }
-        let texture_count = views.len();
+        let texture_count = views.len() - 2;
         let opaque_count = opaque.len();
         let mut passes = Vec::new();
         let mut animations = Vec::new();
@@ -606,7 +689,7 @@ impl WorldRenderer {
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &wgpu::vertex_attr_array![
                             0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Float32,
-                            6 => Float32x4, 7 => Float32x4, 8 => Float32x4
+                            6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
                         ],
                     })],
                 },

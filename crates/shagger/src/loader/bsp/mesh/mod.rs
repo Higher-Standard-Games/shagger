@@ -8,5 +8,6 @@ pub mod coordinates;
 pub mod face_builders;
 pub mod lightmaps;
 pub mod pvs;
+pub mod tangents;
 pub mod types;
 pub mod vertices;
