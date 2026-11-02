@@ -239,9 +239,11 @@ impl SettingsSync {
 
     fn write_state(&self) {
         let Some(s) = &self.state else { return };
-        let mut v = serde_json::json!({ "accountId": s.account_id, "synced": s.synced, "syncedAt": s.synced_at });
+        // Millisecond times are whole: write them as `JSON.stringify` does.
+        let ms = |t: f64| Value::from(t as i64);
+        let mut v = serde_json::json!({ "accountId": s.account_id, "synced": s.synced, "syncedAt": ms(s.synced_at) });
         if let Some(e) = s.edited_at {
-            v["editedAt"] = serde_json::json!(e);
+            v["editedAt"] = ms(e);
         }
         write_text(&self.files.state, &v.to_string());
     }
