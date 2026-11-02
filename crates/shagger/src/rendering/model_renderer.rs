@@ -78,22 +78,6 @@ pub enum ModelLight {
     },
 }
 
-/// Babylon's image processing for the models: contrast and exposure.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImageProcessing {
-    pub contrast: f32,
-    pub exposure: f32,
-}
-
-impl Default for ImageProcessing {
-    fn default() -> Self {
-        Self {
-            contrast: 1.0,
-            exposure: 1.0,
-        }
-    }
-}
-
 /// An uploaded model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelHandle(usize);
@@ -285,7 +269,6 @@ pub struct ModelRenderer {
     white: wgpu::TextureView,
     models: Vec<GpuModel>,
     lights: Vec<ModelLight>,
-    image: ImageProcessing,
     /// This frame's draws, in drawing order, with their pipeline.
     frame: Vec<(ModelDraw, PipelineKey)>,
     /// Diffuse BRDF: false Lambert, true Burley.
@@ -442,7 +425,6 @@ impl ModelRenderer {
             white,
             models: Vec::new(),
             lights: Vec::new(),
-            image: ImageProcessing::default(),
             frame: Vec::new(),
             burley: false,
         }
@@ -451,10 +433,6 @@ impl ModelRenderer {
     /// The scene lights that reach the models (at most four are used).
     pub fn set_lights(&mut self, lights: Vec<ModelLight>) {
         self.lights = lights;
-    }
-
-    pub fn set_image_processing(&mut self, image: ImageProcessing) {
-        self.image = image;
     }
 
     /// Chooses the directional lights' diffuse BRDF: Burley's, or Lambert's.
@@ -836,12 +814,7 @@ impl ModelRenderer {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, 0.0],
-            image: [
-                self.image.contrast,
-                self.image.exposure,
-                if self.burley { 1.0 } else { 0.0 },
-                0.0,
-            ],
+            image: [0.0, 0.0, if self.burley { 1.0 } else { 0.0 }, 0.0],
             lights,
         };
         gpu.queue

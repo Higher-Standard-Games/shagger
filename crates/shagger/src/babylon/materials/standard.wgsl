@@ -10,8 +10,8 @@
 // Changes: rewritten in WGSL for the terms SHAG's procedural pickups use:
 // diffuse and specular from hemispheric and directional lights, emissive
 // colour and texture, emissive and opacity Fresnel, a diffuse texture with
-// its alpha, an RGB opacity texture, the ambient colour, and image
-// processing's contrast. No bump, reflection, refraction, lightmap, fog or
+// its alpha, an RGB opacity texture, the ambient colour, and the
+// linear output image processing as a post-process asks for. No bump, reflection, refraction, lightmap, fog or
 // shadows. The draw's emissive and diffuse overrides, texture matrix and
 // texture level stand in for the per-frame material writes SHAG makes.
 
@@ -27,7 +27,7 @@ struct Light {
 struct Globals {
     view_proj: mat4x4f,
     eye: vec4f,
-    // x: contrast, y: exposure
+    // unused (image processing runs as a post-process)
     image: vec4f,
     lights: array<Light, 4>,
 };
@@ -183,15 +183,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
         color = final_diffuse + final_specular;
     }
 
-    // Image processing: to linear, exposure, back to gamma, contrast.
-    color = pow(max(color, vec3f(0.0)), vec3f(2.2)) * globals.image.y;
-    color = clamp(pow(color, vec3f(1.0 / 2.2)), vec3f(0.0), vec3f(1.0));
-    let contrast = globals.image.x;
-    let high = color * color * (3.0 - 2.0 * color);
-    if contrast < 1.0 {
-        color = mix(vec3f(0.5), color, contrast);
-    } else {
-        color = mix(color, high, contrast - 1.0);
-    }
+    // Image processing runs as a post-process (`applyByPostProcess`), so
+    // default.fragment only takes the colour to linear space for the HDR
+    // target.
+    color = pow(max(color, vec3f(0.0)), vec3f(2.2));
     return vec4f(color, clamp(alpha, 0.0, 1.0));
 }

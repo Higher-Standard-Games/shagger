@@ -2,10 +2,14 @@
 //! parity harness (RUST.md 8.3) and machines without a display.
 
 use super::gpu::Gpu;
+use super::hdr_target::HdrTarget;
 use super::world_renderer::DEPTH_FORMAT;
+use crate::babylon::post_processes::image_processing_post_process::{
+    ImageProcessingConfiguration, ImageProcessingPostProcess,
+};
 
-/// The colour format offscreen frames use. Like the browser canvas, it holds
-/// the shader's output bytes as they are.
+/// The colour format offscreen frames come out in. Like the browser canvas,
+/// it holds the output bytes as they are.
 pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Renders one frame of `width` × `height` and reads it back as RGBA8 rows.
@@ -17,25 +21,10 @@ pub fn render_to_rgba(
     clear: wgpu::Color,
     record: impl FnOnce(&mut wgpu::RenderPass<'_>),
 ) -> Vec<u8> {
-    let device = &gpu.device;
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let color = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("offscreen colour"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: OFFSCREEN_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let depth = device.create_texture(&wgpu::TextureDescriptor {
+    let color = output_texture(gpu, width, height);
+    let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen depth"),
-        size,
+        size: extent(width, height),
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -45,6 +34,65 @@ pub fn render_to_rgba(
     });
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
+    {
+        let mut pass = begin_main_pass(&mut encoder, &color_view, &depth_view, clear);
+        record(&mut pass);
+    }
+    read_back(gpu, encoder, &color, width, height)
+}
+
+/// Renders one frame as the window does: the scene into an HDR target
+/// (`HDR_FORMAT` renderers), then image processing into RGBA8, read back.
+pub fn render_hdr_to_rgba(
+    gpu: &Gpu,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+    post: &ImageProcessingPostProcess,
+    config: &ImageProcessingConfiguration,
+    record: impl FnOnce(&mut wgpu::RenderPass<'_>),
+) -> Vec<u8> {
+    let hdr = HdrTarget::new(gpu, width, height);
+    let color = output_texture(gpu, width, height);
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
+    {
+        let mut pass = begin_main_pass(&mut encoder, &hdr.color, &hdr.depth, clear);
+        record(&mut pass);
+    }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
+    read_back(gpu, encoder, &color, width, height)
+}
+
+fn extent(width: u32, height: u32) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    }
+}
+
+fn output_texture(gpu: &Gpu, width: u32, height: u32) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen colour"),
+        size: extent(width, height),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+/// Copies `color` out after the encoder's passes and returns its rows.
+fn read_back(gpu: &Gpu, mut encoder: wgpu::CommandEncoder, color: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {
+    let device = &gpu.device;
     let row = (4 * width).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("offscreen readback"),
@@ -52,14 +100,6 @@ pub fn render_to_rgba(
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("offscreen"),
-    });
-    {
-        let mut pass = begin_main_pass(&mut encoder, &color_view, &depth_view, clear);
-        record(&mut pass);
-    }
     encoder.copy_texture_to_buffer(
         color.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -70,7 +110,7 @@ pub fn render_to_rgba(
                 rows_per_image: Some(height),
             },
         },
-        size,
+        extent(width, height),
     );
     gpu.queue.submit([encoder.finish()]);
 

@@ -31,7 +31,7 @@ struct Light {
 struct Globals {
     view_proj: mat4x4f,
     eye: vec4f,
-    // x: contrast, y: exposure, z: diffuse model (0 Lambert, 1 Burley)
+    // z: diffuse model (0 Lambert, 1 Burley); x, y unused
     image: vec4f,
     lights: array<Light, 4>,
 };
@@ -183,15 +183,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         }
         color = diffuse * albedo * (1.0 - material.params.x);
     }
-    color *= globals.image.y;
-    color = clamp(pow(max(color, vec3f(0.0)), vec3f(1.0 / 2.2)), vec3f(0.0), vec3f(1.0));
-    // Image processing contrast.
-    let contrast = globals.image.x;
-    let high = color * color * (3.0 - 2.0 * color);
-    if contrast < 1.0 {
-        color = mix(vec3f(0.5), color, contrast);
-    } else {
-        color = mix(color, high, contrast - 1.0);
-    }
+    // Image processing runs as a post-process (`applyByPostProcess`), so the
+    // output stays linear: pbr.fragment's clamp to 30 for the HDR target.
+    color = clamp(color, vec3f(0.0), vec3f(30.0));
     return vec4f(color, alpha);
 }

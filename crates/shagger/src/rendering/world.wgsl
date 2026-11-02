@@ -156,5 +156,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
         }
     }
-    return vec4f(base.rgb * light * material.color.rgb * in.fade.x, alpha * in.fade.y);
+    // SHAG's BSP materials are StandardMaterials; with image processing as a
+    // post-process, default.fragment hands the HDR target linear colour.
+    let color = max(base.rgb * light * material.color.rgb * in.fade.x, vec3f(0.0));
+    return vec4f(pow(color, vec3f(2.2)), alpha * in.fade.y);
 }

@@ -14,6 +14,7 @@ pub mod camera;
 pub mod effect_quad_batch;
 pub mod frustum;
 pub mod gpu;
+pub mod hdr_target;
 pub mod model_renderer;
 pub mod offscreen;
 pub mod sky_renderer;

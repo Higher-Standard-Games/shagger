@@ -49,3 +49,10 @@ Ported files, with the Babylon.js source each came from and its version:
     (CreateRibbonVertexData) and mesh.vertexData.ts (_ComputeSides),
     Babylon.js 9.31.2: two open paths, double sided, as SHAG's projectile
     trails build them.
+
+  post_processes/image_processing_post_process.rs, post_processes/image_processing.wgsl
+    from packages/dev/core/src/Materials/imageProcessingConfiguration.ts,
+    PostProcesses/imageProcessingPostProcess.ts and the shaders
+    imageProcessing.fragment.fx, ShadersInclude/imageProcessingFunctions.fx
+    and helperFunctions.fx, Babylon.js 9.31.2: exposure, the vignette, gamma
+    and contrast from an HDR target, rewritten in WGSL.

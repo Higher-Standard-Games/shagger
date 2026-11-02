@@ -141,7 +141,8 @@ fn fs_fire(in: VertexOut) -> @location(0) vec4f {
     if in.alpha <= 0.0 {
         discard;
     }
-    return vec4f(clamp(in.color, vec3f(0.0), vec3f(1.0)), in.alpha);
+    // The batch shader's `uLinearOutput` (set under an HDR pipeline).
+    return vec4f(pow(clamp(in.color, vec3f(0.0), vec3f(1.0)), vec3f(2.2)), in.alpha);
 }
 
 @fragment
@@ -163,5 +164,5 @@ fn fs_spark(in: VertexOut) -> @location(0) vec4f {
     } else {
         sprite = mix(orange, rim, clamp((r - 0.7) / 0.3, 0.0, 1.0));
     }
-    return vec4f(sprite.rgb * in.color, sprite.a * in.alpha);
+    return vec4f(pow(max(sprite.rgb * in.color, vec3f(0.0)), vec3f(2.2)), sprite.a * in.alpha);
 }

@@ -29,5 +29,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let far = sky.inverse_view_proj * vec4<f32>(in.ndc, 0.5, 1.0);
     let direction = far.xyz / far.w;
-    return vec4<f32>(textureSample(sky_texture, sky_sampler, direction).rgb, 1.0);
+    // The skybox is a StandardMaterial: linear output for the HDR target.
+    let color = textureSample(sky_texture, sky_sampler, direction).rgb;
+    return vec4<f32>(pow(max(color, vec3<f32>(0.0)), vec3<f32>(2.2)), 1.0);
 }
