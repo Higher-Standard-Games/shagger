@@ -13,4 +13,5 @@ pub mod js;
 pub mod json;
 pub mod net;
 pub mod server;
+pub mod settings;
 pub mod spread_utils;

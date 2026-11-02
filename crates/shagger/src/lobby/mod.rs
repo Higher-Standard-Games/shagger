@@ -2,4 +2,5 @@
 //! The lobby server stays in TypeScript.
 
 pub mod lobby_client;
+pub mod settings_sync;
 pub mod types;

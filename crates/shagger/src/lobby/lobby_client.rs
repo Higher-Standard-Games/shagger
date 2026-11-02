@@ -213,6 +213,49 @@ impl LobbyClient {
         request_id
     }
 
+    /// `requestSettings`: the answer is `settings:data` with this id.
+    pub fn request_settings(&mut self) -> String {
+        let request_id = self.next_request_id("settings");
+        self.send(&json!({ "type": "settings:get", "requestId": request_id }));
+        request_id
+    }
+
+    /// `saveSettings`: the answer is `settings:saved` or `settings:error`.
+    pub fn save_settings(&mut self, settings: &str) -> String {
+        let request_id = self.next_request_id("settings");
+        self.send(&json!({ "type": "settings:save", "requestId": request_id, "settings": settings }));
+        request_id
+    }
+
+    /// `leaderboard:get` (TrueSkill); the answer is `leaderboard:page` or
+    /// `leaderboard:error` with this id.
+    pub fn request_leaderboard(
+        &mut self,
+        gametype: &str,
+        period: &str,
+        offset: u32,
+        limit: u32,
+        private: bool,
+    ) -> String {
+        let request_id = self.next_request_id("leaderboard");
+        let scope = if private { "private" } else { "public" };
+        self.send(&json!({
+            "type": "leaderboard:get", "requestId": request_id, "gametype": gametype, "period": period,
+            "offset": offset, "limit": limit, "scope": scope, "system": "trueskill"
+        }));
+        request_id
+    }
+
+    /// `stats:get`: this account's summary (`stats:summary`).
+    pub fn request_stats(&mut self, gametype: &str, period: &str, private: bool) -> String {
+        let request_id = self.next_request_id("stats");
+        let scope = if private { "private" } else { "public" };
+        self.send(&json!({
+            "type": "stats:get", "requestId": request_id, "gametype": gametype, "scope": scope, "period": period
+        }));
+        request_id
+    }
+
     /// `match:seat_reissue`: a new ticket when the one from `lobby:connect` expired.
     pub fn request_seat_reissue(&mut self, match_id: &str) -> String {
         let request_id = self.next_request_id("seat");
