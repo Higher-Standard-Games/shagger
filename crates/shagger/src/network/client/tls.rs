@@ -1,5 +1,6 @@
-//! The TLS setup for `wss://` connections to the lobby and game servers. It
-//! has no TypeScript counterpart: the browser brings its own.
+//! The TLS setup for `wss://` connections to the lobby and game servers and
+//! for HTTPS downloads ([`super::http_fetch`]). It has no TypeScript
+//! counterpart: the browser brings its own.
 //!
 //! The client trusts the Mozilla roots bundled by webpki-roots, so it works
 //! the same on every machine. Like Node's `NODE_EXTRA_CA_CERTS`, the PEM
@@ -16,7 +17,9 @@ use tokio_tungstenite::Connector;
 /// The environment variable naming extra trusted certificates.
 pub const EXTRA_CERTS_VAR: &str = "SSL_CERT_FILE";
 
-fn config() -> Arc<ClientConfig> {
+/// The rustls configuration every connection shares.
+#[must_use]
+pub fn config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
