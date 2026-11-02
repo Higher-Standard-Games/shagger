@@ -7,12 +7,20 @@
 // (full bright for surfaces without a lightmap stage, as Q3's rgbGen
 // identity draws them, and unlit for additive passes).
 
+// The dynamic point lights (rendering::dynamic_lights): per light, position
+// and range, diffuse, specular.
+struct DynamicLights {
+    count: vec4u,
+    lights: array<vec4f, 48>,
+};
+
 struct Globals {
     view_proj: mat4x4f,
     // x: gain, y: 1 when deluxe pages exist
     lighting: vec4f,
     ambient: vec4f,
     eye: vec4f,
+    dynamic: DynamicLights,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -57,7 +65,22 @@ struct VertexOut {
     @location(3) color: vec4f,
     @location(4) lightmapped: f32,
     @location(5) fade: vec2f,
+    @location(6) world_position: vec3f,
 };
+
+// computeLighting's diffuse for every dynamic light: N.L times a linear
+// falloff to the light's range.
+fn dynamic_diffuse(position: vec3f, n: vec3f) -> vec3f {
+    var sum = vec3f(0.0);
+    for (var i = 0u; i < globals.dynamic.count.x; i++) {
+        let data = globals.dynamic.lights[3u * i];
+        let direction = data.xyz - position;
+        let attenuation = max(0.0, 1.0 - length(direction) / data.w);
+        let ndl = max(0.0, dot(n, normalize(direction)));
+        sum += ndl * globals.dynamic.lights[3u * i + 1u].rgb * attenuation;
+    }
+    return sum;
+}
 
 // Q3DistanceRampPlugin: the eye's distance in front of the surface, eased.
 fn ramp(r: vec4f, depth: f32) -> f32 {
@@ -127,6 +150,7 @@ fn vs_main(v: VertexIn) -> VertexOut {
     o.uv2 = v.uv2;
     o.color = v.color;
     o.lightmapped = v.lightmapped;
+    o.world_position = billboard.position;
     return o;
 }
 
@@ -155,6 +179,11 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             let n_dot_l = max(dot(n, dir), 0.0);
             light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
         }
+        // Game lights stay additive: StandardMaterial's computeLighting per
+        // light, summed into diffuseBase.
+        var n = normalize(in.normal);
+        if (!front) { n = -n; }
+        light += dynamic_diffuse(in.world_position, n);
     }
     // SHAG's BSP materials are StandardMaterials; with image processing as a
     // post-process, default.fragment hands the HDR target linear colour.

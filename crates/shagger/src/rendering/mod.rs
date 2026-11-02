@@ -11,6 +11,7 @@ pub use glam;
 pub use wgpu;
 
 pub mod camera;
+pub mod dynamic_lights;
 pub mod effect_quad_batch;
 pub mod frustum;
 pub mod gpu;

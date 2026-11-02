@@ -32,6 +32,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
 use crate::babylon::materials::STANDARD_WGSL;
@@ -175,6 +176,7 @@ struct Globals {
     eye: [f32; 4],
     image: [f32; 4],
     lights: [LightUniform; MAX_LIGHTS],
+    dynamic: DynamicLightBlock,
 }
 
 #[repr(C)]
@@ -269,6 +271,7 @@ pub struct ModelRenderer {
     white: wgpu::TextureView,
     models: Vec<GpuModel>,
     lights: Vec<ModelLight>,
+    dynamic: DynamicLightBlock,
     /// This frame's draws, in drawing order, with their pipeline.
     frame: Vec<(ModelDraw, PipelineKey)>,
     /// Diffuse BRDF: false Lambert, true Burley.
@@ -425,12 +428,18 @@ impl ModelRenderer {
             white,
             models: Vec::new(),
             lights: Vec::new(),
+            dynamic: DynamicLightBlock::default(),
             frame: Vec::new(),
             burley: false,
         }
     }
 
     /// The scene lights that reach the models (at most four are used).
+    /// The cluster's dynamic point lights for the next `prepare`.
+    pub fn set_dynamic_lights(&mut self, lights: &[DynamicLight]) {
+        self.dynamic = DynamicLightBlock::pack(lights);
+    }
+
     pub fn set_lights(&mut self, lights: Vec<ModelLight>) {
         self.lights = lights;
     }
@@ -816,6 +825,7 @@ impl ModelRenderer {
             eye: [eye.x, eye.y, eye.z, 0.0],
             image: [0.0, 0.0, if self.burley { 1.0 } else { 0.0 }, 0.0],
             lights,
+            dynamic: self.dynamic,
         };
         gpu.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));

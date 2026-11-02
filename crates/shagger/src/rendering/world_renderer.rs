@@ -22,6 +22,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
 use super::world_geometry::{WorldGeometry, WorldVertex};
 use super::world_materials::{
@@ -45,6 +46,7 @@ struct Globals {
     ambient: [f32; 4],
     /// The camera position (distance ramps).
     eye: [f32; 4],
+    dynamic: DynamicLightBlock,
 }
 
 /// One pass's material uniform.
@@ -191,6 +193,7 @@ pub struct WorldRenderer {
     pipelines: Vec<wgpu::RenderPipeline>,
     lighting: [f32; 4],
     ambient: [f32; 4],
+    dynamic: DynamicLightBlock,
 }
 
 fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
@@ -681,7 +684,14 @@ impl WorldRenderer {
                 profile.ambient[2] as f32,
                 0.0,
             ],
+            dynamic: DynamicLightBlock::default(),
         }
+    }
+
+    /// The dynamic lights the next `prepare` hands the lightmapped surfaces
+    /// (`diffuseBase` in BspBakedLightingPlugin).
+    pub fn set_dynamic_lights(&mut self, lights: &[DynamicLight]) {
+        self.dynamic = DynamicLightBlock::pack(lights);
     }
 
     /// How many base images were uploaded.
@@ -760,6 +770,7 @@ impl WorldRenderer {
             lighting: self.lighting,
             ambient: self.ambient,
             eye: [eye.x, eye.y, eye.z, 0.0],
+            dynamic: self.dynamic,
         };
         gpu.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));

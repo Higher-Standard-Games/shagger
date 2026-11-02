@@ -4,8 +4,9 @@
 // toLinearSpace (pow 2.2); each scene light adds its diffuse share:
 //   hemispheric: mix(ground, diffuse, dot(N, L) * 0.5 + 0.5)
 //   directional: diffuse * NdotL * the diffuse BRDF
-// The sum times the albedo goes back to display space (pow 1 / 2.2), clamps,
-// and takes the image processing contrast. Unlit materials skip the lights.
+// The cluster's dynamic point lights add theirs with an inverse-square
+// falloff. The sum times the albedo stays linear, clamped to 30, for the HDR
+// target and its image processing. Unlit materials skip the lights.
 //
 // A skinned draw (a player) moves each vertex by its four weighted joints
 // from the frame's joint palette, as Babylon's bonesVertex include does. A
@@ -28,12 +29,20 @@ struct Light {
     specular: vec4f,
 };
 
+// The dynamic point lights (rendering::dynamic_lights): per light, position
+// and range, diffuse, specular.
+struct DynamicLights {
+    count: vec4u,
+    lights: array<vec4f, 48>,
+};
+
 struct Globals {
     view_proj: mat4x4f,
     eye: vec4f,
     // z: diffuse model (0 Lambert, 1 Burley); x, y unused
     image: vec4f,
     lights: array<Light, 4>,
+    dynamic: DynamicLights,
 };
 
 struct Draw {
@@ -180,6 +189,23 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
                 let vdh = clamp(dot(v, h), 0.0, 1.0);
                 diffuse += light.diffuse.rgb * ndl * diffuse_brdf(ndl, n_dot_v, vdh, material.params.y);
             }
+        }
+        // The cluster's point lights: physical (inverse square) falloff,
+        // inside the range the cluster culls them to.
+        for (var i = 0u; i < globals.dynamic.count.x; i++) {
+            let data = globals.dynamic.lights[3u * i];
+            let offset = data.xyz - in.world_position;
+            let distance_squared = dot(offset, offset);
+            if distance_squared >= data.w * data.w {
+                continue;
+            }
+            let l = normalize(offset);
+            let h = normalize(v + l);
+            let ndl = clamp(dot(n, l), 1e-6, 1.0);
+            let vdh = clamp(dot(v, h), 0.0, 1.0);
+            let attenuation = 1.0 / max(distance_squared, 1e-6);
+            diffuse += globals.dynamic.lights[3u * i + 1u].rgb * attenuation * ndl
+                * diffuse_brdf(ndl, n_dot_v, vdh, material.params.y);
         }
         color = diffuse * albedo * (1.0 - material.params.x);
     }

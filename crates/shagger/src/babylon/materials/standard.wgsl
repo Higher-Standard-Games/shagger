@@ -24,12 +24,20 @@ struct Light {
     specular: vec4f,
 };
 
+// The dynamic point lights (rendering::dynamic_lights): per light, position
+// and range, diffuse, specular.
+struct DynamicLights {
+    count: vec4u,
+    lights: array<vec4f, 48>,
+};
+
 struct Globals {
     view_proj: mat4x4f,
     eye: vec4f,
     // unused (image processing runs as a post-process)
     image: vec4f,
     lights: array<Light, 4>,
+    dynamic: DynamicLights,
 };
 
 struct Draw {
@@ -147,6 +155,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
                 let spec = pow(max(0.0, dot(normal, angle)), max(1.0, glossiness));
                 specular_base += spec * light.specular.rgb;
             }
+        }
+        // The cluster's point lights: computeLighting with a linear falloff
+        // to each light's range.
+        for (var i = 0u; i < globals.dynamic.count.x; i++) {
+            let data = globals.dynamic.lights[3u * i];
+            let direction = data.xyz - in.world_position;
+            let attenuation = max(0.0, 1.0 - length(direction) / data.w);
+            let l = normalize(direction);
+            let ndl = max(0.0, dot(normal, l));
+            diffuse_base += ndl * globals.dynamic.lights[3u * i + 1u].rgb * attenuation;
+            let angle = normalize(view_direction + l);
+            let spec = pow(max(0.0, dot(normal, angle)), max(1.0, glossiness));
+            specular_base += spec * globals.dynamic.lights[3u * i + 2u].rgb * attenuation;
         }
     }
 

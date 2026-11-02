@@ -1,11 +1,31 @@
 //! SHAG `src/engine/weapon/ExplosionEffect.ts`: the explosion presets, and
 //! which projectile takes which (`ProjectileManager.spawnImpact`).
 //!
-//! Not yet: the flash light (with dynamic lights) and the camera shake.
+//! Not yet: the camera shake.
 
 use glam::Vec3;
 
-use super::explosion::explosion_batch_renderer::ExplosionLook;
+use super::explosion::explosion_batch_material::EXPLOSION_FIRE_TIME;
+use super::explosion::explosion_batch_renderer::{EXPLOSION_LIFETIME, ExplosionLook};
+
+/// The flash light's intensity per unit of scale.
+const FLASH_LIGHT_GAIN: f64 = 0.1;
+
+/// The flash light `seconds` after an explosion went off, as `spawn`
+/// acquires it and `update` fades it: intensity and range, or `None` once
+/// the explosion is over (its light released).
+#[must_use]
+pub fn explosion_flash(look: &ExplosionLook, seconds: f64) -> Option<(f32, f32)> {
+    let age = seconds * look.speed;
+    if age >= EXPLOSION_LIFETIME {
+        return None;
+    }
+    // The flash fades with the fire, over the first 0.6 of explosion time.
+    let t = (age / EXPLOSION_FIRE_TIME).min(1.0);
+    let intensity = FLASH_LIGHT_GAIN * look.scale * (1.0 - t * t);
+    let range = 40.0 * look.scale * (1.0 - t * 0.5);
+    Some((intensity as f32, range as f32))
+}
 
 const DEFAULT_RAYS: (u32, u32) = (8, 12);
 

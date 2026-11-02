@@ -7,6 +7,7 @@ pub mod explosion;
 pub mod explosion_effect;
 pub mod impact;
 pub mod muzzle;
+pub mod point_light_pool;
 pub mod projectile_manager;
 pub mod rail;
 pub mod tracer;
