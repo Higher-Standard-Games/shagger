@@ -16,10 +16,12 @@
 //! a normal map (read through [`build_bsp_tangents`](crate::loader::bsp::mesh::tangents::build_bsp_tangents)'s
 //! frame) and a gloss map, which with deluxe pages adds Qfusion's baked
 //! gloss; an opaque pass with both draws as SHAG's generated PBR material.
+//! A glow image adds as the emissive, or, with an animated glow stage,
+//! draws as an additive shine pass after it (`registerGlowAnimation`).
 //!
 //! Not yet drawn as SHAG draws them: environment and `$cubemap` reflections
 //! (a reflection pass is left out, an environment material draws its base
-//! image), glow maps, and the sky.
+//! image), and the sky.
 
 use std::collections::HashMap;
 
@@ -39,7 +41,9 @@ use crate::babylon::materials::texture::get_texture_matrix;
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
-use crate::loader::shader::q3_shader_types::{AlphaGenType, DistanceRamp, RgbGenType, TcMod, WaveFunc};
+use crate::loader::shader::q3_shader_types::{
+    AlphaGenType, DistanceRamp, Q3ShaderStage, RgbGen, RgbGenType, TcMod, WaveFunc,
+};
 use crate::loader::shader::q3_stage_evaluation::{TcState, create_tc_state, evaluate_wave_func, step_tc_mods_into};
 use crate::loader::texture::texture_extensions::strip_texture_extension;
 
@@ -175,6 +179,22 @@ struct PipelineKey {
     blend: Blend,
     depth_write: bool,
     polygon_offset: bool,
+}
+
+/// One draw a material pass makes: the surface itself, then any shine
+/// overlay.
+struct Layer<'a> {
+    base_view: String,
+    frame_views: Vec<String>,
+    /// The stage the animation system steps, if any.
+    stage: Option<&'a Q3ShaderStage>,
+    params: [f32; 4],
+    rgb_gen: Option<RgbGen>,
+    alpha: f32,
+    ramps: ([f32; 4], [f32; 4]),
+    surface: [f32; 4],
+    gloss: [f32; 4],
+    key: PipelineKey,
 }
 
 struct DrawPass {
@@ -384,6 +404,7 @@ impl WorldRenderer {
                 sampler_entry(1),
                 texture_entry(3, wgpu::TextureViewDimension::D2),
                 texture_entry(4, wgpu::TextureViewDimension::D2),
+                texture_entry(5, wgpu::TextureViewDimension::D2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -544,17 +565,42 @@ impl WorldRenderer {
                 ];
                 let normal_view = normal_view.unwrap_or_else(|| FLAT_NORMAL.to_owned());
                 let gloss_view = gloss_view.unwrap_or_else(|| NO_GLOSS.to_owned());
-                let rgb_const = props
-                    .rgb_gen
-                    .filter(|g| g.kind == RgbGenType::Const)
-                    .and_then(|g| g.color)
-                    .map_or([1.0; 3], |c| c.map(|v| v as f32));
+                // The glow image (`loadOptionalTexture` with no suffixes):
+                // the emissive of a lit or fullbright surface, or, with a glow
+                // stage, the image of its additive shine overlay.
+                let glow_view = if lighting == 0.0 || props.is_fullbright {
+                    let candidates = optional_texture_candidates(
+                        props.glow_texture.as_deref(),
+                        props.glow_texture_explicitly_blank,
+                        "",
+                        &[],
+                    );
+                    view_for(&candidates, None).and_then(|(key, path)| path.map(|_| key))
+                } else {
+                    None
+                };
+                let shine_stage = props.glow_stage.as_ref().filter(|_| glow_view.is_some());
+                let shine_frames: Vec<String> = shine_stage
+                    .and_then(|s| s.anim_map.as_ref())
+                    .map(|a| {
+                        a.frames
+                            .iter()
+                            .filter_map(|f| view_for(&add_texture_prefixes(f), None).map(|(key, _)| key))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut surface = surface;
+                surface[3] = f32::from(u8::from(glow_view.is_some() && shine_stage.is_none()));
+                let glow_view = glow_view.unwrap_or_else(|| NO_GLOSS.to_owned());
+
                 let alpha_const = stage
                     .and_then(|s| s.alpha_gen)
                     .filter(|g| g.kind == AlphaGenType::Const)
                     .map_or(1.0, |g| g.value.unwrap_or(1.0) as f32);
-                let base_color = [rgb_const[0], rgb_const[1], rgb_const[2], alpha_const];
-                let mut uniform = MaterialUniform {
+                let mut layers = vec![Layer {
+                    base_view,
+                    frame_views,
+                    stage: stage.filter(|_| props.needs_animation),
                     params: [
                         state.alpha_cutoff.unwrap_or(-1.0),
                         if state.texture_alpha { 1.0 } else { 0.0 },
@@ -565,96 +611,142 @@ impl WorldRenderer {
                             0.0
                         },
                     ],
-                    uv_rows: [1.0, 0.0, 0.0, 1.0],
-                    uv_origin: [0.0; 4],
-                    color: base_color,
-                    ramp_rgb: ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
-                    ramp_alpha: ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
+                    rgb_gen: props.rgb_gen,
+                    alpha: alpha_const,
+                    ramps: (
+                        ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
+                        ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
+                    ),
                     surface,
                     gloss,
-                };
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("world material"),
-                    size: std::mem::size_of::<MaterialUniform>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let mut bind_group_for = |key: &str| {
-                    texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some(&batch.texture_name),
-                        layout: &texture_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&views[key]),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&base_sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(&views[&normal_view]),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::TextureView(&views[&gloss_view]),
-                            },
-                        ],
-                    }));
-                    texture_bind_groups.len() - 1
-                };
-                let bind_group = bind_group_for(&base_view);
-                let frames: Vec<usize> = frame_views.iter().map(|k| bind_group_for(k)).collect();
-                let animation = stage.filter(|_| props.needs_animation).map(|stage| {
-                    let tc_mods = stage.tc_mod.clone().unwrap_or_default();
-                    let tc_state = create_tc_state(&tc_mods);
-                    uniform.set_tc_state(&tc_state);
-                    PassAnimation {
-                        pass: 0,
-                        tc_mods,
-                        tc_state,
-                        rgb_wave: stage
-                            .rgb_gen
-                            .filter(|g| g.kind == RgbGenType::Wave)
-                            .and_then(|g| g.wave),
-                        alpha_wave: stage
-                            .alpha_gen
-                            .filter(|g| g.kind == AlphaGenType::Wave)
-                            .and_then(|g| g.wave),
-                        frames,
-                        frequency: stage.anim_map.as_ref().map_or(0.0, |a| a.frequency),
-                        base_color,
+                    key: PipelineKey {
+                        two_sided: batch.two_sided,
+                        blend: state.blend,
+                        depth_write: state.depth_write,
+                        polygon_offset: state.polygon_offset,
+                    },
+                }];
+                // registerGlowAnimation's shine: the glow image unlit and
+                // added (ALPHA_ONEONE) over the surface, without depth
+                // writes, stepped by the glow stage.
+                if let Some(glow_stage) = shine_stage {
+                    layers.push(Layer {
+                        base_view: glow_view.clone(),
+                        frame_views: shine_frames,
+                        stage: Some(glow_stage),
+                        params: [-1.0, 0.0, 1.0, 0.0],
+                        rgb_gen: glow_stage.rgb_gen,
+                        alpha: 1.0,
+                        ramps: (ramp(None), ramp(None)),
+                        surface: [0.0; 4],
+                        gloss: [0.0; 4],
+                        key: PipelineKey {
+                            two_sided: batch.two_sided,
+                            blend: Blend::OneOne,
+                            depth_write: false,
+                            polygon_offset: true,
+                        },
+                    });
+                }
+                for layer in layers {
+                    let rgb_const = layer
+                        .rgb_gen
+                        .filter(|g| g.kind == RgbGenType::Const)
+                        .and_then(|g| g.color)
+                        .map_or([1.0; 3], |c| c.map(|v| v as f32));
+                    let base_color = [rgb_const[0], rgb_const[1], rgb_const[2], layer.alpha];
+                    let mut uniform = MaterialUniform {
+                        params: layer.params,
+                        uv_rows: [1.0, 0.0, 0.0, 1.0],
+                        uv_origin: [0.0; 4],
+                        color: base_color,
+                        ramp_rgb: layer.ramps.0,
+                        ramp_alpha: layer.ramps.1,
+                        surface: layer.surface,
+                        gloss: layer.gloss,
+                    };
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("world material"),
+                        size: std::mem::size_of::<MaterialUniform>() as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    let mut bind_group_for = |key: &str| {
+                        texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some(&batch.texture_name),
+                            layout: &texture_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&views[key]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&base_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: buffer.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(&views[&normal_view]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::TextureView(&views[&gloss_view]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 5,
+                                    resource: wgpu::BindingResource::TextureView(&views[&glow_view]),
+                                },
+                            ],
+                        }));
+                        texture_bind_groups.len() - 1
+                    };
+                    let bind_group = bind_group_for(&layer.base_view);
+                    let frames: Vec<usize> = layer.frame_views.iter().map(|k| bind_group_for(k)).collect();
+                    let animation = layer.stage.map(|stage| {
+                        let tc_mods = stage.tc_mod.clone().unwrap_or_default();
+                        let tc_state = create_tc_state(&tc_mods);
+                        uniform.set_tc_state(&tc_state);
+                        PassAnimation {
+                            pass: 0,
+                            tc_mods,
+                            tc_state,
+                            rgb_wave: stage
+                                .rgb_gen
+                                .filter(|g| g.kind == RgbGenType::Wave)
+                                .and_then(|g| g.wave),
+                            alpha_wave: stage
+                                .alpha_gen
+                                .filter(|g| g.kind == AlphaGenType::Wave)
+                                .and_then(|g| g.wave),
+                            frames,
+                            frequency: stage.anim_map.as_ref().map_or(0.0, |a| a.frequency),
+                            base_color,
+                        }
+                    });
+                    gpu.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
+                    let key = layer.key;
+                    let pipeline = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                        keys.push(key);
+                        keys.len() - 1
+                    });
+                    let pass = DrawPass {
+                        pipeline,
+                        bind_group,
+                        uniform,
+                        buffer,
+                        first_index: batch.first_index,
+                        index_count: batch.index_count,
+                        batch: batch_index,
+                    };
+                    if layer.key.blend != Blend::Opaque {
+                        blended.push((pass, animation));
+                    } else {
+                        opaque.push((pass, animation));
                     }
-                });
-                gpu.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
-                let key = PipelineKey {
-                    two_sided: batch.two_sided,
-                    blend: state.blend,
-                    depth_write: state.depth_write,
-                    polygon_offset: state.polygon_offset,
-                };
-                let pipeline = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
-                    keys.push(key);
-                    keys.len() - 1
-                });
-                let pass = DrawPass {
-                    pipeline,
-                    bind_group,
-                    uniform,
-                    buffer,
-                    first_index: batch.first_index,
-                    index_count: batch.index_count,
-                    batch: batch_index,
-                };
-                if state.is_blended() {
-                    blended.push((pass, animation));
-                } else {
-                    opaque.push((pass, animation));
                 }
             }
         }

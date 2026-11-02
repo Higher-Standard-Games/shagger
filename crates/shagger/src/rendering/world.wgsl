@@ -12,6 +12,8 @@
 // include), and a gloss map with deluxe pages adds Qfusion's baked
 // Blinn-Phong gloss (bspSpec). Surfaces with both maps draw as SHAG's
 // generated specular-gloss PBR material, whose dynamic lights are GGX.
+// A glow map adds as the emissive; with an animated glow stage it draws
+// instead as an additive shine pass over the surface.
 
 // The dynamic point lights (rendering::dynamic_lights): per light, position
 // and range, diffuse, specular.
@@ -48,7 +50,8 @@ struct Material {
     // Distance ramps: from, to, near, far (Q3DistanceRampPlugin).
     ramp_rgb: vec4f,
     ramp_alpha: vec4f,
-    // x: normal map, y: gloss map, z: generated PBR material
+    // x: normal map, y: gloss map, z: generated PBR material, w: glow map
+    // as the emissive
     surface: vec4f,
     // x: baked gloss strength, y: gloss exponent, z: PBR roughness,
     // w: PBR reflectivity colour
@@ -57,6 +60,7 @@ struct Material {
 @group(1) @binding(2) var<uniform> material: Material;
 @group(1) @binding(3) var normal_texture: texture_2d<f32>;
 @group(1) @binding(4) var gloss_texture: texture_2d<f32>;
+@group(1) @binding(5) var glow_texture: texture_2d<f32>;
 
 struct VertexIn {
     @location(0) position: vec3f,
@@ -241,6 +245,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let bump = textureSample(normal_texture, base_sampler, in.uv0).xyz;
     let gloss_map = textureSample(gloss_texture, base_sampler, in.uv).rgb;
     let specular_map = textureSample(gloss_texture, base_sampler, in.uv0).rgb;
+    let glow = textureSample(glow_texture, base_sampler, in.uv0).rgb * material.surface.w;
     var alpha = material.color.a;
     if (material.params.y > 0.5) { alpha = alpha * base.a; }
     if (material.params.w > 0.5) { alpha = alpha * in.color.a; }
@@ -248,8 +253,14 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let tint = material.color.rgb * in.fade.x;
     if (material.params.z > 0.5 || in.lightmapped < 0.5) {
         var light = in.color.rgb;
-        if (material.params.z < 1.5 && material.params.z > 0.5) { light = vec3f(1.0); }
-        let color = max(base.rgb * light * tint, vec3f(0.0));
+        var image = base.rgb;
+        if (material.params.z < 1.5 && material.params.z > 0.5) {
+            light = vec3f(1.0);
+            // A fullbright surface's emissive is its glow image when it has
+            // one, and its diffuse adds nothing with lighting disabled.
+            if (material.surface.w > 0.5) { image = glow; }
+        }
+        let color = max(image * light * tint, vec3f(0.0));
         return vec4f(pow(color, vec3f(2.2)), alpha * in.fade.y);
     }
 
@@ -285,7 +296,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         let albedo = pow(base.rgb, vec3f(2.2)) * tint;
         let lit = pbr_dynamic(in.world_position, n, view, specular_map * material.gloss.w, material.gloss.z);
         let baked = pow(max(pow(max(albedo, vec3f(0.0)), vec3f(1.0 / 2.2)) * (light + spec), vec3f(0.0)), vec3f(2.2));
-        let color = baked + max(lit.diffuse * albedo, vec3f(0.0)) + max(lit.specular, vec3f(0.0));
+        let emissive = pow(glow, vec3f(2.2));
+        let color = baked + max(lit.diffuse * albedo, vec3f(0.0)) + emissive + max(lit.specular, vec3f(0.0));
         return vec4f(clamp(color, vec3f(0.0), vec3f(30.0)), alpha * in.fade.y);
     }
 
@@ -298,6 +310,6 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     }
     // With image processing as a post-process, default.fragment hands the
     // HDR target linear colour.
-    let color = max(base.rgb * tint * (light + spec + diffuse_base) + final_specular, vec3f(0.0));
+    let color = max(base.rgb * tint * (light + spec + diffuse_base) + final_specular + glow, vec3f(0.0));
     return vec4f(pow(color, vec3f(2.2)), alpha * in.fade.y);
 }
