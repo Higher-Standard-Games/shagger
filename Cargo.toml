@@ -5,7 +5,7 @@ members = ["crates/shagger_shared", "crates/shagger"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 repository = "https://github.com/Higher-Standard-Games/shagger"
 
 [workspace.lints.rust]

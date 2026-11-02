@@ -4,6 +4,7 @@
 //! with the same sizes, colours and fonts. `rendering::hud_2d_renderer`
 //! puts a frame's batch on screen.
 
+pub mod egui_layer;
 pub mod font;
 pub mod glyph_atlas;
 pub mod hud;
