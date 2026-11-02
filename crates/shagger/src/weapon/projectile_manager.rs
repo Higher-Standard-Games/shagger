@@ -259,6 +259,13 @@ pub struct ProjectileTrail {
 }
 
 impl ProjectileTrail {
+    /// Forgets the points but keeps the uploaded ribbons, so the trail can
+    /// serve the next projectile of its type (SHAG disposes the meshes; a
+    /// match fires hundreds, so they are pooled here instead).
+    pub fn reset(&mut self) {
+        self.points.clear();
+    }
+
     /// `updateTrail`'s points: the first update pre-fills the trail with
     /// points packed just behind `position`; each records `position`,
     /// dropping the oldest, then clamps the length.
