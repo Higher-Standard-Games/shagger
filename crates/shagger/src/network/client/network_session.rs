@@ -39,6 +39,8 @@ pub enum SessionRequest {
         admission_ticket: Option<String>,
     },
     Spectate,
+    /// Back into play after a death (`RequestSpawn`).
+    RequestSpawn,
     Chat {
         text: String,
         team_only: bool,
@@ -262,6 +264,7 @@ async fn pump<C: EventCodec>(
                         host.send_join_game(team_id.as_deref(), manual_pick, admission_ticket.as_deref())
                     }
                     Some(SessionRequest::Spectate) => host.send_spectate(),
+                    Some(SessionRequest::RequestSpawn) => host.send_request_spawn(),
                     Some(SessionRequest::Chat { text, team_only }) => host.send_chat(&text, team_only),
                     Some(SessionRequest::ClientPrefs(p)) => host.set_client_prefs(p),
                     Some(SessionRequest::Loadout { primary, secondary }) => host.send_loadout(&primary, &secondary),

@@ -453,6 +453,13 @@ impl<C: EventCodec> NetworkGameHost<C> {
             .then(|| Outgoing::reliable(codec::encode_client_prefs(prefs)))
     }
 
+    /// `Game.sendRequestSpawn`: back into play after a death.
+    #[must_use]
+    pub fn send_request_spawn(&self) -> Option<Outgoing> {
+        self.is_connected
+            .then(|| Outgoing::reliable(codec::encode_request_spawn()))
+    }
+
     /// `sendLoadout`.
     #[must_use]
     pub fn send_loadout(&self, primary: &str, secondary: &str) -> Option<Outgoing> {
