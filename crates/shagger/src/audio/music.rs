@@ -4,7 +4,8 @@
 //! `setPlaylistMuted`).
 //!
 //! The browser plays each track in an `<audio>` element; here an MP3 is
-//! decoded with `minimp3` (MIT, around the CC0 C library) and streamed
+//! decoded with `rmp3` (CC0, around the CC0 C library minimp3; the
+//! `minimp3` crate pulls in `slice-ring-buffer`, RUSTSEC-2025-0044) and streamed
 //! into the mixer's music bus through a ring buffer. On a sound card a
 //! thread decodes ahead; offline (`AudioV2Sfx::offline`) `update` decodes
 //! on the caller's thread, so a render to a file is the same every run.
@@ -14,7 +15,6 @@
 //! found or decoded is skipped (the playlists list one that the package
 //! does not hold).
 
-use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -81,7 +81,7 @@ impl Playlist {
 
 /// An MP3 decoded and resampled to stereo at the mixer's rate.
 struct TrackDecoder {
-    decoder: minimp3::Decoder<Cursor<Vec<u8>>>,
+    decoder: rmp3::DecoderOwned<Vec<u8>>,
     rate: u32,
     /// Source frames not yet passed, and where the next output frame
     /// falls among them.
@@ -95,7 +95,7 @@ struct TrackDecoder {
 impl TrackDecoder {
     fn new(bytes: Vec<u8>, rate: u32) -> Result<Self, String> {
         let mut decoder = Self {
-            decoder: minimp3::Decoder::new(Cursor::new(bytes)),
+            decoder: rmp3::DecoderOwned::new(bytes),
             rate,
             source: Vec::new(),
             source_rate: 0,
@@ -114,19 +114,16 @@ impl TrackDecoder {
     /// Decodes a frame into `pending`; sets `done` at the end.
     fn decode_more(&mut self) {
         loop {
-            match self.decoder.next_frame() {
-                Ok(frame) => {
-                    if frame.channels == 0 || frame.sample_rate <= 0 {
+            match self.decoder.next() {
+                Some(rmp3::Frame::Audio(audio)) => {
+                    let channels = usize::from(audio.channels());
+                    if channels == 0 || audio.sample_rate() == 0 {
                         continue;
                     }
-                    self.source_rate = frame.sample_rate as u32;
-                    for chunk in frame.data.chunks_exact(frame.channels) {
+                    self.source_rate = audio.sample_rate();
+                    for chunk in audio.samples().chunks_exact(channels) {
                         let l = f32::from(chunk[0]) / 32768.0;
-                        let r = if frame.channels > 1 {
-                            f32::from(chunk[1]) / 32768.0
-                        } else {
-                            l
-                        };
+                        let r = if channels > 1 { f32::from(chunk[1]) / 32768.0 } else { l };
                         self.source.push([l, r]);
                     }
                     self.resample(false);
@@ -134,8 +131,8 @@ impl TrackDecoder {
                         return;
                     }
                 }
-                Err(minimp3::Error::SkippedData) => {}
-                Err(_) => {
+                Some(rmp3::Frame::Other(_)) => {}
+                None => {
                     self.resample(true);
                     self.done = true;
                     return;

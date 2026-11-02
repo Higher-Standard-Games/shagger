@@ -41,7 +41,8 @@ draco-core = { version = "2.3", default-features = false, features = ["decoder",
 lewton = "0.10"
 rtrb = "0.4"
 cpal = "0.18"
-minimp3 = "0.6"
+rmp3 = { version = "0.3", features = ["std"] }
+swash = "0.2"
 
 [lints]
 workspace = true

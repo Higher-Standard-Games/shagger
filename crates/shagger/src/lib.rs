@@ -16,6 +16,7 @@ pub mod lobby;
 pub mod network;
 pub mod physics;
 pub mod rendering;
+pub mod ui;
 pub mod weapon;
 pub mod world;
 
