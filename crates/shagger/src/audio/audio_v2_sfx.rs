@@ -297,6 +297,30 @@ impl AudioV2Sfx {
         }
     }
 
+    /// Starts a music stream (see `music`): interleaved stereo at
+    /// `sample_rate()`, pushed into the other end of `samples`.
+    pub fn play_stream(&mut self, samples: rtrb::Consumer<f32>, volume: f32) -> VoiceId {
+        let id = self.next_id();
+        self.send(Command::PlayStream { id, samples, volume });
+        id
+    }
+
+    /// A playing voice's or stream's volume, ramped.
+    pub fn set_voice_volume(&mut self, id: VoiceId, volume: f32) {
+        self.send(Command::SetVoiceVolume(id, volume));
+    }
+
+    pub fn stop_voice(&mut self, id: VoiceId) {
+        self.send(Command::Stop(id));
+    }
+
+    /// Whether the offline mixer still plays `id` (always true on a device,
+    /// which cannot be asked).
+    #[must_use]
+    pub fn offline_is_playing(&self, id: VoiceId) -> bool {
+        self.offline_mixer().is_none_or(|m| m.is_playing(id))
+    }
+
     /// `dispose`'s silence: every sound stops; the loaded sounds stay.
     pub fn stop_all(&mut self) {
         self.loops.clear();

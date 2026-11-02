@@ -6,4 +6,5 @@ pub mod audio_v2_sfx;
 pub mod decode;
 pub mod device;
 pub mod mixer;
+pub mod music;
 pub mod spatial;

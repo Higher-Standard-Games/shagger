@@ -91,9 +91,17 @@ pub struct Play {
 }
 
 /// What the game thread asks of the mixer.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Command {
     Play(Play),
+    /// Music: interleaved stereo at the mixer's rate, pushed by a decoder
+    /// thread, on the music bus until stopped. An empty queue plays
+    /// silence.
+    PlayStream {
+        id: VoiceId,
+        samples: rtrb::Consumer<f32>,
+        volume: f32,
+    },
     Stop(VoiceId),
     SetVoiceVolume(VoiceId, f32),
     SetListener(Listener),
@@ -162,10 +170,21 @@ impl Voice {
     }
 }
 
+/// Music streams at once (a track and the one fading out).
+const MAX_STREAMS: usize = 4;
+
+#[derive(Debug)]
+struct StreamVoice {
+    id: VoiceId,
+    samples: rtrb::Consumer<f32>,
+    gain: Ramp,
+}
+
 pub struct Mixer {
     sample_rate: u32,
     ramp_frames: f32,
     voices: Vec<Voice>,
+    streams: Vec<StreamVoice>,
     /// sfx, then the four channels, then music.
     sfx: Ramp,
     buses: [Ramp; 5],
@@ -182,6 +201,7 @@ impl Mixer {
             sample_rate,
             ramp_frames: (PARAMETER_RAMP_SECONDS * f64::from(sample_rate)) as f32,
             voices: Vec::with_capacity(MAX_VOICES),
+            streams: Vec::with_capacity(MAX_STREAMS),
             sfx: Ramp::new(1.0),
             buses: [Ramp::new(1.0); 5],
             bus_gains: [[0.0; RENDER_QUANTUM]; 5],
@@ -209,16 +229,31 @@ impl Mixer {
 
     #[must_use]
     pub fn is_playing(&self, id: VoiceId) -> bool {
-        self.voices.iter().any(|v| v.id == id)
+        self.voices.iter().any(|v| v.id == id) || self.streams.iter().any(|v| v.id == id)
     }
 
     pub fn apply(&mut self, command: Command) {
         match command {
             Command::Play(play) => self.play(play),
-            Command::Stop(id) => self.voices.retain(|v| v.id != id),
+            Command::PlayStream { id, samples, volume } => {
+                if self.streams.len() < MAX_STREAMS {
+                    self.streams.push(StreamVoice {
+                        id,
+                        samples,
+                        gain: Ramp::new(volume.max(0.0)),
+                    });
+                }
+            }
+            Command::Stop(id) => {
+                self.voices.retain(|v| v.id != id);
+                self.streams.retain(|v| v.id != id);
+            }
             Command::SetVoiceVolume(id, volume) => {
                 let frames = self.ramp_frames;
                 if let Some(v) = self.voices.iter_mut().find(|v| v.id == id) {
+                    v.gain.set(volume, frames);
+                }
+                if let Some(v) = self.streams.iter_mut().find(|v| v.id == id) {
                     v.gain.set(volume, frames);
                 }
             }
@@ -226,6 +261,7 @@ impl Mixer {
             Command::SetSfxGain(gain) => self.sfx.set(gain, self.ramp_frames),
             Command::SetChannelGain(channel, gain) => self.buses[channel.index()].set(gain, self.ramp_frames),
             Command::SetMusicGain(gain) => self.buses[MUSIC_BUS].set(gain, self.ramp_frames),
+            // Music is not a sound effect: its streams keep playing.
             Command::StopAll => self.voices.clear(),
         }
     }
@@ -362,6 +398,19 @@ impl Mixer {
                 voice.cursor += 1;
             }
         }
+        let music = &self.bus_gains[MUSIC_BUS];
+        for stream in &mut self.streams {
+            for f in 0..frames {
+                let gain = stream.gain.next() * music[f];
+                if stream.samples.slots() < 2 {
+                    continue;
+                }
+                let l = stream.samples.pop().unwrap_or(0.0);
+                let r = stream.samples.pop().unwrap_or(0.0);
+                out[f * 2] += l * gain;
+                out[f * 2 + 1] += r * gain;
+            }
+        }
     }
 }
 
@@ -441,6 +490,29 @@ mod tests {
         assert!(out[2 * 240] > 0.2 && out[2 * 240] < 0.3, "{}", out[2 * 240]);
         assert_eq!(out[2 * 480], 0.0);
         assert_eq!(mixer.voice_count(), 1);
+    }
+
+    #[test]
+    fn a_stream_plays_what_it_is_given() {
+        let mut mixer = Mixer::new(48000);
+        let (mut producer, consumer) = rtrb::RingBuffer::new(16);
+        for s in [0.5, -0.5, 0.25, -0.25] {
+            producer.push(s).unwrap();
+        }
+        mixer.apply(Command::PlayStream {
+            id: 9,
+            samples: consumer,
+            volume: 1.0,
+        });
+        mixer.apply(Command::SetMusicGain(0.5));
+        let mut out = vec![0.0; 8];
+        mixer.render(&mut out);
+        // The music ramp has barely started: still close to full.
+        assert!((out[0] - 0.5).abs() < 0.01 && (out[1] + 0.5).abs() < 0.01);
+        assert_eq!(out[4..], [0.0; 4]);
+        assert!(mixer.is_playing(9));
+        mixer.apply(Command::Stop(9));
+        assert!(!mixer.is_playing(9));
     }
 
     #[test]
