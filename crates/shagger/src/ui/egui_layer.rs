@@ -22,7 +22,8 @@ pub struct EguiFrame {
 
 pub struct EguiLayer {
     pub ctx: egui::Context,
-    state: egui_winit::State,
+    /// The window's input; `None` offscreen, where input comes as `RawInput`.
+    state: Option<egui_winit::State>,
     renderer: Renderer,
 }
 
@@ -33,20 +34,51 @@ impl EguiLayer {
         let viewport = ctx.viewport_id();
         let state = egui_winit::State::new(ctx.clone(), viewport, window, None, None, None);
         let renderer = Renderer::new(&gpu.device, format, RendererOptions::default());
-        Self { ctx, state, renderer }
+        Self {
+            ctx,
+            state: Some(state),
+            renderer,
+        }
+    }
+
+    /// A layer without a window, for screenshots and tests: build frames with
+    /// [`EguiLayer::run_input`].
+    #[must_use]
+    pub fn offscreen(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
+        Self {
+            ctx: egui::Context::default(),
+            state: None,
+            renderer: Renderer::new(&gpu.device, format, RendererOptions::default()),
+        }
+    }
+
+    /// Builds one frame of UI from input given directly.
+    pub fn run_input(&mut self, input: egui::RawInput, ui: impl FnMut(&mut egui::Ui)) -> EguiFrame {
+        let output = self.ctx.run_ui(input, ui);
+        let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+        EguiFrame {
+            primitives,
+            textures: output.textures_delta,
+            pixels_per_point: output.pixels_per_point,
+        }
     }
 
     /// A window event; true when egui used it (a click on a button, typing
     /// in a field), so the game should not.
     pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
-        self.state.on_window_event(window, event).consumed
+        self.state
+            .as_mut()
+            .is_some_and(|s| s.on_window_event(window, event).consumed)
     }
 
     /// Builds one frame of UI.
     pub fn run(&mut self, window: &Window, ui: impl FnMut(&mut egui::Ui)) -> EguiFrame {
-        let input = self.state.take_egui_input(window);
+        let Some(state) = self.state.as_mut() else {
+            return self.run_input(egui::RawInput::default(), ui);
+        };
+        let input = state.take_egui_input(window);
         let output = self.ctx.run_ui(input, ui);
-        self.state.handle_platform_output(window, output.platform_output);
+        state.handle_platform_output(window, output.platform_output);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         EguiFrame {
             primitives,
@@ -63,7 +95,7 @@ impl EguiLayer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         size: [u32; 2],
-        frame: EguiFrame,
+        mut frame: EguiFrame,
     ) {
         let screen = ScreenDescriptor {
             size_in_pixels: size,
@@ -103,5 +135,7 @@ impl EguiLayer {
         for id in &frame.textures.free {
             self.renderer.free_texture(id);
         }
+        // Applied: epaint checks that no delta is dropped unhandled.
+        frame.textures.clear();
     }
 }

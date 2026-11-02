@@ -44,6 +44,40 @@ pub fn render_to_rgba(
     read_back(gpu, encoder, &color, width, height)
 }
 
+/// Clears a frame to `clear`, lets `record` encode into its colour view
+/// (egui paints this way, with its own passes), and reads it back.
+pub fn render_encoded_to_rgba(
+    gpu: &Gpu,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+    record: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
+) -> Vec<u8> {
+    let color = output_texture(gpu, width, height);
+    let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen encoded"),
+    });
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("offscreen clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(clear),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    record(&mut encoder, &view);
+    read_back(gpu, encoder, &color, width, height)
+}
+
 /// Renders one frame as the window does: the scene into an HDR target
 /// (`HDR_FORMAT` renderers), then image processing into RGBA8, read back.
 pub fn render_hdr_to_rgba(
