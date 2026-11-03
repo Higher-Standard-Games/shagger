@@ -407,6 +407,58 @@ pub fn load_collision(data: &[u8]) -> Result<BspCollisionData> {
     Ok(BspCollisionData { common, vertices })
 }
 
+/// The records `first .. first + count` that exist in a list of `len`: a
+/// damaged file's out-of-range part reads `undefined` in SHAG and is
+/// skipped, and here is never walked (a count of two billion stalled the
+/// collision build for a minute; fuzzing).
+#[must_use]
+pub fn record_range(first: i32, count: i32, len: usize) -> std::ops::Range<usize> {
+    let len = i64::try_from(len).unwrap_or(i64::MAX);
+    let start = i64::from(first).clamp(0, len);
+    let end = (i64::from(first) + i64::from(count)).clamp(start, len);
+    // Both within 0..=len, which came from a usize.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let range = start as usize..end as usize;
+    range
+}
+
+/// The same for every model, leaf and brush, in place: each names only
+/// records that exist, and what it names is otherwise unchanged. A node
+/// whose child is itself or an earlier node (a loop: a compiler writes
+/// children after their parent) gets no child there, so a walk down the
+/// tree always ends.
+pub fn clamp_ranges(c: &mut BspCommon) {
+    for (i, node) in c.nodes.iter_mut().enumerate() {
+        for child in &mut node.children {
+            if *child >= 0 && i64::from(*child) <= i64::try_from(i).unwrap_or(i64::MAX) {
+                *child = i32::MAX;
+            }
+        }
+    }
+    let fit = |first: &mut i32, count: &mut i32, len: usize| {
+        let r = record_range(*first, *count, len);
+        // Within an i32 range already.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        {
+            *first = r.start as i32;
+            *count = r.len() as i32;
+        }
+    };
+    let (faces, brushes, sides) = (c.faces.len(), c.brushes.len(), c.brush_sides.len());
+    let (leaf_faces, leaf_brushes) = (c.leaf_faces.len(), c.leaf_brushes.len());
+    for m in &mut c.models {
+        fit(&mut m.first_face, &mut m.num_faces, faces);
+        fit(&mut m.first_brush, &mut m.num_brushes, brushes);
+    }
+    for l in &mut c.leafs {
+        fit(&mut l.first_leaf_face, &mut l.num_leaf_faces, leaf_faces);
+        fit(&mut l.first_leaf_brush, &mut l.num_leaf_brushes, leaf_brushes);
+    }
+    for b in &mut c.brushes {
+        fit(&mut b.first_side, &mut b.num_sides, sides);
+    }
+}
+
 struct Loader<'a> {
     data: &'a [u8],
     header: BspHeader,
@@ -1027,11 +1079,17 @@ pub fn find_leaf_for_point<'b>(
         let plane = planes.get(usize::try_from(node.plane_index).ok()?)?;
         let n = plane.normal.map(f64::from);
         let dist = n[0] * point[0] + n[1] * point[1] + n[2] * point[2] - f64::from(plane.dist);
-        index = if dist >= 0.0 {
+        let child = if dist >= 0.0 {
             node.children[0]
         } else {
             node.children[1]
         };
+        // Children come after their parent; anything else is a loop in a
+        // damaged file, which would never end.
+        if child >= 0 && child <= index {
+            return None;
+        }
+        index = child;
     }
     leafs.get(usize::try_from(-(i64::from(index) + 1)).ok()?)
 }

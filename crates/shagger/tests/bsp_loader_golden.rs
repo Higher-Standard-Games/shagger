@@ -392,3 +392,68 @@ fn loads_like_shag() {
     }
     assert!(loaded > 100, "only {loaded} files loaded");
 }
+
+/// A damaged count names only records that exist once clamped: a model
+/// naming two billion brushes stalled the collision build for a minute
+/// (fuzzing).
+#[test]
+fn a_range_past_its_records_is_clamped_to_them() {
+    assert_eq!(bsp::record_range(2, 3, 10), 2..5);
+    assert_eq!(bsp::record_range(8, 0x7fff_ffff, 10), 8..10);
+    assert_eq!(bsp::record_range(-3, 5, 10), 0..2);
+    assert_eq!(bsp::record_range(12, 4, 10), 10..10);
+    assert_eq!(bsp::record_range(4, -2, 10), 4..4);
+    assert_eq!(bsp::record_range(i32::MAX, i32::MAX, 10), 10..10);
+    let doc = json::parse(include_str!("golden/bsp_loader.json")).unwrap();
+    let vectors = doc.get("vectors").and_then(Value::as_array).unwrap();
+    for v in vectors {
+        let data = hex(v.get("bytes").and_then(Value::as_str).unwrap());
+        let Ok(mut c) = bsp::load_collision(&data) else {
+            continue;
+        };
+        if let Some(m) = c.common.models.first_mut() {
+            m.num_brushes = i32::MAX;
+        }
+        bsp::clamp_ranges(&mut c.common);
+        for m in &c.common.models {
+            assert!((m.first_brush + m.num_brushes) as usize <= c.common.brushes.len());
+            assert!((m.first_face + m.num_faces) as usize <= c.common.faces.len());
+        }
+        for b in &c.common.brushes {
+            assert!((b.first_side + b.num_sides) as usize <= c.common.brush_sides.len());
+        }
+    }
+}
+
+/// A node whose child points back up the tree is a loop: the walk stops
+/// instead of spinning forever (fuzzing found one in a damaged map).
+#[test]
+fn a_loop_in_the_tree_ends_the_walk() {
+    let node = |children| bsp::BspNode {
+        plane_index: 0,
+        children,
+        mins: [0; 3],
+        maxs: [0; 3],
+    };
+    let planes = [bsp::BspPlane {
+        normal: [1.0, 0.0, 0.0],
+        dist: 0.0,
+    }];
+    let leafs = [bsp::BspLeaf {
+        cluster: 7,
+        area: 0,
+        mins: [0; 3],
+        maxs: [0; 3],
+        first_leaf_face: 0,
+        num_leaf_faces: 0,
+        first_leaf_brush: 0,
+        num_leaf_brushes: 0,
+    }];
+    let looped = [node([1, -1]), node([0, -1])];
+    assert!(find_leaf_for_point([1.0, 0.0, 0.0], &looped, &leafs, &planes).is_none());
+    let sound = [node([1, -1]), node([-1, -1])];
+    assert_eq!(
+        find_leaf_for_point([1.0, 0.0, 0.0], &sound, &leafs, &planes).map(|l| l.cluster),
+        Some(7)
+    );
+}

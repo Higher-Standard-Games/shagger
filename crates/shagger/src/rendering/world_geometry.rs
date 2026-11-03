@@ -18,7 +18,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
-use crate::loader::bsp::bsp_loader::BspFile;
+use crate::loader::bsp::bsp_loader::{BspFile, record_range};
 use crate::loader::bsp::mesh::autosprite_records::{autosprite_record, autosprite_vertex_data};
 use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face, build_polygon_face};
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
@@ -215,9 +215,7 @@ pub fn build_world_geometry(
     let mut keys: std::collections::HashMap<(i32, i32, bool), usize> = std::collections::HashMap::new();
     let mut sprite_groups: Vec<Group> = Vec::new();
     let mut sprite_keys: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
-    let first = usize::try_from(world.first_face).unwrap_or(0);
-    let count = usize::try_from(world.num_faces).unwrap_or(0);
-    for i in first..first + count {
+    for i in record_range(world.first_face, world.num_faces, bsp.common.faces.len()) {
         let Some(face) = bsp.common.faces.get(i) else { continue };
         if !should_render_texture(bsp, face.texture_index) {
             continue;

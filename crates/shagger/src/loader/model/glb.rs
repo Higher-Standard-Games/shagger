@@ -296,7 +296,7 @@ impl Glb {
             return Err(err("external buffers are not read"));
         }
         self.bin
-            .get(view.byte_offset..view.byte_offset + view.byte_length)
+            .get(view.byte_offset..view.byte_offset.saturating_add(view.byte_length))
             .ok_or_else(|| err("buffer view past the BIN chunk"))
     }
 
@@ -365,19 +365,34 @@ impl Glb {
             other => return Err(err(format!("component type {other}"))),
         };
         let Some(view_index) = a.buffer_view else {
+            // All zeros; a count no model has (fuzzing: two billion) is
+            // refused rather than filled.
+            let total = a
+                .count
+                .checked_mul(components)
+                .filter(|&n| n <= 1 << 24)
+                .ok_or_else(|| err("accessor too large"))?;
             let zero = [0u8; 4];
-            for _ in 0..a.count * components {
+            for _ in 0..total {
                 each(&zero);
             }
             return Ok(());
         };
-        let view = &self.document.buffer_views[view_index];
+        let view = self
+            .document
+            .buffer_views
+            .get(view_index)
+            .ok_or_else(|| err("accessor names a missing buffer view"))?;
         let bytes = self.view_bytes(view_index)?;
         let stride = view.byte_stride.unwrap_or(components * size);
+        let past = || err("accessor past its view");
         for i in 0..a.count {
             for c in 0..components {
-                let at = a.byte_offset + i * stride + c * size;
-                each(bytes.get(at..at + size).ok_or_else(|| err("accessor past its view"))?);
+                let at = i
+                    .checked_mul(stride)
+                    .and_then(|o| o.checked_add(a.byte_offset + c * size))
+                    .ok_or_else(past)?;
+                each(bytes.get(at..at + size).ok_or_else(past)?);
             }
         }
         Ok(())

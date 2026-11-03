@@ -19,7 +19,7 @@ use super::facet_bevels::build_facet_planes;
 use super::patch_tessellator::{PatchCollisionMesh, build_patch};
 use super::player_physics_constants::{PLAYER_HEIGHT, PLAYER_MINS_Z, PLAYER_RADIUS, STEPSIZE};
 use crate::babylon::maths::math_vector::Vector3;
-use crate::loader::bsp::bsp_loader::{BspBrush, BspCollisionData, BspEntity, BspLeaf, BspModel};
+use crate::loader::bsp::bsp_loader::{BspBrush, BspCollisionData, BspEntity, BspLeaf, BspModel, clamp_ranges};
 use shagger_shared::bsp::brush_model_state::{BrushModelState, extract_brush_models};
 use shagger_shared::bsp::lift_system::{LiftActor, LiftCrush, LiftSystem, LiftTrace, extract_lifts};
 use shagger_shared::bsp::map_entities::{EntityLike, ModelLike};
@@ -182,7 +182,9 @@ fn range(first: i32, count: i32) -> std::ops::Range<i64> {
 impl SweepCollisionBackend {
     /// `init`.
     #[must_use]
-    pub fn new(bsp: BspCollisionData) -> Self {
+    pub fn new(mut bsp: BspCollisionData) -> Self {
+        // Not in SHAG: a damaged count must not be walked (`clamp_ranges`).
+        clamp_ranges(&mut bsp.common);
         let brush_models = BrushModelState::new(extract_brush_models(&bsp.entities, &bsp.models));
         let mut brush_model_brushes = HashSet::new();
         let mut brush_model_faces = HashSet::new();
@@ -1331,7 +1333,12 @@ impl SweepCollisionBackend {
                 return -1;
             };
             let d = dot(q3, plane_normal(plane.normal)) - f64::from(plane.dist);
-            node_index = if d >= 0.0 { node.children[0] } else { node.children[1] };
+            let child = if d >= 0.0 { node.children[0] } else { node.children[1] };
+            // `new` has cut loops; this walk ends regardless.
+            if child >= 0 && child <= node_index {
+                return -1;
+            }
+            node_index = child;
         }
         -(i64::from(node_index) + 1)
     }

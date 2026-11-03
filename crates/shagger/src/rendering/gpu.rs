@@ -45,8 +45,16 @@ impl Gpu {
         .map_err(|e| GpuError(format!("no GPU device: {e}")))?;
         // wgpu's default panics on any validation error; one bad resource
         // from a package should cost that resource, not the game.
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            eprintln!("gpu: {e}");
+        // The first few in full; one that repeats every frame would bury
+        // the log, so after that only a count every thousand.
+        let errors = std::sync::atomic::AtomicU64::new(0);
+        device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            let n = errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n <= 20 {
+                eprintln!("gpu: {e}");
+            } else if n.is_multiple_of(1000) {
+                eprintln!("gpu: {n} errors so far; the latest: {e}");
+            }
         }));
         Ok(Self {
             instance,

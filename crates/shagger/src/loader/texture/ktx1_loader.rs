@@ -230,7 +230,7 @@ pub fn parse_ktx1(data: &[u8]) -> Result<Ktx1ParseResult<'_>, Ktx1Error> {
         }
         if is_compressed
             && let Some((bw, bh, bytes)) = compressed_block(header.gl_internal_format)
-            && image_size != (width.div_ceil(bw) * height.div_ceil(bh) * bytes) as usize
+            && image_size as u64 != u64::from(width.div_ceil(bw)) * u64::from(height.div_ceil(bh)) * u64::from(bytes)
         {
             return Err(Ktx1Error(format!(
                 "Invalid KTX1 compressed payload size at mip {level}"
@@ -487,10 +487,17 @@ pub fn software_decode_mip(data: &[u8], width: u32, height: u32, format: u32) ->
 pub fn ktx1_rgba(ktx: &Ktx1ParseResult<'_>) -> Option<(u32, u32, Vec<u8>)> {
     let mip = ktx.mip_levels.first()?;
     let (w, h) = (mip.width, mip.height);
-    let pixel_count = (w * h) as usize;
+    let pixel_count = usize::try_from(u64::from(w) * u64::from(h)).ok()?;
     let data = mip.data;
     if !ktx.is_compressed {
         let base = ktx.header.gl_base_internal_format;
+        // Babylon reads a short payload as zeros; a damaged header naming
+        // 65535 × 65535 over a few bytes would have us allocate 17 GB for
+        // them. Not in the TypeScript: a payload short of the pixels' first
+        // byte each is refused.
+        if data.len() < pixel_count {
+            return None;
+        }
         let expand = |f: &dyn Fn(usize) -> [u8; 4]| -> Vec<u8> { (0..pixel_count).flat_map(f).collect() };
         let byte = |i: usize| data.get(i).copied().unwrap_or(0);
         let rgba = if base == gl::RGBA && data.len() >= pixel_count * 4 {
@@ -593,6 +600,18 @@ mod tests {
         let file = ktx(0x1401, 0x190a, 0x8045, gl::LUMINANCE_ALPHA, 1, 1, &[10, 20, 0, 0]);
         let (_, _, rgba) = ktx1_rgba(&parse_ktx1(&file).unwrap()).unwrap();
         assert_eq!(rgba, [10, 10, 10, 20]);
+    }
+
+    /// Fuzzing: a header naming a huge image over a few bytes, or a
+    /// compressed size past `u32`, is refused rather than allocated.
+    #[test]
+    fn a_huge_image_over_a_short_payload_is_refused() {
+        let file = ktx(0x1401, 0x1908, 0x8058, 0x1908, 65535, 65535, &[0, 0, 0, 255]);
+        let parsed = parse_ktx1(&file).unwrap();
+        assert!(ktx1_rgba(&parsed).is_none());
+        // DXT1 (8-byte blocks) at 65535 × 65535 overflows u32 in the size check.
+        let file = ktx(0, 0, 0x83F1, 0x1908, 65535, 65535, &[0; 8]);
+        assert!(parse_ktx1(&file).is_err());
     }
 
     #[test]

@@ -651,6 +651,18 @@ mod tests {
         out
     }
 
+    /// Fuzzing: an accessor naming a buffer view the file does not have is
+    /// an error, not a panic.
+    #[test]
+    fn an_accessor_past_the_buffer_views_is_refused() {
+        let file = glb();
+        let from = br#"{"bufferView": 7, "componentType": 5123"#;
+        let at = file.windows(from.len()).position(|w| w == from).unwrap();
+        let mut file = file;
+        file[at + 15] = b'9';
+        assert!(GltfModel::from_glb(&file).is_err());
+    }
+
     #[test]
     fn skins_to_the_first_animation_frame() {
         let model = GltfModel::from_glb(&glb()).unwrap();

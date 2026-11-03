@@ -558,6 +558,8 @@ impl Cvars {
 
     fn load_from_storage(&mut self) {
         let Some(path) = &self.storage else { return };
+        // A save still on its way to disk is the newest text.
+        crate::core::atomic_file::flush_pending(std::time::Duration::from_secs(2));
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
@@ -615,8 +617,10 @@ impl Cvars {
         let Some(path) = &self.storage else { return };
         let text = Value::Object(self.persisted()).to_string();
         // A failed write keeps the values for this run, as the browser does;
-        // a crash mid write keeps the last whole file.
-        let _ = crate::core::atomic_file::write_atomic(path, text.as_bytes());
+        // a crash mid write keeps the last whole file. Off the game thread:
+        // a slider sets its cvar every frame. The game flushes before it
+        // exits (`atomic_file::flush_pending`).
+        crate::core::atomic_file::write_atomic_later(path, text.into_bytes());
     }
 
     // ── Batch ──
@@ -795,6 +799,7 @@ mod tests {
             c.set("cl_fov", 105);
         }
         // A key from the browser's export, for a cvar not registered yet.
+        crate::core::atomic_file::flush_pending(std::time::Duration::from_secs(5));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, r#"{"cl_fov":105}"#);
         std::fs::write(&path, r#"{"cl_fov":105,"g_later":"x"}"#).unwrap();

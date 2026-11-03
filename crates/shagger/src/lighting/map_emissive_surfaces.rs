@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 
-use crate::loader::bsp::bsp_loader::BspFile;
+use crate::loader::bsp::bsp_loader::{BspFile, record_range};
 
 /// `MIN_SURFACE_AREA`: faces smaller than this emit nothing worth placing.
 const MIN_SURFACE_AREA: f64 = 256.0;
@@ -39,8 +39,8 @@ pub fn extract_emissive_surfaces(bsp: &BspFile, resolve: impl Fn(&str) -> Surfac
     };
     let mut cache: HashMap<i32, SurfaceEmission> = HashMap::new();
     let mut surfaces = Vec::new();
-    for i in model.first_face..model.first_face + model.num_faces {
-        let Some(face) = usize::try_from(i).ok().and_then(|i| bsp.faces.get(i)) else {
+    for i in record_range(model.first_face, model.num_faces, bsp.faces.len()) {
+        let Some(face) = bsp.faces.get(i) else {
             continue;
         };
         if face.num_vertices <= 0 {

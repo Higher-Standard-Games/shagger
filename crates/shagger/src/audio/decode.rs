@@ -41,6 +41,12 @@ pub fn decode_sound(bytes: &[u8], rate: u32) -> Result<SoundBuffer, String> {
     } else {
         return Err("neither Ogg nor WAV".into());
     };
+    // The rates Web Audio can hold (`decodeAudioData` refuses others); a
+    // damaged header's 1 Hz would otherwise resample a second of sound
+    // into 48 000 seconds.
+    if !(3_000..=768_000).contains(&source_rate) {
+        return Err(format!("unsupported sample rate {source_rate} Hz"));
+    }
     let samples = keep_two_channels(channels, samples);
     let channels = channels.min(2);
     Ok(SoundBuffer {
@@ -84,7 +90,7 @@ fn decode_wav(bytes: &[u8]) -> Result<(usize, u32, Vec<f32>), String> {
         let size = u32_at(at + 4) as usize;
         let body = at + 8;
         let end = (body + size).min(bytes.len());
-        if id == b"fmt " && size >= 16 {
+        if id == b"fmt " && size >= 16 && body + 16 <= bytes.len() {
             // tag, channels, rate, bits per sample
             format = Some((
                 u16_at(body),
@@ -199,6 +205,14 @@ mod tests {
         assert_eq!(sound.channels, 2);
         assert_eq!(sound.frames(), 2);
         assert_eq!(sound.samples[..2], [0.5, -0.5]);
+    }
+
+    /// Fuzzing: a cut-off format chunk and a 1 Hz rate are refused.
+    #[test]
+    fn a_damaged_wav_is_refused() {
+        let file = wav(1, 24000, &[0, 1, 2]);
+        assert!(decode_sound(&file[..30], 48000).is_err());
+        assert!(decode_sound(&wav(1, 1, &[0, 1, 2]), 48000).is_err());
     }
 
     #[test]

@@ -53,6 +53,9 @@ pub struct SfxLoop(VoiceId);
 
 /// How often a missing or lost sound card is looked for again.
 const REOPEN_EVERY: Duration = Duration::from_secs(2);
+/// Looking for a device blocks the game thread for a moment (the host lists
+/// its devices): each failed look waits twice as long, up to this.
+const REOPEN_MAX: Duration = Duration::from_secs(30);
 /// Commands held for a device that cannot take them; past it, the oldest
 /// volume changes go first.
 const PENDING_MAX: usize = 4096;
@@ -65,6 +68,8 @@ struct Device {
     /// The rate the sounds were decoded at; a new device is opened at it.
     rate: u32,
     reopen_at: Instant,
+    /// The wait after the next failed look.
+    reopen_wait: Duration,
     /// What must still reach the mixer (streams, stops, volumes) when the
     /// queue was full or there was no device. A one-shot that cannot play
     /// now is dropped instead: late, it would be wrong.
@@ -82,16 +87,52 @@ fn must_arrive(command: &Command) -> bool {
 
 impl Device {
     fn hold(&mut self, command: Command) {
-        // A newer volume for the same voice replaces the one waiting.
-        if let Command::SetVoiceVolume(id, _) = &command
-            && let Some(at) = self
-                .pending
-                .iter()
-                .position(|c| matches!(c, Command::SetVoiceVolume(other, _) if other == id))
-        {
-            self.pending[at] = command;
-            return;
+        let voice = |c: &Command| match c {
+            Command::Play(p) => Some(p.id),
+            Command::PlayStream { id, .. } | Command::Stop(id) | Command::SetVoiceVolume(id, _) => Some(*id),
+            _ => None,
+        };
+        match &command {
+            // A newer value replaces the one waiting.
+            Command::SetVoiceVolume(id, _) => {
+                if let Some(at) = self
+                    .pending
+                    .iter()
+                    .position(|c| matches!(c, Command::SetVoiceVolume(other, _) if other == id))
+                {
+                    self.pending[at] = command;
+                    return;
+                }
+            }
+            Command::SetSfxGain(_) | Command::SetMusicGain(_) | Command::SetChannelGain(..) => {
+                let same = |c: &Command| match (c, &command) {
+                    (Command::SetChannelGain(a, _), Command::SetChannelGain(b, _)) => a == b,
+                    _ => std::mem::discriminant(c) == std::mem::discriminant(&command),
+                };
+                if let Some(at) = self.pending.iter().position(same) {
+                    self.pending[at] = command;
+                    return;
+                }
+            }
+            // A voice stopped before it reached the mixer never plays: both go.
+            Command::Stop(id) => {
+                let id = *id;
+                let started = self
+                    .pending
+                    .iter()
+                    .any(|c| matches!(c, Command::Play(_) | Command::PlayStream { .. }) && voice(c) == Some(id));
+                if started {
+                    self.pending.retain(|c| voice(c) != Some(id));
+                    return;
+                }
+            }
+            Command::StopAll => self.pending.retain(|c| voice(c).is_none()),
+            _ => {}
         }
+        // Past the cap only volume changes give way; a stream or a stop is
+        // never lost (a lost stream ends at once, and the playlist would
+        // start the next, every frame). Stops cancel their plays above, so
+        // what waits stays bounded by the voices alive.
         if self.pending.len() >= PENDING_MAX
             && let Some(at) = self
                 .pending
@@ -100,7 +141,7 @@ impl Device {
         {
             self.pending.remove(at);
         }
-        if self.pending.len() < PENDING_MAX {
+        if self.pending.len() < PENDING_MAX || !matches!(command, Command::SetVoiceVolume(..)) {
             self.pending.push_back(command);
         }
     }
@@ -171,6 +212,7 @@ impl AudioV2Sfx {
             rate: output.sample_rate(),
             output: Some(output),
             reopen_at: Instant::now(),
+            reopen_wait: REOPEN_EVERY,
             pending: VecDeque::new(),
         }))))
     }
@@ -180,11 +222,12 @@ impl AudioV2Sfx {
     #[must_use]
     pub fn open_device_or_wait() -> Self {
         Self::open_device().unwrap_or_else(|why| {
-            println!("audio: {why}; looking again every {} s", REOPEN_EVERY.as_secs());
+            println!("audio: {why}; looking again from time to time");
             Self::with_output(Output::Device(Box::new(Device {
                 output: None,
                 rate: FALLBACK_RATE,
                 reopen_at: Instant::now() + REOPEN_EVERY,
+                reopen_wait: REOPEN_EVERY * 2,
                 pending: VecDeque::new(),
             })))
         })
@@ -212,6 +255,7 @@ impl AudioV2Sfx {
                 println!("audio: the output device is gone; looking for another");
                 device.output = None;
                 device.reopen_at = Instant::now();
+                device.reopen_wait = REOPEN_EVERY;
             }
         }
         if device.output.is_none() && Instant::now() >= device.reopen_at {
@@ -236,7 +280,10 @@ impl AudioV2Sfx {
                     }
                     device.flush();
                 }
-                Err(_) => device.reopen_at = Instant::now() + REOPEN_EVERY,
+                Err(_) => {
+                    device.reopen_at = Instant::now() + device.reopen_wait;
+                    device.reopen_wait = (device.reopen_wait * 2).min(REOPEN_MAX);
+                }
             }
         } else {
             device.flush();
@@ -546,6 +593,7 @@ mod tests {
             output: None,
             rate: FALLBACK_RATE,
             reopen_at: Instant::now(),
+            reopen_wait: REOPEN_EVERY,
             pending: VecDeque::new(),
         };
         let buffer = Arc::new(decode_sound(&wav(), 48000).unwrap());
@@ -573,5 +621,29 @@ mod tests {
         device.send(Command::Stop(3));
         assert_eq!(device.pending.len(), 3);
         assert!(matches!(device.pending[1], Command::SetVoiceVolume(2, v) if v == 1.0));
+        // A stream stopped before it reached the mixer never plays.
+        device.send(Command::Stop(2));
+        assert_eq!(device.pending.len(), 1);
+        assert!(matches!(device.pending[0], Command::Stop(3)));
+        // Bus gains keep only their newest value.
+        for step in 0..5 {
+            device.send(Command::SetSfxGain(step as f32));
+            device.send(Command::SetChannelGain(SfxChannel::Effects, step as f32));
+        }
+        assert_eq!(device.pending.len(), 3);
+        // Past the cap a stream still waits.
+        for id in 10..10 + PENDING_MAX as u64 {
+            device.send(Command::SetVoiceVolume(id, 0.5));
+        }
+        let (_producer, consumer) = rtrb::RingBuffer::<f32>::new(8);
+        device.send(Command::PlayStream {
+            id: 99_999,
+            samples: consumer,
+            volume: 1.0,
+        });
+        assert!(matches!(
+            device.pending.back(),
+            Some(Command::PlayStream { id: 99_999, .. })
+        ));
     }
 }

@@ -1,7 +1,7 @@
 //! SHAG `src/engine/loader/bsp/mesh/pvs.ts`: which clusters each face
 //! belongs to, from the compiled leaf membership.
 
-use crate::loader::bsp::bsp_loader::BspFile;
+use crate::loader::bsp::bsp_loader::{BspFile, record_range};
 
 /// `buildFaceClusters`: every cluster whose leaves list each face, in the
 /// order they are first met; `[-1]` for a face no leaf lists (and `-1` for
@@ -17,11 +17,8 @@ pub fn build_face_clusters(bsp: &BspFile) -> Vec<Vec<i32>> {
         } else {
             -1
         };
-        for i in 0..leaf.num_leaf_faces.max(0) {
-            let Some(&face) = usize::try_from(leaf.first_leaf_face + i)
-                .ok()
-                .and_then(|at| bsp.common.leaf_faces.get(at))
-            else {
+        for at in record_range(leaf.first_leaf_face, leaf.num_leaf_faces, bsp.common.leaf_faces.len()) {
+            let Some(&face) = bsp.common.leaf_faces.get(at) else {
                 continue;
             };
             // A `Set` keeps insertion order and drops repeats.

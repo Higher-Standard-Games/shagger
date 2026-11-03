@@ -222,6 +222,11 @@ pub fn parse_md3(bytes: &[u8]) -> Result<Md3Model, Md3Error> {
     at = offset(0, header.ofs_surfaces)?;
     for _ in 0..count(header.num_surfaces) {
         let surface = read_surface(&r, at, count(header.num_frames))?;
+        // Each surface ends past its own header: an end of 0 would read the
+        // same one two billion times over (fuzzing).
+        if surface.header.ofs_end < 108 {
+            return Err(Md3Error(format!("MD3 surface ends at {}", surface.header.ofs_end)));
+        }
         at = offset(at, surface.header.ofs_end)?;
         surfaces.push(surface);
     }
@@ -281,6 +286,24 @@ fn read_surface(r: &Reader<'_>, start: usize, num_frames: usize) -> Result<Md3Su
         at += 12;
     }
     let verts = count(header.num_verts);
+    // The coordinates and every frame's vertices must lie in the file
+    // before anything is allocated for them: a damaged count asked for
+    // 14 GB (fuzzing). The reads below would fail on the same files.
+    let fits = |ofs: i32, size: Option<usize>| -> Result<(), Md3Error> {
+        if size == Some(0) {
+            return Ok(());
+        }
+        offset(start, ofs)?
+            .checked_add(size.ok_or_else(|| Md3Error("MD3 surface too large".into()))?)
+            .filter(|&end| end <= r.0.len())
+            .map(|_| ())
+            .ok_or_else(|| Md3Error("MD3 surface runs past the end".into()))
+    };
+    fits(header.ofs_st, verts.checked_mul(8))?;
+    fits(
+        header.ofs_xyz_normal,
+        verts.checked_mul(8).and_then(|v| v.checked_mul(num_frames)),
+    )?;
     let mut tex_coords = Vec::with_capacity(verts);
     at = offset(start, header.ofs_st)?;
     for _ in 0..verts {
@@ -616,5 +639,20 @@ mod tests {
         assert!((mesh.normals[1][1] - 1.0).abs() < 1e-6);
         assert_eq!(mesh.indices, [2, 1, 0]);
         assert!(parse_md3(b"nope").is_err());
+    }
+
+    /// Fuzzing: a vertex count of two billion is refused before 14 GB is
+    /// asked for.
+    #[test]
+    fn a_vertex_count_past_the_end_is_refused() {
+        let mut b = tiny();
+        let s = 108 + 56 + 112;
+        b[s + 80..s + 84].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(parse_md3(&b).is_err());
+        // Nor a surface that ends where it starts, counted two billion times.
+        let mut b = tiny();
+        b[84..88].copy_from_slice(&i32::MAX.to_le_bytes());
+        b[s + 104..s + 108].copy_from_slice(&0i32.to_le_bytes());
+        assert!(parse_md3(&b).is_err());
     }
 }
