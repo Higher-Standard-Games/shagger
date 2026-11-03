@@ -266,12 +266,12 @@ impl Default for PlayerTracker {
 
 /// Where the ground is, when the caller has the map: how far the feet of a
 /// player at `origin` are above the ground below them, or `None`.
-pub type GroundClearance = dyn Fn(Vec3) -> Option<f64>;
+pub type GroundClearance<'f> = dyn Fn(Vec3) -> Option<f64> + 'f;
 
 /// `DemoAnalyzer`.
 #[derive(Default)]
 pub struct DemoAnalyzer<'a> {
-    ground_clearance: Option<&'a GroundClearance>,
+    ground_clearance: Option<&'a GroundClearance<'a>>,
 }
 
 /// Runs in the order the TypeScript `Map` keeps them: a run that ends and
@@ -286,7 +286,7 @@ impl<'a> DemoAnalyzer<'a> {
     /// `groundClearance` measures a killer's height above the ground; without
     /// it, height is taken against where the killer last stood.
     #[must_use]
-    pub fn new(ground_clearance: Option<&'a GroundClearance>) -> Self {
+    pub fn new(ground_clearance: Option<&'a GroundClearance<'a>>) -> Self {
         Self { ground_clearance }
     }
 
