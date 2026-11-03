@@ -17,7 +17,11 @@
 //! (`WaterSurfaceLighting`) are traced once at load by
 //! [`LiquidSurfaceSystem::prepare_lighting`].
 //!
-//! Not yet: the actor reflection pass, disturbances from bodies in the water, and per-liquid
+//! Ripples (`WaterDisturbances`) are owned here and snapped to a pool's
+//! surface ([`LiquidSurfaceSystem::add_disturbance`]); each surface packs
+//! the ones on its patch.
+//!
+//! Not yet: the actor reflection pass, and per-liquid
 //! environment cubemaps from the shaders.
 
 use std::collections::HashMap;
@@ -26,6 +30,7 @@ use glam::Vec3;
 use wgpu::util::DeviceExt;
 
 use super::unified_water_material::{UNIFIED_WATER_WGSL, WaterKind, WaterUniforms, unified_water_uniforms};
+use super::water_disturbances::WaterDisturbances;
 use super::water_noise::{WATER_NOISE_SIZE, generate_water_normal_map};
 use super::water_probe_cache::{PROBE_SIZE, ProbePlan, StaticTriangles, WaterProbeCache};
 use super::water_surface_lighting::{MASK_SIZE, WaterMapLight, WaterSurfaceLighting};
@@ -108,6 +113,7 @@ pub struct LiquidSurfaceSystem {
     cache: WaterProbeCache,
     probes: Vec<Probe>,
     lighting: WaterSurfaceLighting,
+    disturbances: WaterDisturbances,
     masks: Vec<wgpu::TextureView>,
     /// `lighting.bind`'s fallback: one clear texel.
     no_mask: wgpu::TextureView,
@@ -398,6 +404,7 @@ impl LiquidSurfaceSystem {
             cache,
             probes: Vec::new(),
             lighting: WaterSurfaceLighting::default(),
+            disturbances: WaterDisturbances::default(),
             masks: Vec::new(),
             no_mask,
             pipeline,
@@ -631,7 +638,31 @@ impl LiquidSurfaceSystem {
 
     /// The wave clock: wall time, a hitch capped at a tenth of a second.
     pub fn update(&mut self, dt_seconds: f64) {
-        self.elapsed += dt_seconds.min(0.1);
+        let dt = dt_seconds.min(0.1);
+        self.elapsed += dt;
+        self.disturbances.update(dt);
+    }
+
+    /// `waterDisturbancesFor(scene).add` with this system's
+    /// `resolveSurface` (`probes.surfaceAt`): a ripple on the pool under or
+    /// over `position`, `false` when there is none.
+    pub fn add_disturbance(
+        &mut self,
+        position: glam::DVec3,
+        strength: f64,
+        radius: f64,
+        direction: Option<(f64, f64)>,
+    ) -> bool {
+        let cache = &self.cache;
+        let resolve = |p| cache.surface_at(p);
+        self.disturbances
+            .add(position, strength, radius, direction, Some(&resolve))
+    }
+
+    /// The ripples, for diagnostics.
+    #[must_use]
+    pub fn disturbances(&self) -> &WaterDisturbances {
+        &self.disturbances
     }
 
     fn ensure_captures(&mut self, gpu: &Gpu, size: (u32, u32)) {
@@ -758,6 +789,14 @@ impl LiquidSurfaceSystem {
             // Near, far, depth 0 to 1, and the hardware depth of the capture.
             u.depth_projection = [camera.near, camera.far, 1.0, 1.0];
             u.fog = fog;
+            // Membership comes from the surface's own patch, not its kind.
+            let patch = has_reactive_surface(surface.kind)
+                .then(|| self.cache.patch_for(surface.batch))
+                .flatten()
+                .map(|p| &self.cache.patches[p]);
+            u.impulses = self
+                .disturbances
+                .pack(|p| patch.is_some_and(|patch| patch.contains(p.x, p.y, p.z)));
             gpu.queue
                 .write_buffer(&surface.buffer, 0, bytemuck::bytes_of(&surface.uniforms));
         }

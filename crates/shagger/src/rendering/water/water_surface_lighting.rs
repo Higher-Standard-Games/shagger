@@ -4,7 +4,7 @@
 //! mask whose channels are each source's visibility, traced once at load.
 
 use glam::DVec3;
-use shagger_shared::js::{js_round, js_string_to_number};
+use shagger_shared::js::{is_js_whitespace, js_round, js_string_to_number, js_trim};
 
 use super::static_visibility_index::{Ray, StaticVisibilityIndex};
 use super::unified_water_material::MAX_WATER_LIGHTS;
@@ -45,11 +45,15 @@ pub fn water_surface_lights(surfaces: &[EmissiveSurface]) -> Vec<WaterMapLight> 
 
 /// `value.trim().split(/\s+/).map(Number)`.
 fn numbers(value: &str) -> Vec<f64> {
-    let trimmed = value.trim();
+    let trimmed = js_trim(value);
     if trimmed.is_empty() {
         return vec![0.0];
     }
-    trimmed.split_whitespace().map(js_string_to_number).collect()
+    trimmed
+        .split(is_js_whitespace)
+        .filter(|t| !t.is_empty())
+        .map(js_string_to_number)
+        .collect()
 }
 
 /// `waterMapLights`: untargeted `light` entities as points. Never the

@@ -4,6 +4,7 @@
 pub mod liquid_surface_system;
 pub mod static_visibility_index;
 pub mod unified_water_material;
+pub mod water_disturbances;
 pub mod water_noise;
 pub mod water_probe_cache;
 pub mod water_surface_lighting;
