@@ -51,7 +51,8 @@ struct Draw {
     emissive: vec4f,
     // The texture matrix (getTextureMatrix): u row in xy, v row in zw.
     uv_rows: vec4f,
-    // xy: the matrix origin; z: the texture's level.
+    // xy: the matrix origin; z: the texture's level; w: the alpha override
+    // plus one (0 for none).
     uv_origin: vec4f,
 };
 
@@ -93,15 +94,41 @@ struct VertexOut {
     @location(2) uv: vec2f,
 };
 
-@vertex
-fn vs_main(in: VertexIn) -> VertexOut {
+// A skinned draw's joint palette, as model.wgsl reads it.
+@group(1) @binding(1) var<storage, read> joints: array<mat4x4f>;
+
+struct SkinIn {
+    @location(3) joints: vec4u,
+    @location(4) weights: vec4f,
+};
+
+fn skin_matrix(skin: SkinIn) -> mat4x4f {
+    let base = draw.skin.x;
+    return joints[base + skin.joints.x] * skin.weights.x
+        + joints[base + skin.joints.y] * skin.weights.y
+        + joints[base + skin.joints.z] * skin.weights.z
+        + joints[base + skin.joints.w] * skin.weights.w;
+}
+
+fn standard_vertex(in: VertexIn, model: mat4x4f) -> VertexOut {
     var out: VertexOut;
-    let world = draw.world * vec4f(in.position, 1.0);
+    let world = model * vec4f(in.position, 1.0);
     out.clip = globals.view_proj * world;
     out.world_position = world.xyz;
-    out.normal = (draw.world * vec4f(in.normal, 0.0)).xyz;
+    out.normal = (model * vec4f(in.normal, 0.0)).xyz;
     out.uv = in.uv;
     return out;
+}
+
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    return standard_vertex(in, draw.world);
+}
+
+// A rigged mesh in a StandardMaterial (the teleport ghosts' silhouette).
+@vertex
+fn vs_skinned(in: VertexIn, skin: SkinIn) -> VertexOut {
+    return standard_vertex(in, draw.world * skin_matrix(skin));
 }
 
 // Texture use bits (params.z).
@@ -127,7 +154,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
     let texel = vec4f(sampled.rgb * draw.uv_origin.z, sampled.a);
 
     var base_color = vec4f(1.0);
-    var alpha = material.params.x;
+    // A draw's alpha override (a fade) is stored plus one in uv_origin.w.
+    var alpha = select(material.params.x, draw.uv_origin.w - 1.0, draw.uv_origin.w > 0.5);
     if (uses & USE_DIFFUSE) != 0u {
         base_color = texel;
         if (uses & ALPHA_FROM_DIFFUSE) != 0u {

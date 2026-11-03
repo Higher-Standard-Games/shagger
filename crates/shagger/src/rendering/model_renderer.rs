@@ -107,6 +107,9 @@ pub struct ModelDraw {
     pub tint: Option<Vec3>,
     /// Replaces a standard material's emissive colour (a pulse).
     pub emissive: Option<Vec3>,
+    /// Replaces a standard material's alpha (a fade); the material must
+    /// already blend.
+    pub alpha: Option<f32>,
     /// A standard material's texture matrix (its texture's offsets, scales
     /// and rotation, as `getTextureMatrix` makes them).
     pub texture_matrix: Option<TextureMatrix>,
@@ -128,6 +131,7 @@ impl ModelDraw {
             world,
             tint: None,
             emissive: None,
+            alpha: None,
             texture_matrix: None,
             texture_level: None,
             skin: None,
@@ -1024,7 +1028,8 @@ impl ModelRenderer {
                     uv.origin[0] as f32,
                     uv.origin[1] as f32,
                     draw.texture_level.unwrap_or(1.0),
-                    0.0,
+                    // The alpha override plus one; 0 keeps the material's.
+                    draw.alpha.map_or(0.0, |a| a.clamp(0.0, 1.0) + 1.0),
                 ],
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
