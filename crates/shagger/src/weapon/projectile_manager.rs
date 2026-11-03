@@ -441,6 +441,18 @@ pub fn upload_standard_mesh(
     parts: &[(&str, &VertexData)],
     material: StandardMaterialParams,
 ) -> ModelHandle {
+    upload_textured_standard_mesh(gpu, models, parts, material, None)
+}
+
+/// [`upload_standard_mesh`] with the material's texture (an encoded
+/// image).
+pub fn upload_textured_standard_mesh(
+    gpu: &Gpu,
+    models: &mut ModelRenderer,
+    parts: &[(&str, &VertexData)],
+    material: StandardMaterialParams,
+    image: Option<ModelImage>,
+) -> ModelHandle {
     let primitives = parts
         .iter()
         .enumerate()
@@ -485,7 +497,7 @@ pub fn upload_standard_mesh(
         materials: vec![ModelMaterial {
             name: parts.first().map_or("mesh", |p| p.0).to_owned(),
             base_color: [1.0; 4],
-            base_color_image: None,
+            base_color_image: image.as_ref().map(|_| 0),
             metallic: 0.0,
             roughness: 1.0,
             metallic_roughness_image: None,
@@ -496,7 +508,7 @@ pub fn upload_standard_mesh(
             alpha_cutoff: 0.5,
             double_sided: false,
         }],
-        images: Vec::new(),
+        images: image.into_iter().collect(),
         attachment_points: Default::default(),
         skeleton: Skeleton::default(),
     };

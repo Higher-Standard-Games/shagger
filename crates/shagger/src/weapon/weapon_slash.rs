@@ -1,9 +1,189 @@
 //! SHAG `src/engine/weapon/WeaponSlash.ts`: the melee swing (windup, swing,
-//! return), cycling through three presets. The animation half; the trail
-//! ribbon is not ported yet.
+//! return), cycling through three presets, and the faint ribbon its tip
+//! leaves in the world.
 //!
 //! The browser reads `performance.now()`; here the caller passes its clock
-//! in milliseconds.
+//! in milliseconds. The browser builds a mesh per trail and grows it; here
+//! [`SlashTrailRenderer`] keeps a few ribbons of a fixed size and rewrites
+//! them, as the browser does between growths.
+
+use std::io::Cursor;
+
+use glam::{DVec3, Mat4};
+
+use crate::babylon::materials::standard_material::{StandardMaterialParams, TextureUse};
+use crate::babylon::meshes::ribbon_builder::create_ribbon_double_side;
+use crate::loader::model::gltf_model::ModelImage;
+use crate::rendering::gpu::Gpu;
+use crate::rendering::model_renderer::{ModelDraw, ModelHandle, ModelRenderer};
+use crate::weapon::projectile_manager::upload_textured_standard_mesh;
+
+/// `TRAIL_FADE_MS`.
+pub const TRAIL_FADE_MS: f64 = 800.0;
+/// `TRAIL_ALPHA`.
+pub const TRAIL_ALPHA: f32 = 0.22;
+/// Points a ribbon has room for; a swing stops adding once it is full
+/// (450 ms of swing at 500 frames a second).
+pub const TRAIL_CAPACITY: usize = 256;
+/// Ribbons kept: one swing drawing while the last ones fade.
+const TRAIL_POOL: usize = 4;
+
+/// A trail: the tip's and the handle's paths.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SlashTrail {
+    pub tip_points: Vec<DVec3>,
+    pub handle_points: Vec<DVec3>,
+    /// When it began to fade, ms.
+    pub fade_start: f64,
+    pub active: bool,
+}
+
+impl SlashTrail {
+    /// The material's alpha at `now_ms`; `None` once faded.
+    #[must_use]
+    pub fn alpha(&self, now_ms: f64) -> Option<f32> {
+        if self.active {
+            return Some(TRAIL_ALPHA);
+        }
+        let fade = (now_ms - self.fade_start) / TRAIL_FADE_MS;
+        (fade < 1.0).then(|| TRAIL_ALPHA * (1.0 - fade as f32))
+    }
+}
+
+/// `writeSlashRibbon`: the tip path then the handle path, each `capacity`
+/// long (the spare points repeat the newest), then the same again for the
+/// back face. U runs along the path as a share of its length, V is 0 on
+/// the tip and 1 on the handle (0 where the two meet).
+#[must_use]
+pub fn slash_ribbon(trail: &SlashTrail, capacity: usize) -> (Vec<[f32; 3]>, Vec<[f32; 2]>) {
+    let count = trail.tip_points.len();
+    let mut positions = vec![[0.0f32; 3]; capacity * 4];
+    let mut uvs = vec![[0.0f32; 2]; capacity * 4];
+    if count == 0 {
+        return (positions, uvs);
+    }
+    let paths = [&trail.tip_points, &trail.handle_points];
+    let half = capacity * 2;
+    for (p, path) in paths.iter().enumerate() {
+        let total: f64 = (1..count).map(|j| path[j].distance(path[j - 1])).sum();
+        let mut along = 0.0;
+        for j in 0..capacity {
+            let at = j.min(count - 1);
+            let point = path[at];
+            if j > 0 && j < count {
+                along += point.distance(path[j - 1]);
+            }
+            let vertex = p * capacity + j;
+            let width = trail.tip_points[at].distance(trail.handle_points[at]);
+            let u = if total == 0.0 { 0.0 } else { along / total };
+            let v = if p == 0 || width == 0.0 { 0.0 } else { 1.0 };
+            for side in [0, half] {
+                positions[side + vertex] = point.as_vec3().to_array();
+                uvs[side + vertex] = [u as f32, v as f32];
+            }
+        }
+    }
+    (positions, uvs)
+}
+
+/// The feather: a 64 by 32 white texture whose alpha is a smooth envelope,
+/// so every ribbon edge fades out.
+#[must_use]
+pub fn feather_pixels() -> Vec<u8> {
+    let (width, height) = (64usize, 32usize);
+    let mut pixels = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let envelope = (std::f64::consts::PI * x as f64 / (width - 1) as f64).sin()
+                * (std::f64::consts::PI * y as f64 / (height - 1) as f64).sin();
+            let alpha = crate::shared::js::js_round(255.0 * envelope * envelope) as u8;
+            pixels.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    pixels
+}
+
+/// `slashTrailMat`: a pale self-lit ribbon, both sides, feathered by its
+/// texture's alpha, at [`TRAIL_ALPHA`].
+#[must_use]
+pub fn slash_trail_material() -> StandardMaterialParams {
+    StandardMaterialParams {
+        emissive_color: glam::Vec3::new(0.75, 0.8, 0.8),
+        diffuse_color: glam::Vec3::ZERO,
+        disable_lighting: true,
+        back_face_culling: false,
+        alpha: TRAIL_ALPHA,
+        alpha_blend: true,
+        texture: TextureUse {
+            diffuse: true,
+            alpha_from_diffuse: true,
+            ..TextureUse::default()
+        },
+        ..StandardMaterialParams::default()
+    }
+}
+
+/// The trails' ribbons on the GPU.
+#[derive(Debug, Default)]
+pub struct SlashTrailRenderer {
+    ribbons: Vec<(ModelHandle, Vec<[f32; 3]>)>,
+}
+
+impl SlashTrailRenderer {
+    /// Writes each visible trail into a ribbon and adds its draw.
+    pub fn draws(
+        &mut self,
+        gpu: &Gpu,
+        models: &mut ModelRenderer,
+        slash: &WeaponSlash,
+        now_ms: f64,
+        out: &mut Vec<ModelDraw>,
+    ) {
+        let visible = slash
+            .trails()
+            .iter()
+            .filter(|t| t.tip_points.len() >= 2)
+            .filter_map(|t| t.alpha(now_ms).map(|a| (t, a)))
+            .take(TRAIL_POOL);
+        for (i, (trail, alpha)) in visible.enumerate() {
+            if self.ribbons.len() <= i {
+                let rest = vec![DVec3::ZERO; TRAIL_CAPACITY];
+                let data = create_ribbon_double_side(&rest, &rest);
+                let normals = data.normals.as_chunks::<3>().0.to_vec();
+                let mut png = Cursor::new(Vec::new());
+                image::write_buffer_with_format(
+                    &mut png,
+                    &feather_pixels(),
+                    64,
+                    32,
+                    image::ExtendedColorType::Rgba8,
+                    image::ImageFormat::Png,
+                )
+                .expect("encoding a PNG in memory");
+                let feather = ModelImage {
+                    name: "slashTrailFeather.png".to_owned(),
+                    mime_type: Some("image/png".to_owned()),
+                    bytes: png.into_inner(),
+                };
+                let handle = upload_textured_standard_mesh(
+                    gpu,
+                    models,
+                    &[("slashTrail", &data)],
+                    slash_trail_material(),
+                    Some(feather),
+                );
+                self.ribbons.push((handle, normals));
+            }
+            let (handle, normals) = &self.ribbons[i];
+            let (positions, uvs) = slash_ribbon(trail, TRAIL_CAPACITY);
+            models.update_vertices(gpu, *handle, 0, &positions, normals, &uvs);
+            out.push(ModelDraw {
+                alpha: Some(alpha),
+                ..ModelDraw::new(*handle, 0, Mat4::IDENTITY)
+            });
+        }
+    }
+}
 
 /// One swing's shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +265,8 @@ pub struct WeaponSlash {
     start_ms: f64,
     params: SlashParams,
     preset_index: usize,
+    trails: Vec<SlashTrail>,
+    trail_was_active: bool,
 }
 
 impl Default for WeaponSlash {
@@ -94,6 +276,8 @@ impl Default for WeaponSlash {
             start_ms: 0.0,
             params: SLASH_PRESETS[0],
             preset_index: 0,
+            trails: Vec::new(),
+            trail_was_active: false,
         }
     }
 }
@@ -111,6 +295,59 @@ impl WeaponSlash {
         self.preset_index += 1;
         self.active = true;
         self.start_ms = now_ms;
+    }
+
+    /// The trails drawing or fading.
+    #[must_use]
+    pub fn trails(&self) -> &[SlashTrail] {
+        &self.trails
+    }
+
+    /// `updateTrail` at `now_ms`, for a camera at `eye` with these axes:
+    /// a swing starts a trail and adds a tip and a handle point a frame;
+    /// its end starts the fade.
+    pub fn update_trail(&mut self, now_ms: f64, eye: DVec3, forward: DVec3, up: DVec3, right: DVec3) {
+        let slashing = self.active;
+        if slashing && !self.trail_was_active {
+            for trail in &mut self.trails {
+                if trail.active {
+                    trail.active = false;
+                    trail.fade_start = now_ms;
+                }
+            }
+            self.trails.push(SlashTrail {
+                active: true,
+                ..SlashTrail::default()
+            });
+        }
+        self.trail_was_active = slashing;
+        if slashing {
+            let off = self.offsets(now_ms);
+            if let Some(trail) = self.trails.iter_mut().find(|t| t.active)
+                && trail.tip_points.len() < TRAIL_CAPACITY
+            {
+                let handle = eye
+                    + forward * 15.0
+                    + up * -4.0
+                    + right * 2.0
+                    + up * (off.y_offset * 0.04)
+                    + right * (off.x_offset * 0.04);
+                let tip = eye
+                    + forward * 28.0
+                    + up * 5.0
+                    + right * -2.0
+                    + up * (off.y_offset * 0.25)
+                    + right * (off.x_offset * 0.25)
+                    + forward * (off.z_offset * 0.1);
+                trail.tip_points.push(tip);
+                trail.handle_points.push(handle);
+            }
+        } else if let Some(trail) = self.trails.iter_mut().find(|t| t.active) {
+            trail.active = false;
+            trail.fade_start = now_ms;
+        }
+        self.trails
+            .retain(|t| t.active || (now_ms - t.fade_start) / TRAIL_FADE_MS < 1.0);
     }
 
     /// `getOffsets` at `now_ms`; the swing ends once its time is up.
@@ -178,6 +415,47 @@ impl WeaponSlash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_swing_leaves_a_trail_that_fades() {
+        let mut s = WeaponSlash::default();
+        s.trigger(0.0);
+        let mut now = 0.0;
+        while s.is_active() {
+            s.update_trail(now, DVec3::ZERO, DVec3::Z, DVec3::Y, DVec3::X);
+            now += 16.0;
+        }
+        s.update_trail(now, DVec3::ZERO, DVec3::Z, DVec3::Y, DVec3::X);
+        let trail = &s.trails()[0];
+        assert!(!trail.active && trail.tip_points.len() > 20);
+        // The first point: the windup's start, close to the rest pose.
+        assert!((trail.tip_points[0] - DVec3::new(-2.0, 5.0, 28.0)).length() < 1.0);
+        assert_eq!(trail.alpha(now), Some(TRAIL_ALPHA));
+        assert!((trail.alpha(now + 400.0).unwrap() - TRAIL_ALPHA / 2.0).abs() < 1e-6);
+        s.update_trail(now + 800.0, DVec3::ZERO, DVec3::Z, DVec3::Y, DVec3::X);
+        assert!(s.trails().is_empty());
+    }
+
+    #[test]
+    fn the_ribbon_runs_tip_then_handle_and_pads_with_the_newest() {
+        let trail = SlashTrail {
+            tip_points: vec![DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0)],
+            handle_points: vec![DVec3::Y, DVec3::new(2.0, 1.0, 0.0)],
+            ..SlashTrail::default()
+        };
+        let (p, uv) = slash_ribbon(&trail, 4);
+        assert_eq!(p.len(), 16);
+        assert_eq!(p[1], [2.0, 0.0, 0.0]);
+        assert_eq!(p[3], [2.0, 0.0, 0.0]);
+        assert_eq!(p[4], [0.0, 1.0, 0.0]);
+        assert_eq!(uv[1], [1.0, 0.0]);
+        assert_eq!(uv[5], [1.0, 1.0]);
+        // The back face repeats the front.
+        assert_eq!(p[9], p[1]);
+        let f = feather_pixels();
+        assert_eq!(f[3], 0);
+        assert!(f[(16 * 64 + 32) * 4 + 3] > 240);
+    }
 
     #[test]
     fn a_swing_winds_up_sweeps_and_returns() {
