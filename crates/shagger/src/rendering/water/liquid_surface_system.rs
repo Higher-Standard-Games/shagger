@@ -24,7 +24,9 @@
 //! A liquid whose shader names a `cubemap` reflects it where no room was
 //! captured (`setEnvironmentTexture(texture, { kind })`), the sky elsewhere.
 //!
-//! Not yet: the actor reflection pass.
+//! Nearby players are reflected (`WaterActorReflection`,
+//! [`LiquidSurfaceSystem::capture_actors`]) at `r_water_quality` 3 with
+//! `r_water_actors` on.
 
 use std::collections::HashMap;
 
@@ -32,6 +34,7 @@ use glam::Vec3;
 use wgpu::util::DeviceExt;
 
 use super::unified_water_material::{UNIFIED_WATER_WGSL, WaterKind, WaterUniforms, unified_water_uniforms};
+use super::water_actor_reflection::{ReflectionActor, WaterActorReflection};
 use super::water_disturbances::WaterDisturbances;
 use super::water_noise::{WATER_NOISE_SIZE, generate_water_normal_map};
 use super::water_probe_cache::{PROBE_SIZE, ProbePlan, StaticTriangles, WaterProbeCache};
@@ -135,6 +138,9 @@ pub struct LiquidSurfaceSystem {
     /// Whether this frame copies the scene (`r_water_quality` 2 and up, with
     /// water on screen).
     wants_capture: bool,
+    actor_reflection: WaterActorReflection,
+    /// The actor capture's size the bind groups hold.
+    actor_bound: Option<(u32, u32)>,
 }
 
 fn texture_2d(
@@ -405,6 +411,7 @@ impl LiquidSurfaceSystem {
                 &[0, 0, 0, 0],
             )
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let hidden_for_actors = hidden.clone();
         Some(Self {
             surfaces,
             cache,
@@ -426,6 +433,8 @@ impl LiquidSurfaceSystem {
             hidden,
             elapsed: 0.0,
             wants_capture: false,
+            actor_reflection: WaterActorReflection::new(gpu, geometry, &hidden_for_actors),
+            actor_bound: None,
         })
     }
 
@@ -745,10 +754,12 @@ impl LiquidSurfaceSystem {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(mask),
                     },
-                    // The actor layer is not drawn yet: the noise stands in.
+                    // Before the first actor capture, the noise stands in.
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: wgpu::BindingResource::TextureView(&self.noise),
+                        resource: wgpu::BindingResource::TextureView(
+                            self.actor_reflection.texture().unwrap_or(&self.noise),
+                        ),
                     },
                 ],
             }));
@@ -767,6 +778,8 @@ impl LiquidSurfaceSystem {
         settings: &WaterSettings,
         fog: FogUniforms,
         visible: &[bool],
+        actors: &[ReflectionActor],
+        actors_on: bool,
     ) {
         self.ensure_captures(gpu, size);
         let on_screen = self
@@ -776,6 +789,43 @@ impl LiquidSurfaceSystem {
         let depth = on_screen && settings.quality >= 2.0;
         let refraction = depth && settings.quality >= 3.0;
         self.wants_capture = depth;
+        // `actorReflection.update`: the reactive surfaces' patches.
+        let mut patches: Vec<(usize, &super::water_probe_cache::WaterPatch, bool)> = Vec::new();
+        for surface in self.surfaces.iter().filter(|s| has_reactive_surface(s.kind)) {
+            let Some(p) = self.cache.patch_for(surface.batch) else {
+                continue;
+            };
+            let shown = visible.get(surface.batch).copied().unwrap_or(true);
+            match patches.iter_mut().find(|(i, _, _)| *i == p) {
+                Some(entry) => entry.2 |= shown,
+                None => patches.push((p, &self.cache.patches[p], shown)),
+            }
+        }
+        let reason = if !actors_on {
+            "r_water_actors 0"
+        } else if settings.quality < 3.0 {
+            "requires quality 3"
+        } else {
+            "water offscreen"
+        };
+        self.actor_reflection.update(
+            gpu,
+            camera,
+            size,
+            &patches,
+            actors,
+            on_screen && settings.quality >= 3.0 && actors_on,
+            reason,
+        );
+        let actor_size = self
+            .actor_reflection
+            .bound(self.actor_reflection.patch)
+            .map(|(_, _, t)| t);
+        let actor_size = actor_size.map(|t| ((1.0 / t[0]).round() as u32, (1.0 / t[1]).round() as u32));
+        if actor_size.is_some() && actor_size != self.actor_bound {
+            self.actor_bound = actor_size;
+            self.rebind(gpu);
+        }
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let view = camera.view();
         let forward = camera.forward();
@@ -802,16 +852,48 @@ impl LiquidSurfaceSystem {
             u.depth_projection = [camera.near, camera.far, 1.0, 1.0];
             u.fog = fog;
             // Membership comes from the surface's own patch, not its kind.
-            let patch = has_reactive_surface(surface.kind)
+            let patch_index = has_reactive_surface(surface.kind)
                 .then(|| self.cache.patch_for(surface.batch))
-                .flatten()
-                .map(|p| &self.cache.patches[p]);
+                .flatten();
+            let patch = patch_index.map(|p| &self.cache.patches[p]);
+            // `actorReflection.bind`: the HDR capture is linear.
+            match self.actor_reflection.bound(patch_index) {
+                Some((_, matrix, texel)) => {
+                    u.actor_flags[1] = 1.0;
+                    u.actor_flags[2] = 1.0;
+                    u.actor_matrix = matrix.to_cols_array_2d();
+                    u.actor_texel = [texel[0], texel[1], 0.0, 0.0];
+                }
+                None => u.actor_flags[1] = 0.0,
+            }
             u.impulses = self
                 .disturbances
                 .pack(|p| patch.is_some_and(|patch| patch.contains(p.x, p.y, p.z)));
             gpu.queue
                 .write_buffer(&surface.buffer, 0, bytemuck::bytes_of(&surface.uniforms));
         }
+    }
+
+    /// `WaterActorReflection`: this frame's pool, players and status.
+    #[must_use]
+    pub fn actor_reflection(&self) -> &WaterActorReflection {
+        &self.actor_reflection
+    }
+
+    /// Draws this frame's actor reflection, when one is scheduled: the
+    /// world's blockers from its buffers and the model draws `keep` accepts
+    /// (set up with [`ModelRenderer::set_second_view`] from
+    /// [`WaterActorReflection::view`]).
+    pub fn capture_actors(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        world_vertices: &wgpu::Buffer,
+        world_indices: &wgpu::Buffer,
+        models: &crate::rendering::model_renderer::ModelRenderer,
+        keep: &dyn Fn(&crate::rendering::model_renderer::ModelDraw) -> bool,
+    ) {
+        self.actor_reflection
+            .capture(encoder, world_vertices, world_indices, models, keep);
     }
 
     /// Copies the scene behind the water (the HDR target after the opaque

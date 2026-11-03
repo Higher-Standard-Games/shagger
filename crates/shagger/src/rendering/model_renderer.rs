@@ -318,6 +318,11 @@ pub struct ModelRenderer {
     pipelines: HashMap<PipelineKey, wgpu::RenderPipeline>,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
+    /// The last `prepare`'s globals, and a second set for another view of
+    /// the same frame (the water's actor reflection).
+    globals: Globals,
+    view_buffer: wgpu::Buffer,
+    view_bind_group: wgpu::BindGroup,
     draw_layout: wgpu::BindGroupLayout,
     draw_buffer: wgpu::Buffer,
     draw_capacity: usize,
@@ -444,6 +449,20 @@ impl ModelRenderer {
                 resource: globals_buffer.as_entire_binding(),
             }],
         });
+        let view_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model view globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model view globals"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: view_buffer.as_entire_binding(),
+            }],
+        });
         let draw_capacity = 64;
         let draw_buffer = create_buffer(
             gpu,
@@ -480,6 +499,9 @@ impl ModelRenderer {
             pipelines: HashMap::new(),
             globals_buffer,
             globals_bind_group,
+            globals: Globals::zeroed(),
+            view_buffer,
+            view_bind_group,
             draw_layout,
             draw_buffer,
             draw_capacity,
@@ -942,6 +964,7 @@ impl ModelRenderer {
         };
         gpu.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
+        self.globals = globals;
 
         // Opaque first, then blended back to front.
         let mut opaque = Vec::new();
@@ -1055,23 +1078,53 @@ impl ModelRenderer {
         self.draw_range(pass, false);
     }
 
+    /// Sets the second view [`Self::draw_opaque_view`] draws from: this
+    /// frame's lights and fog seen through `view_proj` from `eye`. Call
+    /// after [`Self::prepare`].
+    pub fn set_second_view(&self, gpu: &Gpu, view_proj: Mat4, eye: Vec3) {
+        let globals = Globals {
+            view_proj: view_proj.to_cols_array_2d(),
+            eye: [eye.x, eye.y, eye.z, 0.0],
+            ..self.globals
+        };
+        gpu.queue
+            .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&globals));
+    }
+
+    /// Records the opaque draws `keep` accepts through the second view,
+    /// without outlines, into a pass of this renderer's colour and depth
+    /// formats. `view_proj` must not mirror: front faces stay front.
+    pub fn draw_opaque_view(&self, pass: &mut wgpu::RenderPass<'_>, keep: &dyn Fn(&ModelDraw) -> bool) {
+        pass.set_bind_group(0, &self.view_bind_group, &[]);
+        for (i, (draw, key)) in self.frame.iter().enumerate() {
+            if key.blend != BlendKind::Opaque || key.pass != PassKind::Color || !keep(draw) {
+                continue;
+            }
+            self.record(pass, i, draw, key);
+        }
+    }
+
+    fn record(&self, pass: &mut wgpu::RenderPass<'_>, i: usize, draw: &ModelDraw, key: &PipelineKey) {
+        let model = &self.models[draw.model.0];
+        let primitive = &model.primitives[draw.primitive];
+        pass.set_pipeline(&self.pipelines[key]);
+        pass.set_bind_group(1, &self.draw_bind_group, &[(i as u64 * DRAW_STRIDE) as u32]);
+        pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
+        pass.set_vertex_buffer(0, primitive.vertex.slice(..));
+        if let Some(skin) = &primitive.skin {
+            pass.set_vertex_buffer(1, skin.slice(..));
+        }
+        pass.set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..primitive.count, 0, 0..1);
+    }
+
     fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, opaque: bool) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
         for (i, (draw, key)) in self.frame.iter().enumerate() {
             if (key.blend == BlendKind::Opaque) != opaque {
                 continue;
             }
-            let model = &self.models[draw.model.0];
-            let primitive = &model.primitives[draw.primitive];
-            pass.set_pipeline(&self.pipelines[key]);
-            pass.set_bind_group(1, &self.draw_bind_group, &[(i as u64 * DRAW_STRIDE) as u32]);
-            pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
-            pass.set_vertex_buffer(0, primitive.vertex.slice(..));
-            if let Some(skin) = &primitive.skin {
-                pass.set_vertex_buffer(1, skin.slice(..));
-            }
-            pass.set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..primitive.count, 0, 0..1);
+            self.record(pass, i, draw, key);
         }
     }
 
