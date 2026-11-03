@@ -113,6 +113,27 @@ pub fn fetch(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<Vec<u8>, FetchError> {
+    fetch_at_most(url, idle, total, None, cancel, progress)
+}
+
+/// What a body may reserve up front from the server's own length: a wrong
+/// `Content-Length` must not make the allocation itself fail.
+const MAX_RESERVE: u64 = 64 * 1024 * 1024;
+
+/// [`fetch`], refusing a body longer than `max` bytes (a package whose size
+/// the index gives) as soon as it passes it.
+///
+/// # Errors
+/// Any [`FetchError`]; a body over `max` is [`FetchError::Network`].
+pub fn fetch_at_most(
+    url: &str,
+    idle: Duration,
+    total: Duration,
+    max: Option<u64>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Vec<u8>, FetchError> {
+    let too_long = |n: usize| max.is_some_and(|m| n as u64 > m);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -137,7 +158,11 @@ pub fn fetch(
             return Err(FetchError::Status(status.as_u16()));
         }
         let length = response.content_length();
-        let mut data = Vec::with_capacity(usize::try_from(length.unwrap_or(0)).unwrap_or(0));
+        if length.is_some_and(|l| too_long(usize::try_from(l).unwrap_or(usize::MAX))) {
+            return Err(FetchError::Network("the body is longer than expected".into()));
+        }
+        let reserve = length.unwrap_or(0).min(max.unwrap_or(MAX_RESERVE)).min(MAX_RESERVE);
+        let mut data = Vec::with_capacity(usize::try_from(reserve).unwrap_or(0));
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(FetchError::Cancelled);
@@ -157,12 +182,18 @@ pub fn fetch(
                         .map_err(|e| classify(&e, over()))?;
                     let Some(chunk) = chunk else { break };
                     data.extend_from_slice(&chunk);
+                    if too_long(data.len()) {
+                        return Err(FetchError::Network("the body is longer than expected".into()));
+                    }
                 }
                 Ok(chunk) => {
                     let Some(chunk) = chunk.map_err(|e| classify(&e, over()))? else {
                         break;
                     };
                     data.extend_from_slice(&chunk);
+                    if too_long(data.len()) {
+                        return Err(FetchError::Network("the body is longer than expected".into()));
+                    }
                 }
             }
             progress(data.len() as u64, length);
