@@ -46,7 +46,7 @@ impl SlashTrail {
             return Some(TRAIL_ALPHA);
         }
         let fade = (now_ms - self.fade_start) / TRAIL_FADE_MS;
-        (fade < 1.0).then(|| TRAIL_ALPHA * (1.0 - fade as f32))
+        (fade < 1.0).then_some(TRAIL_ALPHA * (1.0 - fade as f32))
     }
 }
 
