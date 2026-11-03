@@ -207,7 +207,7 @@ pub fn fog_cvars(cvars: &Cvars) -> FogCvars {
 }
 
 /// The six vectors of `ATM_FOG_UNIFORMS`, in order: colour (a 1 when on),
-/// distances (start, sky height, -, density), height band, sky tint, sun
+/// distances (start, sky height, 1 for scene EXP2 fog, density), height band, sky tint, sun
 /// colour and exponent, sun direction and intensity.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -218,6 +218,21 @@ pub struct FogUniforms {
     pub sky: [f32; 4],
     pub sun_color: [f32; 4],
     pub sun_params: [f32; 4],
+}
+
+impl FogUniforms {
+    /// The scene's own `FOGMODE_EXP2` fog, as a borrower (`suspend`) sets it
+    /// while world fog stands aside: colour and density only, with the sky
+    /// at `sky_height`.
+    #[must_use]
+    pub fn scene_exp2(color: [f64; 3], density: f64, sky_height: f64) -> Self {
+        let f = |x: f64| x as f32;
+        Self {
+            color: [f(color[0]), f(color[1]), f(color[2]), 1.0],
+            dist: [0.0, f(sky_height), 1.0, f(density)],
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for FogUniforms {
@@ -268,6 +283,16 @@ impl WorldFogController {
     #[must_use]
     pub fn active(&self) -> Option<&WorldFogConfig> {
         self.active.as_ref()
+    }
+
+    /// The scene's fog colour as a borrower finds it: world fog's when it
+    /// draws, else Babylon's default `fogColor` (0.2, 0.2, 0.3).
+    #[must_use]
+    pub fn scene_color(&self) -> [f64; 3] {
+        match self.active.filter(|_| self.is_drawing()) {
+            Some(fog) => fog.color,
+            None => [0.2, 0.2, 0.3],
+        }
     }
 
     /// `isDrawing`.

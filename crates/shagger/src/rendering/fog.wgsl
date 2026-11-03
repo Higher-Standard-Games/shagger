@@ -6,7 +6,8 @@
 struct Fog {
     // rgb, a: 1 when there is fog
     color: vec4f,
-    // x: start distance, y: sky height, w: density
+    // x: start distance, y: sky height, z: 1 for the scene's own EXP2 fog
+    // (a borrower's, as under water), w: density
     dist: vec4f,
     // clear, full, 1 / (full - clear), w: 1 with a height band
     height: vec4f,
@@ -33,6 +34,12 @@ fn atm_fog_evaluate(fog: Fog, world_pos_in: vec3f, eye: vec3f, on_sky: bool) -> 
     if (on_sky) {
         dist = fog.dist.y / max(max(abs(view_dir.x), abs(view_dir.y)), abs(view_dir.z));
         world_pos = eye + view_dir * dist;
+    }
+    if (fog.dist.z > 0.5) {
+        // Babylon's FOGMODE_EXP2 (`CalcFogFactor`): the scene fog a borrower
+        // set while world fog stands aside.
+        let coeff = clamp(exp(-(dist * fog.dist.w) * (dist * fog.dist.w)), 0.0, 1.0);
+        return vec4f(fog.color.rgb, (1.0 - coeff) * fog.color.a);
     }
     var factor = 1.0 - exp(-max(0.0, dist - fog.dist.x) * fog.dist.w);
     if (fog.height.w > 0.5) { factor *= clamp((world_pos.y - fog.height.x) * fog.height.z, 0.0, 1.0); }
