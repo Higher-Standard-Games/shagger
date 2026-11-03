@@ -9,23 +9,30 @@
 //! the water draws after the opaque pass, so both are copies of the HDR
 //! target taken between the two passes: hardware depth and linear colour.
 //!
-//! Not yet: the cached room probes (`WaterProbeCache`, so every pool
-//! reflects the map's sky), static light highlights (`WaterSurfaceLighting`),
-//! the actor reflection pass, disturbances from bodies in the water, and
-//! per-liquid environment cubemaps from the shaders.
+//! Each pool reflects its cached room (`WaterProbeCache`), captured once at
+//! load by [`LiquidSurfaceSystem::capture_reflections`]; lava and pools the
+//! cache cannot place a probe over reflect the map's sky.
+//!
+//! Not yet: static light highlights (`WaterSurfaceLighting`), the actor
+//! reflection pass, disturbances from bodies in the water, and per-liquid
+//! environment cubemaps from the shaders.
 
 use std::collections::HashMap;
 
+use glam::Vec3;
 use wgpu::util::DeviceExt;
 
 use super::unified_water_material::{UNIFIED_WATER_WGSL, WaterKind, WaterUniforms, unified_water_uniforms};
 use super::water_noise::{WATER_NOISE_SIZE, generate_water_normal_map};
+use super::water_probe_cache::{PROBE_SIZE, ProbePlan, StaticTriangles, WaterProbeCache};
 use crate::loader::bsp::liquid_classifier::LiquidSurfaceDescriptor;
 use crate::rendering::camera::Camera;
 use crate::rendering::gpu::Gpu;
+use crate::rendering::hdr_target::HDR_FORMAT;
+use crate::rendering::sky_renderer::SkyRenderer;
 use crate::rendering::world_fog_controller::FogUniforms;
 use crate::rendering::world_geometry::{WorldGeometry, WorldVertex};
-use crate::rendering::world_renderer::DEPTH_FORMAT;
+use crate::rendering::world_renderer::{DEPTH_FORMAT, WorldRenderer};
 
 /// `hasReactiveSurface`: water and slime ripple; lava crusts.
 #[must_use]
@@ -61,17 +68,24 @@ impl Default for WaterSettings {
     }
 }
 
-struct Material {
+/// One claimed batch: its material's uniforms with its own environment
+/// (`probes.bind` per mesh), and their buffer.
+struct Surface {
+    batch: usize,
+    kind: WaterKind,
+    first_index: u32,
+    index_count: u32,
     uniforms: WaterUniforms,
     buffer: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
+    /// Its room capture, an index into `probes`.
+    probe: Option<usize>,
 }
 
-struct Surface {
-    batch: usize,
-    material: usize,
-    first_index: u32,
-    index_count: u32,
+/// A captured room (`CachedWaterProbe`).
+struct Probe {
+    cube: wgpu::TextureView,
+    plan: ProbePlan,
 }
 
 /// The copies of the scene behind the water.
@@ -85,7 +99,8 @@ struct Captures {
 
 pub struct LiquidSurfaceSystem {
     surfaces: Vec<Surface>,
-    materials: Vec<Material>,
+    cache: WaterProbeCache,
+    probes: Vec<Probe>,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     noise: wgpu::TextureView,
@@ -126,8 +141,8 @@ fn texture_2d(
 }
 
 impl LiquidSurfaceSystem {
-    /// `claim`: the drawn liquid batches of `geometry`, one material per
-    /// kind and profile. `environment` is the map's sky cube
+    /// `claim`: the drawn liquid batches of `geometry`, with the material of
+    /// their kind and profile; `probe_lift` is `r_water_probe_height`. `environment` is the map's sky cube
     /// (`setEnvironmentTexture(skyEnvironment)`), gamma space. `None` when
     /// the map draws no liquid.
     #[must_use]
@@ -137,14 +152,14 @@ impl LiquidSurfaceSystem {
         liquids: &[LiquidSurfaceDescriptor],
         environment: Option<&wgpu::TextureView>,
         color_format: wgpu::TextureFormat,
+        probe_lift: f64,
     ) -> Option<Self> {
         let by_texture: HashMap<usize, &LiquidSurfaceDescriptor> = liquids
             .iter()
             .filter(|l| l.drawn)
             .map(|l| (l.texture_index, l))
             .collect();
-        let mut keys: Vec<(WaterKind, String)> = Vec::new();
-        let mut surfaces = Vec::new();
+        let mut claimed = Vec::new();
         let mut hidden = vec![false; geometry.batches.len()];
         for (batch, b) in geometry.batches.iter().enumerate() {
             let Ok(index) = usize::try_from(b.texture_index) else {
@@ -157,20 +172,10 @@ impl LiquidSurfaceSystem {
             } else {
                 "default"
             };
-            let key = (liquid.kind, profile.to_owned());
-            let material = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
-                keys.push(key);
-                keys.len() - 1
-            });
             hidden[batch] = true;
-            surfaces.push(Surface {
-                batch,
-                material,
-                first_index: b.first_index,
-                index_count: b.index_count,
-            });
+            claimed.push((batch, liquid.kind, profile.to_owned()));
         }
-        if surfaces.is_empty() {
+        if claimed.is_empty() {
             return None;
         }
         let device = &gpu.device;
@@ -328,13 +333,17 @@ impl LiquidSurfaceSystem {
             multiview_mask: None,
             cache: None,
         });
-        let materials = keys
-            .iter()
-            .map(|(kind, profile)| {
-                let mut uniforms = unified_water_uniforms(*kind, profile, None);
+        let surfaces = claimed
+            .into_iter()
+            .map(|(batch, kind, profile)| {
+                let mut uniforms = unified_water_uniforms(kind, &profile, None);
                 // `setWaterEnvironment`: the sky cube, skybox mode, gamma space.
                 uniforms.env[0] = if has_environment { 1.0 } else { 0.0 };
-                Material {
+                Surface {
+                    batch,
+                    kind,
+                    first_index: geometry.batches[batch].first_index,
+                    index_count: geometry.batches[batch].index_count,
                     buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("unified water"),
                         contents: bytemuck::bytes_of(&uniforms),
@@ -342,12 +351,20 @@ impl LiquidSurfaceSystem {
                     }),
                     uniforms,
                     bind_group: None,
+                    probe: None,
                 }
             })
+            .collect::<Vec<_>>();
+        let reactive: Vec<usize> = surfaces
+            .iter()
+            .filter(|s| has_reactive_surface(s.kind))
+            .map(|s| s.batch)
             .collect();
+        let cache = WaterProbeCache::new(geometry, &reactive, probe_lift);
         Some(Self {
             surfaces,
-            materials,
+            cache,
+            probes: Vec::new(),
             pipeline,
             layout,
             noise,
@@ -380,6 +397,129 @@ impl LiquidSurfaceSystem {
         self.has_environment
     }
 
+    /// The patches the probe cache found (`patchFor`, `surfaceAt`).
+    #[must_use]
+    pub fn probe_cache(&self) -> &WaterProbeCache {
+        &self.cache
+    }
+
+    /// How many rooms were captured.
+    #[must_use]
+    pub fn probe_count(&self) -> usize {
+        self.probes.len()
+    }
+
+    /// Where each captured room's probe stands.
+    pub fn probe_positions(&self) -> impl Iterator<Item = glam::DVec3> + '_ {
+        self.probes.iter().map(|p| p.plan.position)
+    }
+
+    /// `captureReflections` (`WaterProbeCache.captureAll`): each pool's room
+    /// cubemap, drawn once from its probe point with the static world and
+    /// the sky (no liquids, autosprites, models or effects), in linear HDR as
+    /// the scene draws for image processing as a post-process. `world` and
+    /// `sky` are prepared for each face, so prepare them again afterwards.
+    pub fn capture_reflections(
+        &mut self,
+        gpu: &Gpu,
+        geometry: &WorldGeometry,
+        world: &WorldRenderer,
+        sky: Option<&SkyRenderer>,
+        near: f32,
+        far: f32,
+    ) -> usize {
+        let picks = StaticTriangles::new(geometry, &self.hidden);
+        let plans = self.cache.plan(&picks);
+        // The static meshes: everything but autosprites (liquids are hidden).
+        let mask: Vec<bool> = geometry
+            .batches
+            .iter()
+            .map(|b| b.passes.first().is_none_or(|p| !(p.autosprite || p.autosprite2)))
+            .collect();
+        let projection = glam::camera::lh::proj::directx::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+        // The cube faces in layer order, each looking along its axis with the
+        // up that puts its texels where a cube lookup finds them.
+        let faces = [
+            (Vec3::X, Vec3::Y),
+            (Vec3::NEG_X, Vec3::Y),
+            (Vec3::Y, Vec3::NEG_Z),
+            (Vec3::NEG_Y, Vec3::Z),
+            (Vec3::Z, Vec3::Y),
+            (Vec3::NEG_Z, Vec3::Y),
+        ];
+        let depth = texture_2d(
+            gpu,
+            "water probe depth",
+            DEPTH_FORMAT,
+            (PROBE_SIZE, PROBE_SIZE),
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
+        for plan in plans {
+            let eye = plan.position.as_vec3();
+            let cube = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("water room"),
+                size: wgpu::Extent3d {
+                    width: PROBE_SIZE,
+                    height: PROBE_SIZE,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            for (layer, (forward, up)) in faces.iter().enumerate() {
+                let view = glam::camera::lh::view::look_to_mat4(eye, *forward, *up);
+                world.prepare(gpu, projection * view, eye);
+                if let Some(sky) = sky {
+                    sky.prepare_view(gpu, view, projection, eye);
+                }
+                let target = cube.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                });
+                let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("water room"),
+                });
+                {
+                    let mut pass =
+                        crate::rendering::offscreen::begin_main_pass(&mut encoder, &target, &depth, wgpu::Color::BLACK);
+                    if let Some(sky) = sky {
+                        sky.draw(&mut pass);
+                    }
+                    world.draw_visible(&mut pass, &mask);
+                }
+                gpu.queue.submit([encoder.finish()]);
+            }
+            let index = self.probes.len();
+            for surface in &mut self.surfaces {
+                if self.cache.patch_for(surface.batch) == Some(plan.patch) {
+                    surface.probe = Some(index);
+                    // `probes.bind`: the room, linear, with its parallax box.
+                    let u = &mut surface.uniforms;
+                    u.env = [1.0, 1.0, 1.0, 1.0];
+                    u.probe_position = [eye.x, eye.y, eye.z, 0.0];
+                    u.probe_min = plan.room_min.as_vec3().extend(0.0).to_array();
+                    u.probe_max = plan.room_max.as_vec3().extend(0.0).to_array();
+                }
+            }
+            self.probes.push(Probe {
+                cube: cube.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                }),
+                plan,
+            });
+        }
+        self.rebind(gpu);
+        self.probes.len()
+    }
+
     /// The wave clock: wall time, a hitch capped at a tenth of a second.
     pub fn update(&mut self, dt_seconds: f64) {
         self.elapsed += dt_seconds.min(0.1);
@@ -405,15 +545,20 @@ impl LiquidSurfaceSystem {
             colour,
             size,
         });
-        let captures = self.captures.as_ref().expect("set above");
-        for material in &mut self.materials {
-            material.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.rebind(gpu);
+    }
+
+    fn rebind(&mut self, gpu: &Gpu) {
+        let Some(captures) = self.captures.as_ref() else { return };
+        for surface in &mut self.surfaces {
+            let environment = surface.probe.map_or(&self.environment, |p| &self.probes[p].cube);
+            surface.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("unified water"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: material.buffer.as_entire_binding(),
+                        resource: surface.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -425,7 +570,7 @@ impl LiquidSurfaceSystem {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.environment),
+                        resource: wgpu::BindingResource::TextureView(environment),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -483,8 +628,8 @@ impl LiquidSurfaceSystem {
         let view = camera.view();
         let forward = camera.forward();
         let f = |x: f64| x as f32;
-        for material in &mut self.materials {
-            let u = &mut material.uniforms;
+        for surface in &mut self.surfaces {
+            let u = &mut surface.uniforms;
             u.view_proj = camera.view_projection(aspect).to_cols_array_2d();
             u.view = view.to_cols_array_2d();
             u.camera = [camera.position.x, camera.position.y, camera.position.z, f(self.elapsed)];
@@ -505,7 +650,7 @@ impl LiquidSurfaceSystem {
             u.depth_projection = [camera.near, camera.far, 1.0, 1.0];
             u.fog = fog;
             gpu.queue
-                .write_buffer(&material.buffer, 0, bytemuck::bytes_of(&material.uniforms));
+                .write_buffer(&surface.buffer, 0, bytemuck::bytes_of(&surface.uniforms));
         }
     }
 
@@ -539,18 +684,14 @@ impl LiquidSurfaceSystem {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-        let mut bound = None;
         for surface in &self.surfaces {
             if !visible.get(surface.batch).copied().unwrap_or(true) {
                 continue;
             }
-            let Some(bind_group) = &self.materials[surface.material].bind_group else {
+            let Some(bind_group) = &surface.bind_group else {
                 continue;
             };
-            if bound != Some(surface.material) {
-                pass.set_bind_group(0, bind_group, &[]);
-                bound = Some(surface.material);
-            }
+            pass.set_bind_group(0, bind_group, &[]);
             pass.draw_indexed(surface.first_index..surface.first_index + surface.index_count, 0, 0..1);
         }
     }

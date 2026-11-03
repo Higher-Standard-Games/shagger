@@ -219,6 +219,19 @@ impl SkyRenderer {
         self.fog = fog;
     }
 
+    /// [`prepare`](Self::prepare) for any view (a cube face): `view`'s
+    /// translation is dropped, as `infiniteDistance` drops it.
+    pub fn prepare_view(&self, gpu: &Gpu, view: Mat4, projection: Mat4, eye: Vec3) {
+        let mut centred = view;
+        centred.w_axis = glam::Vec4::W;
+        let uniform = SkyUniform {
+            inverse_view_proj: (projection * centred).inverse().to_cols_array_2d(),
+            eye: [eye.x, eye.y, eye.z, 0.0],
+            fog: self.fog,
+        };
+        gpu.queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
     /// Records the sky into an open pass; draw it before the world.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
