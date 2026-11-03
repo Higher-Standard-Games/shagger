@@ -20,4 +20,5 @@
 pub mod materials;
 pub mod maths;
 pub mod meshes;
+pub mod physics;
 pub mod post_processes;

@@ -188,7 +188,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let texel = textureSample(base_texture, base_sampler, in.uv);
     let albedo_color = select(material.base_color.rgb, draw.tint.rgb, draw.tint.w > 0.5);
     let albedo = pow(texel.rgb, vec3f(2.2)) * albedo_color;
-    let alpha = material.base_color.a * material.params.w;
+    // A draw's alpha override (a fade) is stored plus one in uv_origin.w;
+    // the material must already blend.
+    let alpha = select(material.base_color.a * material.params.w, draw.uv_origin.w - 1.0, draw.uv_origin.w > 0.5);
     var color: vec3f;
     if material.params.z > 0.5 {
         color = albedo;

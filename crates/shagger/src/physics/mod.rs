@@ -10,6 +10,7 @@ pub mod collision_spatial_index;
 pub mod content_flags;
 pub mod facet_bevels;
 pub mod patch_tessellator;
+pub mod physics_system;
 pub mod player_physics_constants;
 pub mod sweep_backend_adapter;
 pub mod sweep_collision_backend;

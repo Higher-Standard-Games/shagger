@@ -33,6 +33,9 @@ image = { version = "0.25", default-features = false, features = ["webp", "tga",
 # so the HUD can share the device later (RUST.md 12 asks the versions agree).
 wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }
+# Ragdolls (RUST.md 8.2): rapier3d stands in for Havok on the client only;
+# the server never simulates bodies.
+rapier3d = "0.36"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 # KHR_draco_mesh_compression for the player model (RUST.md 20.7): a pure

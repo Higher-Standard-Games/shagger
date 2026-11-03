@@ -108,8 +108,8 @@ pub struct ModelDraw {
     /// Replaces a standard material's emissive colour (a pulse), or is
     /// added to a lit material's light (a powerup glow).
     pub emissive: Option<Vec3>,
-    /// Replaces a standard material's alpha (a fade); the material must
-    /// already blend.
+    /// Replaces the material's alpha (a fade); the material must already
+    /// blend (a lit model uploaded as glass).
     pub alpha: Option<f32>,
     /// A standard material's texture matrix (its texture's offsets, scales
     /// and rotation, as `getTextureMatrix` makes them).
