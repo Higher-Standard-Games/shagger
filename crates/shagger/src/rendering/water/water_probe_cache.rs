@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use glam::DVec3;
 use shagger_shared::js::js_round;
 
+use super::static_visibility_index::EPSILON;
 use crate::rendering::world_geometry::WorldGeometry;
 
 /// `MAX_PROBES`.
@@ -176,6 +177,16 @@ impl StaticTriangles {
         Self { triangles, blended }
     }
 
+    /// The opaque triangles (`WaterSurfaceLighting`'s blockers).
+    #[must_use]
+    pub fn opaque_triangles(&self) -> Vec<[DVec3; 3]> {
+        self.triangles
+            .iter()
+            .filter(|t| !self.blended[t.batch])
+            .map(|t| t.p)
+            .collect()
+    }
+
     /// The closest hit within `length` (two-sided, as Babylon's ray test),
     /// skipping blended batches when `opaque_only`.
     #[must_use]
@@ -196,12 +207,12 @@ impl StaticTriangles {
             let inv = 1.0 / det;
             let tvec = origin - t.p[0];
             let bu = tvec.dot(pvec) * inv;
-            if !(0.0..=1.0).contains(&bu) {
+            if !(-EPSILON..=1.0 + EPSILON).contains(&bu) {
                 continue;
             }
             let qvec = tvec.cross(edge1);
             let bv = direction.dot(qvec) * inv;
-            if bv < 0.0 || bu + bv > 1.0 {
+            if bv < -EPSILON || bu + bv > 1.0 + EPSILON {
                 continue;
             }
             let distance = edge2.dot(qvec) * inv;

@@ -13,8 +13,11 @@
 //! load by [`LiquidSurfaceSystem::capture_reflections`]; lava and pools the
 //! cache cannot place a probe over reflect the map's sky.
 //!
-//! Not yet: static light highlights (`WaterSurfaceLighting`), the actor
-//! reflection pass, disturbances from bodies in the water, and per-liquid
+//! Static highlights from the map's lights and emitting panels
+//! (`WaterSurfaceLighting`) are traced once at load by
+//! [`LiquidSurfaceSystem::prepare_lighting`].
+//!
+//! Not yet: the actor reflection pass, disturbances from bodies in the water, and per-liquid
 //! environment cubemaps from the shaders.
 
 use std::collections::HashMap;
@@ -25,6 +28,7 @@ use wgpu::util::DeviceExt;
 use super::unified_water_material::{UNIFIED_WATER_WGSL, WaterKind, WaterUniforms, unified_water_uniforms};
 use super::water_noise::{WATER_NOISE_SIZE, generate_water_normal_map};
 use super::water_probe_cache::{PROBE_SIZE, ProbePlan, StaticTriangles, WaterProbeCache};
+use super::water_surface_lighting::{MASK_SIZE, WaterMapLight, WaterSurfaceLighting};
 use crate::loader::bsp::liquid_classifier::LiquidSurfaceDescriptor;
 use crate::rendering::camera::Camera;
 use crate::rendering::gpu::Gpu;
@@ -80,6 +84,8 @@ struct Surface {
     bind_group: Option<wgpu::BindGroup>,
     /// Its room capture, an index into `probes`.
     probe: Option<usize>,
+    /// Its patch's light visibility mask, an index into `masks`.
+    mask: Option<usize>,
 }
 
 /// A captured room (`CachedWaterProbe`).
@@ -101,6 +107,10 @@ pub struct LiquidSurfaceSystem {
     surfaces: Vec<Surface>,
     cache: WaterProbeCache,
     probes: Vec<Probe>,
+    lighting: WaterSurfaceLighting,
+    masks: Vec<wgpu::TextureView>,
+    /// `lighting.bind`'s fallback: one clear texel.
+    no_mask: wgpu::TextureView,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     noise: wgpu::TextureView,
@@ -352,6 +362,7 @@ impl LiquidSurfaceSystem {
                     uniforms,
                     bind_group: None,
                     probe: None,
+                    mask: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -361,10 +372,34 @@ impl LiquidSurfaceSystem {
             .map(|s| s.batch)
             .collect();
         let cache = WaterProbeCache::new(geometry, &reactive, probe_lift);
+        let no_mask = device
+            .create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("water-static-light-visibility"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[0, 0, 0, 0],
+            )
+            .create_view(&wgpu::TextureViewDescriptor::default());
         Some(Self {
             surfaces,
             cache,
             probes: Vec::new(),
+            lighting: WaterSurfaceLighting::default(),
+            masks: Vec::new(),
+            no_mask,
             pipeline,
             layout,
             noise,
@@ -520,6 +555,80 @@ impl LiquidSurfaceSystem {
         self.probes.len()
     }
 
+    /// `lighting.prepare` and `bind`: the static highlights of each reactive
+    /// pool from `sources` (`waterMapLights` and `waterSurfaceLights`), with
+    /// their visibility traced through the static opaque world. Returns
+    /// `lightCount`.
+    pub fn prepare_lighting(&mut self, gpu: &Gpu, geometry: &WorldGeometry, sources: &[WaterMapLight]) -> usize {
+        let patches: Vec<(usize, &super::water_probe_cache::WaterPatch)> = self
+            .surfaces
+            .iter()
+            .filter(|s| has_reactive_surface(s.kind))
+            .filter_map(|s| self.cache.patch_for(s.batch))
+            .map(|p| (p, &self.cache.patches[p]))
+            .collect();
+        let hidden = &self.hidden;
+        self.lighting.prepare(
+            || StaticTriangles::new(geometry, hidden).opaque_triangles(),
+            &patches,
+            sources,
+        );
+        let mut views: Vec<(usize, usize)> = Vec::new();
+        for surface in &mut self.surfaces {
+            let patch = has_reactive_surface(surface.kind)
+                .then(|| self.cache.patch_for(surface.batch))
+                .flatten();
+            let u = &mut surface.uniforms;
+            u.lights = [[0.0; 4]; super::unified_water_material::MAX_WATER_LIGHTS];
+            u.light_colours = u.lights;
+            u.light_mask_min = [0.0; 4];
+            u.light_mask_max = [1.0, 1.0, 1.0, 0.0];
+            surface.mask = None;
+            let Some(patch) = patch else { continue };
+            let bounds = &self.cache.patches[patch];
+            u.light_mask_min = bounds.min.as_vec3().extend(0.0).to_array();
+            u.light_mask_max = bounds.max.as_vec3().extend(0.0).to_array();
+            let Some(entry) = self.lighting.entry(patch) else {
+                continue;
+            };
+            u.lights = entry.lights;
+            u.light_colours = entry.colours;
+            let index = match views.iter().find(|(p, _)| *p == patch) {
+                Some((_, index)) => *index,
+                None => {
+                    let view = gpu
+                        .device
+                        .create_texture_with_data(
+                            &gpu.queue,
+                            &wgpu::TextureDescriptor {
+                                label: Some("water-static-light-visibility"),
+                                size: wgpu::Extent3d {
+                                    width: MASK_SIZE as u32,
+                                    height: MASK_SIZE as u32,
+                                    depth_or_array_layers: 1,
+                                },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                view_formats: &[],
+                            },
+                            wgpu::util::TextureDataOrder::LayerMajor,
+                            &entry.mask,
+                        )
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    self.masks.push(view);
+                    views.push((patch, self.masks.len() - 1));
+                    self.masks.len() - 1
+                }
+            };
+            surface.mask = Some(index);
+        }
+        self.rebind(gpu);
+        self.lighting.light_count()
+    }
+
     /// The wave clock: wall time, a hitch capped at a tenth of a second.
     pub fn update(&mut self, dt_seconds: f64) {
         self.elapsed += dt_seconds.min(0.1);
@@ -552,6 +661,7 @@ impl LiquidSurfaceSystem {
         let Some(captures) = self.captures.as_ref() else { return };
         for surface in &mut self.surfaces {
             let environment = surface.probe.map_or(&self.environment, |p| &self.probes[p].cube);
+            let mask = surface.mask.map_or(&self.no_mask, |m| &self.masks[m]);
             surface.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("unified water"),
                 layout: &self.layout,
@@ -588,12 +698,11 @@ impl LiquidSurfaceSystem {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.capture_sampler),
                     },
-                    // The visibility mask and actor layer are not drawn yet:
-                    // the noise stands in, as the TypeScript binds it.
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: wgpu::BindingResource::TextureView(&self.noise),
+                        resource: wgpu::BindingResource::TextureView(mask),
                     },
+                    // The actor layer is not drawn yet: the noise stands in.
                     wgpu::BindGroupEntry {
                         binding: 9,
                         resource: wgpu::BindingResource::TextureView(&self.noise),

@@ -253,7 +253,7 @@ impl Properties {
         self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 
-    fn set(&mut self, key: &str, value: &str) {
+    pub fn set(&mut self, key: &str, value: &str) {
         // A plain object ignores a string assigned to __proto__.
         if key == "__proto__" {
             return;
