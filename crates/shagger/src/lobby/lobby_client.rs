@@ -21,6 +21,9 @@ use super::types::LobbyIn;
 
 /// How long to wait for the connection before giving up.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// A send the link has not taken by then counts as a drop.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The close reason when this client closes the connection itself.
 pub const CLIENT_DISCONNECT_REASON: &str = "Client disconnect";
 
@@ -294,7 +297,17 @@ async fn run(url: &str, mut requests: async_mpsc::UnboundedReceiver<Outgoing>, e
         true,
         Some(crate::network::client::tls::connector()),
     );
-    let mut socket = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+    // Closing (or dropping the client) while connecting stops at once.
+    let closed = async { while let Some(Outgoing::Text(_)) = requests.recv().await {} };
+    let connected = tokio::select! {
+        connected = tokio::time::timeout(CONNECT_TIMEOUT, connect) => connected,
+        () = closed => {
+            let reason = CLIENT_DISCONNECT_REASON.to_owned();
+            let _ = events.send(LobbyEvent::Disconnected { reason, code: 1000 });
+            return;
+        }
+    };
+    let mut socket = match connected {
         Ok(Ok((socket, _))) => socket,
         Ok(Err(e)) => {
             let _ = events.send(LobbyEvent::Error(format!("WebSocket connection error: {e}")));
@@ -325,12 +338,15 @@ async fn run(url: &str, mut requests: async_mpsc::UnboundedReceiver<Outgoing>, e
             },
             request = requests.recv() => match request {
                 Some(Outgoing::Text(text)) => {
-                    if let Err(e) = socket.send(Message::text(text)).await {
-                        break (e.to_string(), 1006);
+                    match tokio::time::timeout(SEND_TIMEOUT, socket.send(Message::text(text))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => break (e.to_string(), 1006),
+                        Err(_) => break ("send stalled".to_owned(), 1006),
                     }
                 }
                 None | Some(Outgoing::Close) => {
-                    let _ = socket.close(Some(CloseFrame { code: CloseCode::Normal, reason: CLIENT_DISCONNECT_REASON.into() })).await;
+                    let frame = CloseFrame { code: CloseCode::Normal, reason: CLIENT_DISCONNECT_REASON.into() };
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, socket.close(Some(frame))).await;
                     break (CLIENT_DISCONNECT_REASON.to_owned(), 1000);
                 }
             },
