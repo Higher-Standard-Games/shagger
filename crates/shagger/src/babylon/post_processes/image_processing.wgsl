@@ -18,6 +18,9 @@ struct Settings {
     vignette_settings2: vec4f,
     // xy: vInverseScreenSize
     inverse_screen: vec4f,
+    // SHAG's colour correction (ColorCorrectionPostProcess): the matrix's
+    // rows; color_rows[0].w is 1 when set.
+    color_rows: array<vec4f, 3>,
 };
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -63,5 +66,19 @@ fn fs_main(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         rgb = mix(rgb, high, contrast - 1.0);
     }
     rgb = max(rgb, vec3f(0.0));
+    if settings.color_rows[0].w > 0.5 {
+        // The matrices hold for linear light; the frame here is display-encoded.
+        let linear = pow(clamp(rgb, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
+        let mapped = clamp(
+            vec3f(
+                dot(settings.color_rows[0].xyz, linear),
+                dot(settings.color_rows[1].xyz, linear),
+                dot(settings.color_rows[2].xyz, linear),
+            ),
+            vec3f(0.0),
+            vec3f(1.0),
+        );
+        rgb = pow(mapped, vec3f(1.0 / 2.2));
+    }
     return vec4f(rgb, result.a);
 }

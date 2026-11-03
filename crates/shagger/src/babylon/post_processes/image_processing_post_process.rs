@@ -7,7 +7,8 @@
 //
 // Changes: only exposure, contrast and the vignette; one full-screen pass
 // from an HDR target (`fromLinearSpace`, as DefaultRenderingPipeline sets
-// it) into the output.
+// it) into the output. A last colour matrix on the encoded output stands in
+// for SHAG's colour-correction pass (`color_matrix`).
 
 //! Babylon's image processing as a post-process (`applyByPostProcess`).
 
@@ -59,6 +60,9 @@ pub struct ImageProcessingConfiguration {
     pub contrast: f64,
     /// `vignetteEnabled`, with its settings.
     pub vignette: Option<Vignette>,
+    /// Not Babylon's: SHAG's `ColorCorrectionPostProcess` matrix (row-major,
+    /// on linear light), applied to the encoded output last.
+    pub color_matrix: Option<[f64; 9]>,
 }
 
 impl Default for ImageProcessingConfiguration {
@@ -67,6 +71,7 @@ impl Default for ImageProcessingConfiguration {
             exposure: 1.0,
             contrast: 1.0,
             vignette: None,
+            color_matrix: None,
         }
     }
 }
@@ -78,6 +83,8 @@ struct Settings {
     vignette_settings1: [f32; 4],
     vignette_settings2: [f32; 4],
     inverse_screen: [f32; 4],
+    /// The colour matrix's rows (w of the first: 1 when set).
+    color_rows: [[f32; 4]; 3],
 }
 
 /// `Scalar.Lerp` (`Mix` in the configuration's bind).
@@ -95,7 +102,14 @@ impl ImageProcessingConfiguration {
             vignette_settings1: [0.0; 4],
             vignette_settings2: [0.0; 4],
             inverse_screen: [inverse_width as f32, inverse_height as f32, 0.0, 0.0],
+            color_rows: [[0.0; 4]; 3],
         };
+        if let Some(m) = self.color_matrix {
+            for (row, out) in settings.color_rows.iter_mut().enumerate() {
+                *out = [m[row * 3] as f32, m[row * 3 + 1] as f32, m[row * 3 + 2] as f32, 0.0];
+            }
+            settings.color_rows[0][3] = 1.0;
+        }
         if let Some(v) = self.vignette {
             let aspect_ratio = inverse_height / inverse_width;
             let mut scale_y = (v.camera_fov * 0.5).tan();
@@ -269,6 +283,7 @@ mod tests {
                 stretch: 0.5,
                 ..Vignette::default()
             }),
+            color_matrix: None,
         };
         let s = config.settings(1280, 720);
         let scale_y = 0.25_f64.tan();
@@ -279,5 +294,13 @@ mod tests {
         assert_eq!(s.vignette_settings1[2], 0.0);
         assert!((s.vignette_settings2[3] + 0.6).abs() < 1e-6);
         assert_eq!(s.params, [1.0, 1.05, 1.0, 0.0]);
+        assert_eq!(s.color_rows[0][3], 0.0);
+        let rows = ImageProcessingConfiguration {
+            color_matrix: Some([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            ..config
+        }
+        .settings(4, 4)
+        .color_rows;
+        assert_eq!(rows, [[1.0, 2.0, 3.0, 1.0], [4.0, 5.0, 6.0, 0.0], [7.0, 8.0, 9.0, 0.0]]);
     }
 }
