@@ -16,4 +16,7 @@ pub mod voltaic;
 pub mod weapon_barrels;
 pub mod weapon_bob;
 pub mod weapon_recoil;
+pub mod weapon_reload_anim;
+pub mod weapon_slash;
+pub mod weapon_switch_anim;
 pub mod weapon_view_manager;

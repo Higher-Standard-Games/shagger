@@ -6,10 +6,12 @@
 //! specular light, a GLB view model's orientation and material fix-ups
 //! (`loadGlbSource`), the hip placement with handedness (`setupWeapon`,
 //! `applyPosition`), and per frame the aim-down-sights lerp, `WeaponBob`
-//! and `WeaponRecoil` (`updateWeaponBob`).
+//! and `WeaponRecoil` (`updateWeaponBob`), the recoil and melee swing of
+//! `presentFire`, and the reload and switch animations (the switch runs
+//! in the holder, which swaps models, and hands its offsets in).
 //!
-//! Not yet: MD3 view models, the switch, reload, holster, slash and blade
-//! charge animations, the muzzle flash light and model, the on-weapon ammo
+//! Not yet: MD3 view models, the holster and blade charge animations, the
+//! slash trail, the muzzle flash light and model, the on-weapon ammo
 //! counter, spinning barrels, the quad outline, the underwater drift and the light
 //! grid tint (`WeaponLighting`, which only reaches StandardMaterial layers
 //! and the blade's light).
@@ -19,6 +21,9 @@ use glam::{DVec3, Mat4, Vec3};
 use super::weapon_barrels::babylon_euler;
 use super::weapon_bob::{BobInput, GunBobVars, WeaponBob};
 use super::weapon_recoil::WeaponRecoil;
+use super::weapon_reload_anim::WeaponReloadAnim;
+use super::weapon_slash::WeaponSlash;
+use super::weapon_switch_anim::SwitchAnimOffsets;
 use crate::babylon::materials::standard_material::{StandardMaterialParams, TextureUse};
 use crate::loader::model::gltf_model::ModelMaterial;
 use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline};
@@ -187,6 +192,30 @@ pub fn weapon_outline(mode: &ModelMaterialMode, root_scale: f64) -> Option<Outli
     })
 }
 
+/// What `presentFire` reads from the weapon's definition.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotStyle {
+    /// `recoilScale`, 1 when unset.
+    pub recoil_scale: f64,
+    /// `adsRecoilScale`, 0.2 when unset.
+    pub ads_recoil_scale: f64,
+    /// `fireIntervalTicks / tick rate`.
+    pub refire_seconds: Option<f64>,
+    /// `meleeRadius` is set: the shot is a swing.
+    pub melee: bool,
+}
+
+impl Default for ShotStyle {
+    fn default() -> Self {
+        Self {
+            recoil_scale: 1.0,
+            ads_recoil_scale: 0.2,
+            refire_seconds: None,
+            melee: false,
+        }
+    }
+}
+
 /// What the view model reads about the player each frame
 /// (`ViewportEffectsManager`'s state, or a followed player's).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -221,6 +250,12 @@ pub struct WeaponView {
     pub position: DVec3,
     pub rotation: DVec3,
     pub scale: f64,
+    /// This view's clock, seconds: the animations' `performance.now()`.
+    pub clock: f64,
+    pub slash: WeaponSlash,
+    pub reload_anim: WeaponReloadAnim,
+    /// The holder's switch slide this frame.
+    pub switch_offsets: SwitchAnimOffsets,
 }
 
 impl WeaponView {
@@ -254,6 +289,10 @@ impl WeaponView {
             position: DVec3::ZERO,
             rotation: DVec3::ZERO,
             scale: 1.0,
+            clock: 0.0,
+            slash: WeaponSlash::default(),
+            reload_anim: WeaponReloadAnim::default(),
+            switch_offsets: SwitchAnimOffsets::default(),
         };
         view.apply_position();
         view
@@ -269,11 +308,41 @@ impl WeaponView {
         self.effective_base_position = base;
     }
 
+    /// `presentFire`'s motion: the recoil, timed to the fire rate, and a
+    /// melee weapon's swing (not for a charged throw).
+    pub fn present_fire(&mut self, shot: &ShotStyle, projectile_fire: bool) {
+        self.recoil.fire(
+            shot.recoil_scale,
+            self.ads_progress,
+            shot.ads_recoil_scale,
+            shot.refire_seconds,
+        );
+        if shot.melee && !projectile_fire {
+            self.slash.trigger(self.clock * 1000.0);
+        }
+    }
+
+    /// `startReload`.
+    pub fn start_reload(&mut self, duration: f64) {
+        self.reload_anim.start(duration, self.clock);
+    }
+
+    /// `cancelReload`.
+    pub fn cancel_reload(&mut self) {
+        self.reload_anim.cancel();
+    }
+
     /// `updateWeaponBob` (with `WeaponRecoil.update`, which
-    /// `updateMuzzleFlash` steps): bob, aim and recoil on the base position.
+    /// `updateMuzzleFlash` steps): bob, aim, recoil, reload, switch and
+    /// swing on the base position.
     pub fn update(&mut self, input: &ViewModelInput) {
         let dt = input.delta_time;
+        self.clock += dt;
         self.recoil.update(dt);
+        let reload = self.reload_anim.offsets(self.clock);
+        let reloading = input.reloading || self.reload_anim.is_reloading();
+        let switch = self.switch_offsets;
+        let slash = self.slash.offsets(self.clock * 1000.0);
         let base = self.effective_base_position;
         self.bob.update(
             &BobInput {
@@ -283,7 +352,7 @@ impl WeaponView {
                 velocity_y: input.velocity_y,
                 landing_velocity: input.landing_velocity,
                 bob_cycle: input.bob_cycle,
-                reloading: input.reloading,
+                reloading,
                 ads_progress: self.ads_progress,
                 hand_offset_x: base.x,
             },
@@ -298,7 +367,7 @@ impl WeaponView {
             .filter(|t| *t != 0.0)
             .unwrap_or(DEFAULT_ADS_TIME);
         let ads_speed = 1.0 / ads_time.max(0.05);
-        let target_ads = if input.aiming && !input.reloading { 1.0 } else { 0.0 };
+        let target_ads = if input.aiming && !reloading { 1.0 } else { 0.0 };
         if self.def.is_some_and(|d| d.ads_require_ready) {
             let step = dt * ads_speed;
             self.ads_progress = if target_ads > self.ads_progress {
@@ -317,18 +386,19 @@ impl WeaponView {
         let ads_z = (ads_target.z - base.z) * self.ads_progress;
 
         self.position = DVec3::new(
-            ads_x + bob.bob_x,
-            base.y + bob.bob_y + bob.jump_land_bob + ads_y,
-            base.z + ads_z - self.recoil.offset,
+            ads_x + bob.bob_x + reload.x_offset + switch.x_offset + slash.x_offset,
+            base.y + bob.bob_y + bob.jump_land_bob + ads_y + reload.y_offset + switch.y_offset + slash.y_offset,
+            base.z + ads_z + reload.z_offset - self.recoil.offset + switch.z_offset + slash.z_offset,
         );
         // Aimed, the sprint tilt drops by 80%.
         let sprint_factor = 1.0 - self.ads_progress * 0.8;
         let base_rot = self.current_position.rotation;
         let degrees = std::f64::consts::PI / 180.0;
         self.rotation = DVec3::new(
-            base_rot.x + bob.sprint_tilt * sprint_factor * degrees - self.recoil.pitch_offset,
-            base_rot.y + bob.sprint_yaw * sprint_factor * degrees,
-            base_rot.z + bob.sprint_roll * sprint_factor * degrees,
+            base_rot.x + bob.sprint_tilt * sprint_factor * degrees + reload.pitch + slash.pitch
+                - self.recoil.pitch_offset,
+            base_rot.y + bob.sprint_yaw * sprint_factor * degrees + slash.yaw,
+            base_rot.z + bob.sprint_roll * sprint_factor * degrees + reload.roll + switch.roll + slash.roll,
         );
     }
 
@@ -390,6 +460,60 @@ mod tests {
             });
         }
         assert!((view.position - DVec3::new(0.0, -22.0, -5.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_shot_kicks_and_a_blade_swings() {
+        let still = ViewModelInput {
+            delta_time: 0.01,
+            grounded: true,
+            ..ViewModelInput::default()
+        };
+        let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
+        gun.update(&still);
+        let rest = gun.position;
+        gun.present_fire(&ShotStyle::default(), false);
+        for _ in 0..3 {
+            gun.update(&still);
+        }
+        assert!(gun.position.z < rest.z - 1.0, "{} {}", gun.position.z, rest.z);
+        assert!(!gun.slash.is_active());
+
+        let mut blade = WeaponView::new("blade", Some(plasmagun()));
+        blade.update(&still);
+        let rest = blade.position;
+        let melee = ShotStyle {
+            melee: true,
+            ..ShotStyle::default()
+        };
+        blade.present_fire(&melee, false);
+        for _ in 0..6 {
+            blade.update(&still);
+        }
+        // Up in the windup.
+        assert!(blade.position.y > rest.y + 20.0, "{} {}", blade.position.y, rest.y);
+        for _ in 0..60 {
+            blade.update(&still);
+        }
+        assert!(!blade.slash.is_active());
+        assert!((blade.position - rest).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_reload_tilts_the_gun_and_drops_the_aim() {
+        let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
+        gun.start_reload(1.0);
+        let input = ViewModelInput {
+            delta_time: 0.05,
+            grounded: true,
+            aiming: true,
+            ..ViewModelInput::default()
+        };
+        for _ in 0..8 {
+            gun.update(&input);
+        }
+        assert!(gun.rotation.z > 0.7, "{}", gun.rotation.z);
+        assert_eq!(gun.ads_progress, 0.0);
     }
 
     #[test]
