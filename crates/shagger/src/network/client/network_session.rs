@@ -31,6 +31,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A send the link has not taken by then counts as a drop.
 const SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const SEND_STALLED: &str = "send stalled";
 
 /// What the game asks of the connection.
 #[derive(Debug, Clone, PartialEq)]
@@ -178,13 +179,52 @@ struct Resume {
     answer_by: f64,
 }
 
-/// Waits for the game to ask for the end, dropping its other requests: no
-/// link carries them while the session is reopening.
-async fn until_disconnect(requests: &mut async_mpsc::UnboundedReceiver<SessionRequest>) {
+/// What the game asks while no link can carry it: commands still take their
+/// numbers (the game predicted them), preferences are kept for the next
+/// accept, and the other requests wait for it.
+fn hold<C: EventCodec>(request: SessionRequest, host: &mut NetworkGameHost<C>, held: &mut Vec<SessionRequest>) {
+    match request {
+        SessionRequest::Command(c) => {
+            let _ = host.send_command(&c);
+        }
+        SessionRequest::ClientPrefs(p) => {
+            let _ = host.set_client_prefs(p);
+        }
+        SessionRequest::Disconnect => {}
+        other => held.push(other),
+    }
+}
+
+/// Waits for the game to ask for the end, holding its other requests (see
+/// [`hold`]) while the session is reopening.
+async fn until_disconnect<C: EventCodec>(
+    requests: &mut async_mpsc::UnboundedReceiver<SessionRequest>,
+    host: &mut NetworkGameHost<C>,
+    held: &mut Vec<SessionRequest>,
+) {
     while let Some(request) = requests.recv().await {
         if request == SessionRequest::Disconnect {
             return;
         }
+        hold(request, host, held);
+    }
+}
+
+/// The host's message for a request; `None` for one that sends nothing.
+fn message_for<C: EventCodec>(host: &mut NetworkGameHost<C>, request: SessionRequest) -> Option<Outgoing> {
+    match request {
+        SessionRequest::Command(c) => host.send_command(&c),
+        SessionRequest::JoinGame {
+            team_id,
+            manual_pick,
+            admission_ticket,
+        } => host.send_join_game(team_id.as_deref(), manual_pick, admission_ticket.as_deref()),
+        SessionRequest::Spectate => host.send_spectate(),
+        SessionRequest::RequestSpawn => host.send_request_spawn(),
+        SessionRequest::Chat { text, team_only } => host.send_chat(&text, team_only),
+        SessionRequest::ClientPrefs(p) => host.set_client_prefs(p),
+        SessionRequest::Loadout { primary, secondary } => host.send_loadout(&primary, &secondary),
+        SessionRequest::Disconnect => None,
     }
 }
 
@@ -203,9 +243,12 @@ async fn run<C: EventCodec>(
     let mono = move || start.elapsed().as_secs_f64() * 1000.0;
     let mut host = NetworkGameHost::new(codec, wall_ms() - mono());
 
+    // Requests that arrived while no link could carry them, sent once the
+    // server has accepted the player again.
+    let mut held = Vec::new();
     let opened = tokio::select! {
         opened = open(&config.url) => opened,
-        () = until_disconnect(&mut requests) => return "disconnected".into(),
+        () = until_disconnect(&mut requests, &mut host, &mut held) => return "disconnected".into(),
     };
     let mut socket = match opened {
         Ok(s) => s,
@@ -221,10 +264,23 @@ async fn run<C: EventCodec>(
 
     let mut resume: Option<Resume> = None;
     loop {
-        let ended = pump(&mut socket, &mut host, &mut requests, events, &mono, &mut resume).await;
-        close(&mut socket).await;
+        let ended = pump(
+            &mut socket,
+            &mut host,
+            &mut requests,
+            events,
+            &mono,
+            &mut resume,
+            &mut held,
+        )
+        .await;
+        // The grace runs from the drop (`onDisconnect`), not from the close.
+        let dropped_at = mono();
         let why = match ended {
-            Ended::Done(why) => return why,
+            Ended::Done(why) => {
+                close(&mut socket).await;
+                return why;
+            }
             Ended::Dropped(why) => why,
         };
         // A drop while resuming only fails that attempt (resumeSession keeps
@@ -237,12 +293,19 @@ async fn run<C: EventCodec>(
             }
             let (_, grace_ms) = host.resume_token().expect("transport_closed checked the token");
             resume = Some(Resume {
-                deadline: mono() + grace_ms,
+                deadline: dropped_at + grace_ms,
                 attempt: 0,
                 answer_by: 0.0,
             });
         }
         let Some(r) = resume.as_mut() else { unreachable!() };
+        // A link that stopped taking data will not take a close either.
+        if why != SEND_STALLED {
+            tokio::select! {
+                () = close(&mut socket) => {}
+                () = until_disconnect(&mut requests, &mut host, &mut held) => return "disconnected".into(),
+            }
+        }
         // resumeSession: reconnect and claim the seat until the grace is spent.
         socket = loop {
             if mono() >= r.deadline || host.resume_token().is_none() {
@@ -254,7 +317,7 @@ async fn run<C: EventCodec>(
             let _ = events.send(SessionEvent::Resuming { attempt: r.attempt });
             let opened = tokio::select! {
                 opened = open(&config.url) => opened,
-                () = until_disconnect(&mut requests) => return "disconnected".into(),
+                () = until_disconnect(&mut requests, &mut host, &mut held) => return "disconnected".into(),
             };
             if let Ok(mut s) = opened
                 && let Some(message) = host.resume(mono())
@@ -267,7 +330,7 @@ async fn run<C: EventCodec>(
             }
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_millis(RESUME_RETRY_MS as u64)) => {}
-                () = until_disconnect(&mut requests) => return "disconnected".into(),
+                () = until_disconnect(&mut requests, &mut host, &mut held) => return "disconnected".into(),
             }
         };
     }
@@ -286,7 +349,7 @@ async fn send_all(socket: &mut Socket, out: &mut Vec<Outgoing>) -> Result<(), St
     };
     tokio::time::timeout(SEND_TIMEOUT, send)
         .await
-        .unwrap_or_else(|_| Err("send stalled".into()))
+        .unwrap_or_else(|_| Err(SEND_STALLED.into()))
 }
 
 async fn pump<C: EventCodec>(
@@ -296,6 +359,7 @@ async fn pump<C: EventCodec>(
     events: &mpsc::Sender<SessionEvent<C::Event>>,
     mono: &impl Fn() -> f64,
     resume: &mut Option<Resume>,
+    held: &mut Vec<SessionRequest>,
 ) -> Ended {
     let mut timer = tokio::time::interval(Duration::from_millis(POLL_MS));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -312,37 +376,18 @@ async fn pump<C: EventCodec>(
                 Some(Err(e)) => return Ended::Dropped(e.to_string()),
                 None => return Ended::Dropped("closed".into()),
             },
-            request = requests.recv() => {
-                let message = match request {
-                    None | Some(SessionRequest::Disconnect) => {
-                        host.disconnect();
-                        return Ended::Done("disconnected".into());
-                    }
-                    Some(SessionRequest::Command(c)) => host.send_command(&c),
-                    Some(SessionRequest::JoinGame { team_id, manual_pick, admission_ticket }) => {
-                        host.send_join_game(team_id.as_deref(), manual_pick, admission_ticket.as_deref())
-                    }
-                    Some(SessionRequest::Spectate) => host.send_spectate(),
-                    Some(SessionRequest::RequestSpawn) => host.send_request_spawn(),
-                    Some(SessionRequest::Chat { text, team_only }) => host.send_chat(&text, team_only),
-                    Some(SessionRequest::ClientPrefs(p)) => host.set_client_prefs(p),
-                    Some(SessionRequest::Loadout { primary, secondary }) => host.send_loadout(&primary, &secondary),
-                };
-                out.extend(message);
+            request = requests.recv() => match request {
+                None | Some(SessionRequest::Disconnect) => {
+                    host.disconnect();
+                    return Ended::Done("disconnected".into());
+                }
+                // Before the (re)accept nothing but the handshake may go out.
+                Some(request) if !host.is_connected() => hold(request, host, held),
+                Some(request) => out.extend(message_for(host, request)),
             },
             _ = timer.tick() => host.poll(wall_ms(), mono(), &mut out, &mut found),
         }
-        if let Some(r) = resume {
-            if host.is_connected() {
-                *resume = None;
-            } else if mono() >= r.answer_by {
-                // resumeSession waits RESUME_RETRY_MS for JoinAccept, then tries again.
-                return Ended::Dropped("no answer to the resume".into());
-            }
-        }
-        if let Err(why) = send_all(socket, &mut out).await {
-            return Ended::Dropped(why);
-        }
+        // What was decoded reaches the game before anything can end this socket.
         let mut stalled = false;
         for event in found.drain(..) {
             stalled |= matches!(
@@ -353,6 +398,27 @@ async fn pump<C: EventCodec>(
                 }
             );
             let _ = events.send(SessionEvent::Host(event));
+        }
+        if host.is_connected() {
+            *resume = None;
+            for request in held.drain(..) {
+                out.extend(message_for(host, request));
+            }
+        } else if resume.is_some_and(|r| mono() >= r.answer_by) {
+            // resumeSession waits RESUME_RETRY_MS for JoinAccept, then tries again.
+            return Ended::Dropped("no answer to the resume".into());
+        }
+        if !out.is_empty() {
+            let sent = tokio::select! {
+                sent = send_all(socket, &mut out) => sent,
+                () = until_disconnect(requests, host, held) => {
+                    host.disconnect();
+                    return Ended::Done("disconnected".into());
+                }
+            };
+            if let Err(why) = sent {
+                return Ended::Dropped(why);
+            }
         }
         if host.phase() == HostPhase::Failed {
             return Ended::Done("connection failed".into());
@@ -369,8 +435,8 @@ async fn pump<C: EventCodec>(
 mod tests {
     use super::*;
     use shagger_shared::net::message_codec::{
-        JoinAccept, MessageType, ResumeToken, Welcome, encode_join_accept, encode_resume_token, encode_welcome,
-        peek_message_type,
+        JoinAccept, MessageType, ResumeToken, Welcome, decode_command, encode_join_accept, encode_resume_token,
+        encode_welcome, peek_message_type,
     };
     use shagger_shared::net::snapshot::NoEvents;
     use tokio::net::TcpListener;
@@ -520,5 +586,46 @@ mod tests {
         let quit = Instant::now();
         drop(session);
         assert!(quit.elapsed() < Duration::from_millis(500), "{:?}", quit.elapsed());
+    }
+
+    #[test]
+    fn requests_made_while_resuming_keep_their_numbers_and_go_out_after_the_accept() {
+        let (report, results) = mpsc::channel();
+        let url = serve(move |listener| async move {
+            let mut ws = accept(&listener).await;
+            first(&mut ws).await;
+            admit(&mut ws).await;
+            drop(ws);
+            let mut ws = accept(&listener).await;
+            assert_eq!(first(&mut ws).await, MessageType::Resume as u8);
+            admit(&mut ws).await;
+            // What arrives after the accept: the held spawn request, then the
+            // next command with the number after the three held ones.
+            let mut seen = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Binary(data) = message else { continue };
+                match peek_message_type(&data) {
+                    Some(t) if t == MessageType::Input as u8 => {
+                        seen.push(format!("input {}", decode_command(&data).unwrap().1));
+                        break;
+                    }
+                    Some(t) if t == MessageType::RequestSpawn as u8 => seen.push("spawn".into()),
+                    _ => {}
+                }
+            }
+            report.send(seen).unwrap();
+            while ws.next().await.is_some() {}
+        });
+        let session = start(url);
+        events_until(&session, joined);
+        events_until(&session, |e| matches!(e, SessionEvent::Resuming { .. }));
+        for _ in 0..3 {
+            session.send(SessionRequest::Command(Command::default()));
+        }
+        session.send(SessionRequest::RequestSpawn);
+        events_until(&session, joined);
+        session.send(SessionRequest::Command(Command::default()));
+        let seen = results.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(seen, ["spawn", "input 4"]);
     }
 }

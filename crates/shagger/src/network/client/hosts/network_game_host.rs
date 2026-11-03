@@ -370,7 +370,10 @@ impl<C: EventCodec> NetworkGameHost<C> {
     /// Timers: clock-sync pings, the handshake timeout and the watchdog
     /// (`checkWatchdog`). Call about every [`WATCHDOG_INTERVAL_MS`].
     pub fn poll(&mut self, wall: f64, mono: f64, out: &mut Vec<Outgoing>, events: &mut Vec<HostEvent<C::Event>>) {
-        if self.phase == HostPhase::Handshake && !self.is_connected && mono >= self.handshake_deadline {
+        // A ticketed join is not done until its resume token arrives
+        // (`_onJoinAccept` waits for it, and so does the connect timer).
+        let waiting = !self.is_connected || self.wait_for_initial_resume_token;
+        if self.phase == HostPhase::Handshake && waiting && mono >= self.handshake_deadline {
             self.fail("Timeout waiting for Welcome and JoinAccept".into(), events);
             return;
         }
@@ -395,12 +398,16 @@ impl<C: EventCodec> NetworkGameHost<C> {
     }
 
     /// `sendCommand`: numbers the command and encodes it (unreliable).
+    ///
+    /// Every command the game hands over takes a number, even one dropped
+    /// while the link is down: the game predicted it on another thread, and
+    /// the acks must keep naming the commands it numbered the same way.
     pub fn send_command(&mut self, command: &Command) -> Option<Outgoing> {
+        let seq = self.command_sequence;
+        self.command_sequence += 1;
         if !self.is_connected {
             return None;
         }
-        let seq = self.command_sequence;
-        self.command_sequence += 1;
         Some(Outgoing::unreliable(codec::encode_command(
             &self.local_player_id,
             seq,
@@ -602,6 +609,29 @@ mod tests {
         assert!(host.transport_closed());
         let resume = host.resume(10.0).unwrap();
         assert_eq!(codec::decode_resume(&resume.data).unwrap(), "tok");
+    }
+
+    #[test]
+    fn a_ticketed_join_without_its_token_times_out() {
+        let mut host = Host::new(NoEvents, 0.0);
+        host.connect("Rusty", Some("ticket"), 0.0);
+        feed(&mut host, &welcome(125), 1.0);
+        feed(&mut host, &accept(), 2.0);
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        host.poll(0.0, HANDSHAKE_TIMEOUT_MS, &mut out, &mut events);
+        assert!(events.iter().any(|e| matches!(e, HostEvent::Failed(_))));
+        assert_eq!(host.phase(), HostPhase::Failed);
+    }
+
+    #[test]
+    fn commands_take_numbers_while_the_link_is_down() {
+        let mut host = joined_host();
+        assert!(host.send_command(&Command::default()).is_some());
+        host.transport_closed();
+        assert!(host.send_command(&Command::default()).is_none());
+        let next = host.send_command(&Command::default());
+        assert!(next.is_none());
+        assert_eq!(host.command_sequence, 4);
     }
 
     #[test]
