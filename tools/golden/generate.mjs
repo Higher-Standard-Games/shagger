@@ -135,6 +135,40 @@ writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_string_number
   writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_trig.txt"), `${trig.join("\n")}\n`);
 }
 
+// --- Math.atan2 (own generator too) ------------------------------------------------
+{
+  let s = 0x3c6ef372;
+  const r = () => {
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 0x1_0000_0000;
+  };
+  const special = [0, -0, 1, -1, 0.5, 2, 1e-300, -1e-300, 1e300, Infinity, -Infinity, NaN, Number.MIN_VALUE, Number.MAX_VALUE];
+  const pairs = [];
+  for (const y of special) for (const x of special) pairs.push([y, x]);
+  // Every reduction band of atan: |y/x| near 7/16, 11/16, 19/16, 39/16 and 2^±60
+  for (const q of [0.4375, 0.6875, 1.1875, 2.4375, 2 ** 60, 2 ** -60, 2 ** -27, 2 ** 66]) {
+    for (let i = 0; i < 40; i++) {
+      const x = (r() - 0.5) * 2000;
+      pairs.push([x * q * (1 + (r() - 0.5) * 1e-3), x]);
+    }
+  }
+  const scales = [1, 100, 2000, 1e-6, 1e9];
+  for (let i = 0; i < 12000; i++) pairs.push([(r() - 0.5) * scales[i % 5], (r() - 0.5) * scales[(i >> 2) % 5]]);
+  const atan = header("Math.atan2, from V8");
+  atan[2] = "# each line: y, x, atan2(y, x) as f64 bits";
+  for (const [y, x] of pairs) atan.push(`${bits(y)} ${bits(x)} ${bits(Math.atan2(y, x))}`);
+  writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_atan2.txt"), `${atan.join("\n")}\n`);
+}
+
+// --- Highlight reels: DemoAnalyzer, SequenceBuilder, CinematicCameraPaths ----------
+execFileSync(
+  process.execPath,
+  ["--experimental-transform-types", "--no-warnings", "--import", "./ts-register.mjs", "highlights.mjs", shag, resolve(root, "crates/shagger_shared/tests/golden"), shagCommit],
+  { cwd: import.meta.dirname, stdio: "inherit" },
+);
+
 // --- Wire protocol (needs TypeScript enums, so it runs in its own Node) --------
 const protocolOut = resolve(root, "crates/shagger_shared/tests/golden");
 execFileSync(

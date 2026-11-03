@@ -8,12 +8,13 @@
 // ====================================================
 //
 // Ported to Rust from fdlibm 5.3 (k_sin.c, k_cos.c, s_sin.c, s_cos.c,
-// e_rem_pio2.c, k_rem_pio2.c), which V8 uses for `Math.sin` and `Math.cos`
+// e_rem_pio2.c, k_rem_pio2.c, s_atan.c, e_atan2.c), which V8 uses for
+// `Math.sin`, `Math.cos` and `Math.atan2`
 // (src/base/ieee754.cc). The arithmetic and its order are fdlibm's, so the
 // results match V8 bit for bit. The notice above covers this file; the rest
 // of the crate is MIT.
 
-//! `sin` and `cos` exactly as V8 computes them.
+//! `sin`, `cos` and `atan2` exactly as V8 computes them.
 
 // fdlibm's constants are kept digit for digit, and its C casts as `as`.
 #![allow(
@@ -449,5 +450,159 @@ pub fn cos(x: f64) -> f64 {
         1 => -kernel_sin(y0, y1, true),
         2 => -kernel_cos(y0, y1),
         _ => kernel_sin(y0, y1, true),
+    }
+}
+
+const ATAN_HI: [f64; 4] = [
+    4.63647609000806093515e-01, // atan(0.5)hi 0x3FDDAC67, 0x0561BB4F
+    7.85398163397448278999e-01, // atan(1.0)hi 0x3FE921FB, 0x54442D18
+    9.82793723247329054082e-01, // atan(1.5)hi 0x3FEF730B, 0xD281F69B
+    1.57079632679489655800e+00, // atan(inf)hi 0x3FF921FB, 0x54442D18
+];
+const ATAN_LO: [f64; 4] = [
+    2.26987774529616870924e-17, // atan(0.5)lo 0x3C7A2B7F, 0x222F65E2
+    3.06161699786838301793e-17, // atan(1.0)lo 0x3C81A626, 0x33145C07
+    1.39033110312309984516e-17, // atan(1.5)lo 0x3C700788, 0x7AF0CBBD
+    6.12323399573676603587e-17, // atan(inf)lo 0x3C91A626, 0x33145C07
+];
+const AT: [f64; 11] = [
+    3.33333333333329318027e-01,  // 0x3FD55555, 0x5555550D
+    -1.99999999998764832476e-01, // 0xBFC99999, 0x9998EBC4
+    1.42857142725034663711e-01,  // 0x3FC24924, 0x920083FF
+    -1.11111104054623557880e-01, // 0xBFBC71C6, 0xFE231671
+    9.09088713343650656196e-02,  // 0x3FB745CD, 0xC54C206E
+    -7.69187620504482999495e-02, // 0xBFB3B0F2, 0xAF749A6D
+    6.66107313738753120669e-02,  // 0x3FB10D66, 0xA0D03D51
+    -5.83357013379057348645e-02, // 0xBFADDE2D, 0x52DEFD9A
+    4.97687799461593236017e-02,  // 0x3FA97B4B, 0x24760DEB
+    -3.65315727442169155270e-02, // 0xBFA2B444, 0x2C6A6C2F
+    1.62858201153657823623e-02,  // 0x3F90AD3A, 0xE322DA11
+];
+
+/// `atan` (s_atan.c).
+#[must_use]
+pub fn atan(x: f64) -> f64 {
+    let hx = high(x);
+    let ix = hx & 0x7fff_ffff;
+    let mut x = x;
+    let id: i32;
+    if ix >= 0x4410_0000 {
+        // |x| >= 2^66
+        if ix > 0x7ff0_0000 || (ix == 0x7ff0_0000 && low(x) != 0) {
+            return x + x; // NaN
+        }
+        return if hx > 0 {
+            ATAN_HI[3] + ATAN_LO[3]
+        } else {
+            -ATAN_HI[3] - ATAN_LO[3]
+        };
+    }
+    if ix < 0x3fdc_0000 {
+        // |x| < 0.4375
+        if ix < 0x3e40_0000 {
+            // |x| < 2^-27
+            return x;
+        }
+        id = -1;
+    } else {
+        x = x.abs();
+        if ix < 0x3ff3_0000 {
+            // |x| < 1.1875
+            if ix < 0x3fe6_0000 {
+                // 7/16 <= |x| < 11/16
+                id = 0;
+                x = (2.0 * x - 1.0) / (2.0 + x);
+            } else {
+                // 11/16 <= |x| < 19/16
+                id = 1;
+                x = (x - 1.0) / (x + 1.0);
+            }
+        } else if ix < 0x4003_8000 {
+            // |x| < 2.4375
+            id = 2;
+            x = (x - 1.5) / (1.0 + 1.5 * x);
+        } else {
+            // 2.4375 <= |x| < 2^66
+            id = 3;
+            x = -1.0 / x;
+        }
+    }
+    let z = x * x;
+    let w = z * z;
+    let s1 = z * (AT[0] + w * (AT[2] + w * (AT[4] + w * (AT[6] + w * (AT[8] + w * AT[10])))));
+    let s2 = w * (AT[1] + w * (AT[3] + w * (AT[5] + w * (AT[7] + w * AT[9]))));
+    if id < 0 {
+        return x - x * (s1 + s2);
+    }
+    let id = id as usize;
+    let z = ATAN_HI[id] - ((x * (s1 + s2) - ATAN_LO[id]) - x);
+    if hx < 0 { -z } else { z }
+}
+
+/// `Math.atan2` (e_atan2.c).
+#[must_use]
+pub fn atan2(y: f64, x: f64) -> f64 {
+    const TINY: f64 = 1.0e-300;
+    const PI_O_4: f64 = 7.8539816339744827900e-01; // 0x3FE921FB, 0x54442D18
+    const PI_O_2: f64 = 1.5707963267948965580e+00; // 0x3FF921FB, 0x54442D18
+    const PI: f64 = 3.1415926535897931160e+00; // 0x400921FB, 0x54442D18
+    const PI_LO: f64 = 1.2246467991473531772e-16; // 0x3CA1A626, 0x33145C07
+
+    let (hx, lx) = (high(x), low(x));
+    let ix = hx & 0x7fff_ffff;
+    let (hy, ly) = (high(y), low(y));
+    let iy = hy & 0x7fff_ffff;
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    if hx == 0x3ff0_0000 && lx == 0 {
+        return atan(y); // x = 1.0
+    }
+    let mut m = ((hy >> 31) & 1) | ((hx >> 30) & 2); // 2 * sign(x) + sign(y)
+    if iy == 0 && ly == 0 {
+        return match m {
+            0 | 1 => y,
+            2 => PI + TINY,
+            _ => -PI - TINY,
+        };
+    }
+    if ix == 0 && lx == 0 {
+        return if hy < 0 { -PI_O_2 - TINY } else { PI_O_2 + TINY };
+    }
+    if ix == 0x7ff0_0000 {
+        return if iy == 0x7ff0_0000 {
+            match m {
+                0 => PI_O_4 + TINY,
+                1 => -PI_O_4 - TINY,
+                2 => 3.0 * PI_O_4 + TINY,
+                _ => -3.0 * PI_O_4 - TINY,
+            }
+        } else {
+            match m {
+                0 => 0.0,
+                1 => -0.0,
+                2 => PI + TINY,
+                _ => -PI - TINY,
+            }
+        };
+    }
+    if iy == 0x7ff0_0000 {
+        return if hy < 0 { -PI_O_2 - TINY } else { PI_O_2 + TINY };
+    }
+    let k = (iy - ix) >> 20;
+    let z = if k > 60 {
+        // |y/x| > 2^60
+        m &= 1;
+        PI_O_2 + 0.5 * PI_LO
+    } else if hx < 0 && k < -60 {
+        0.0 // 0 > |y|/x > -2^-60
+    } else {
+        atan((y / x).abs())
+    };
+    match m {
+        0 => z,
+        1 => -z,
+        2 => PI - (z - PI_LO),
+        _ => (z - PI_LO) - PI,
     }
 }

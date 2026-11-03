@@ -369,6 +369,12 @@ pub fn js_cos(x: f64) -> f64 {
     crate::fdlibm::cos(x)
 }
 
+/// `Math.atan2`: V8's fdlibm port, as [`js_sin`].
+#[must_use]
+pub fn js_atan2(y: f64, x: f64) -> f64 {
+    crate::fdlibm::atan2(y, x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
