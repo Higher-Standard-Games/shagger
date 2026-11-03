@@ -213,6 +213,20 @@ impl LobbyClient {
         request_id
     }
 
+    /// `requestFeaturedDemos`: the answer is `featured:page` or
+    /// `featured:error` with this id. `all` stands for every mode or map.
+    pub fn request_featured_demos(&mut self, gametype: &str, map: &str, limit: u32) -> String {
+        let request_id = self.next_request_id("feat");
+        self.send(&json!({
+            "type": "featured:get",
+            "requestId": request_id,
+            "gametype": gametype,
+            "map": map,
+            "limit": limit,
+        }));
+        request_id
+    }
+
     /// `requestSettings`: the answer is `settings:data` with this id.
     pub fn request_settings(&mut self) -> String {
         let request_id = self.next_request_id("settings");
