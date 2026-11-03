@@ -8,14 +8,16 @@
 //   ray        origin, spawn    direction, speed   core, scale      outer, width        length, -
 //   spark      origin, spawn    velocity, life     color, size      dead color, -       -
 //
-// Not yet: atmospheric fog, and linear output for image processing as a
-// post-process.
+// World fog as the material's: the fire mixes toward it, the sparks fade.
 
 struct Globals {
     view_proj: mat4x4f,
     view: mat4x4f,
     // x: seconds
     time: vec4f,
+    // The eye, for world fog (`atmFogEye`).
+    eye: vec4f,
+    fog: Fog,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -35,6 +37,8 @@ struct VertexOut {
     @location(0) color: vec3f,
     @location(1) alpha: f32,
     @location(2) uv: vec2f,
+    // vAtmWorld
+    @location(3) atm_world: vec3f,
 };
 
 // EXPLOSION_FIRE_TIME, SPARK_AGE_PER_SECOND, SPARK_GRAVITY
@@ -51,6 +55,7 @@ fn finish(in: VertexIn, world_in: vec3f, color: vec3f, alpha: f32) -> VertexOut 
     // A finished layer collapses rather than drawing invisible triangles.
     let world = select(in.a.xyz, world_in, alpha > 0.0);
     out.clip = globals.view_proj * vec4f(world, 1.0);
+    out.atm_world = world;
     out.color = color;
     out.alpha = alpha;
     out.uv = in.uv;
@@ -141,8 +146,11 @@ fn fs_fire(in: VertexOut) -> @location(0) vec4f {
     if in.alpha <= 0.0 {
         discard;
     }
+    var color = clamp(in.color, vec3f(0.0), vec3f(1.0));
+    let fog = atm_fog_evaluate(globals.fog, in.atm_world, globals.eye.xyz, false);
+    color = mix(color, fog.rgb, fog.a);
     // The batch shader's `uLinearOutput` (set under an HDR pipeline).
-    return vec4f(pow(clamp(in.color, vec3f(0.0), vec3f(1.0)), vec3f(2.2)), in.alpha);
+    return vec4f(pow(color, vec3f(2.2)), in.alpha);
 }
 
 @fragment
@@ -164,5 +172,6 @@ fn fs_spark(in: VertexOut) -> @location(0) vec4f {
     } else {
         sprite = mix(orange, rim, clamp((r - 0.7) / 0.3, 0.0, 1.0));
     }
-    return vec4f(pow(max(sprite.rgb * in.color, vec3f(0.0)), vec3f(2.2)), sprite.a * in.alpha);
+    let fade = 1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.eye.xyz, false).a;
+    return vec4f(pow(max(sprite.rgb * in.color * fade, vec3f(0.0)), vec3f(2.2)), sprite.a * in.alpha);
 }

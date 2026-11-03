@@ -10,6 +10,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
+use super::world_fog_controller::FogUniforms;
 use super::world_renderer::DEPTH_FORMAT;
 
 /// One instance: five vec4s (`i0` to `i4`; the quads use four).
@@ -38,7 +39,7 @@ impl EffectTemplate {
 }
 
 /// The shared shader half: uniforms, quad input and helpers.
-pub const EFFECT_QUAD_WGSL: &str = include_str!("effect_quad.wgsl");
+pub const EFFECT_QUAD_WGSL: &str = concat!(include_str!("fog.wgsl"), include_str!("effect_quad.wgsl"));
 
 /// What a frame gives every effect.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +52,8 @@ pub struct EffectFrame {
     pub viewport: [f32; 2],
     /// The effects' clock in seconds (`uTime`).
     pub time: f64,
+    /// World fog (`bindAtmosphericFog`).
+    pub fog: FogUniforms,
 }
 
 #[repr(C)]
@@ -61,6 +64,7 @@ struct Globals {
     projection: [[f32; 4]; 4],
     camera: [f32; 4],
     viewport_time: [f32; 4],
+    fog: FogUniforms,
 }
 
 #[repr(C)]
@@ -250,6 +254,7 @@ impl EffectQuadBatch {
                 frame.time as f32,
                 0.0,
             ],
+            fog: frame.fog,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         let live = &instances[..instances.len().min(self.capacity)];

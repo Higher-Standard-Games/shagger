@@ -1,7 +1,6 @@
 // SHAG src/engine/weapon/rail/RailShaderMaterial.ts (IMPACT_VERTEX_SHADER,
 // IMPACT_FRAGMENT_SHADER) in WGSL, after effect_quad.wgsl. Instance: i0
-// iStartSeed, i1 iEndImpact, i2 iColorLife, i3 iParams, i4 iNormal. No
-// atmospheric fog.
+// iStartSeed, i1 iEndImpact, i2 iColorLife, i3 iParams, i4 iNormal.
 
 const PI: f32 = 3.141592653589793;
 
@@ -14,6 +13,8 @@ struct ImpactOut {
     @location(4) muzzle: f32,
     @location(5) color: vec3f,
     @location(6) state_seed: vec2f,
+    // vAtmWorld, for world fog.
+    @location(7) atm_world: vec3f,
 };
 
 @vertex
@@ -69,6 +70,7 @@ fn vs_main(in: QuadIn) -> ImpactOut {
 
     var out: ImpactOut;
     out.position = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.impact_uv = in.uv;
     out.oriented_part = oriented_part;
     out.kind = impact_kind;
@@ -79,8 +81,14 @@ fn vs_main(in: QuadIn) -> ImpactOut {
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: ImpactOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: ImpactOut) -> vec4f {
     let r = length(in.impact_uv);
     let angle = atan2(in.impact_uv.y, in.impact_uv.x);
     let aa = max(fwidth(r), 0.002);

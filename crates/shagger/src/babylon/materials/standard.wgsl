@@ -37,6 +37,8 @@ struct Globals {
     // unused (image processing runs as a post-process)
     image: vec4f,
     lights: array<Light, 4>,
+    // World fog (SHAG's AtmosphericFogPlugin; rendering/fog.wgsl).
+    fog: Fog,
     dynamic: DynamicLights,
 };
 
@@ -208,5 +210,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
     // default.fragment only takes the colour to linear space for the HDR
     // target.
     color = pow(max(color, vec3f(0.0)), vec3f(2.2));
+    // SHAG's AtmosphericFogPlugin, by the pipeline's blend.
+    color = atm_fog_apply(globals.fog, color, in.world_position, globals.eye.xyz, FOG_KIND, false);
     return vec4f(color, clamp(alpha, 0.0, 1.0));
 }

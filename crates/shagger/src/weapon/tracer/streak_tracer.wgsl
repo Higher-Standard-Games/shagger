@@ -4,13 +4,15 @@
 // shader slides it from the muzzle to the hit. Instances:
 //   i0: start.xyz, spawn time   i1: end.xyz, speed
 //   i2: color.rgb, length       i3: width, intensity
-// Not yet: atmospheric fog.
+
 
 struct VertexOut {
     @builtin(position) clip: vec4f,
     @location(0) uv: vec2f,
     @location(1) color: vec3f,
     @location(2) intensity: f32,
+    // vAtmWorld, for world fog.
+    @location(3) atm_world: vec3f,
 };
 
 @vertex
@@ -41,14 +43,21 @@ fn vs_main(in: QuadIn) -> VertexOut {
 
     var out: VertexOut;
     out.clip = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.uv = in.uv;
     out.color = in.i2.rgb;
     out.intensity = in.i3.y;
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: VertexOut) -> vec4f {
     let white = vec3f(1.0, 0.97, 0.9);
     let along = clamp(in.uv.x * 0.5 + 0.5, 0.0, 1.0);
     let across = 1.0 - clamp(abs(in.uv.y), 0.0, 1.0);

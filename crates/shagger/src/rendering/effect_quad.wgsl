@@ -10,6 +10,8 @@ struct Globals {
     camera: vec4f,
     // xy: uViewport, z: uTime
     viewport_time: vec4f,
+    // World fog (ATM_FOG_SHADER_UNIFORMS); the eye is `camera`.
+    fog: Fog,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;

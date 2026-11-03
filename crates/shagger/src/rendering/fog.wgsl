@@ -18,6 +18,10 @@ struct Fog {
     sun_params: vec4f,
 };
 
+// How a pipeline's blend meets the fog (`fogPassKind`), for shaders that
+// set it per pipeline: 0 mix, 1 additive, 2 filter.
+override FOG_KIND: f32 = 0.0;
+
 // `atmFogEvaluate`; `on_sky` is ATMFOG_SKY, the point on Warfork's sky box.
 fn atm_fog_evaluate(fog: Fog, world_pos_in: vec3f, eye: vec3f, on_sky: bool) -> vec4f {
     if (fog.color.a <= 0.0001) { return vec4f(0.0); }

@@ -1,8 +1,7 @@
 // SHAG src/engine/weapon/voltaic/VoltaicShaderMaterial.ts (BEAM_VERTEX_SHADER,
 // BEAM_FRAGMENT_SHADER, WORLD_BATCH) in WGSL, after effect_quad.wgsl.
 // Instance: i0 iStartSeed, i1 iEndImpact, i2 iColorLife, i3 iParams. The hero
-// beam draws as a batch of one, its uniforms as the instance. No
-// atmospheric fog.
+// beam draws as a batch of one, its uniforms as the instance.
 
 const REMOTE_FADE_START: f32 = 0.15;
 const REMOTE_REMOVE_TIME: f32 = 0.21;
@@ -15,6 +14,8 @@ struct BeamOut {
     @location(3) life: f32,
     @location(4) volume_weight: f32,
     @location(5) color: vec3f,
+    // vAtmWorld, for world fog.
+    @location(6) atm_world: vec3f,
 };
 
 fn linear_noise(x: f32, seed: f32) -> f32 {
@@ -201,6 +202,7 @@ fn vs_main(in: QuadIn) -> BeamOut {
 
     var out: BeamOut;
     out.position = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.side = in.position.y;
     out.part = part;
     out.energy = energy * intensity;
@@ -211,8 +213,14 @@ fn vs_main(in: QuadIn) -> BeamOut {
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: BeamOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: BeamOut) -> vec4f {
     let d = abs(in.side);
     let aa = max(fwidth(d), 0.001);
     var hot = 1.0 - glsl_smoothstep(0.12 - aa, 0.22 + aa, d);

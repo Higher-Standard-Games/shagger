@@ -1,6 +1,6 @@
 // SHAG src/engine/weapon/rail/RailShaderMaterial.ts (BEAM_VERTEX_SHADER,
 // BEAM_FRAGMENT_SHADER) in WGSL, after effect_quad.wgsl. Instance: i0
-// iStartSeed, i1 iEndImpact, i2 iColorLife, i3 iParams. No atmospheric fog.
+// iStartSeed, i1 iEndImpact, i2 iColorLife, i3 iParams.
 
 const PI: f32 = 3.141592653589793;
 const TURNS: f32 = 7.0;
@@ -14,6 +14,8 @@ struct BeamOut {
     @location(2) energy: f32,
     @location(3) life: f32,
     @location(4) color: vec3f,
+    // vAtmWorld, for world fog.
+    @location(5) atm_world: vec3f,
 };
 
 fn hybrid_half_width(world_position: vec3f, world_width: f32, min_pixels: f32, max_pixels: f32) -> f32 {
@@ -77,6 +79,7 @@ fn vs_main(in: QuadIn) -> BeamOut {
     let world_position = center + ribbon_side * side * half_width;
     var out: BeamOut;
     out.position = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.side = side;
     out.part = part;
     out.energy = intensity;
@@ -85,8 +88,14 @@ fn vs_main(in: QuadIn) -> BeamOut {
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: BeamOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: BeamOut) -> vec4f {
     let d = abs(in.side);
     let aa = max(fwidth(d), 0.001);
     var hot = 1.0 - glsl_smoothstep(0.10 - aa, 0.30 + aa, d);

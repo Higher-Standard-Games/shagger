@@ -36,6 +36,10 @@ use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
 use crate::babylon::materials::STANDARD_WGSL;
+use crate::rendering::world_fog_controller::FogUniforms;
+
+/// The world fog evaluation every fogged shader starts with.
+const FOG_WGSL: &str = include_str!("fog.wgsl");
 use crate::babylon::materials::standard_material::StandardAlphaMode;
 use crate::babylon::materials::standard_material::StandardMaterialParams;
 use crate::babylon::materials::texture::TextureMatrix;
@@ -178,6 +182,7 @@ struct Globals {
     eye: [f32; 4],
     image: [f32; 4],
     lights: [LightUniform; MAX_LIGHTS],
+    fog: FogUniforms,
     dynamic: DynamicLightBlock,
 }
 
@@ -319,6 +324,8 @@ pub struct ModelRenderer {
     models: Vec<GpuModel>,
     lights: Vec<ModelLight>,
     dynamic: DynamicLightBlock,
+    /// World fog, from the next `prepare`.
+    fog: FogUniforms,
     /// This frame's draws, in drawing order, with their pipeline.
     frame: Vec<(ModelDraw, PipelineKey)>,
     /// Diffuse BRDF: false Lambert, true Burley.
@@ -410,10 +417,13 @@ impl ModelRenderer {
             bind_group_layouts: &[Some(&globals_layout), Some(&draw_layout), Some(&material_layout)],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("model.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("model.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("fog.wgsl"), include_str!("model.wgsl")).into()),
+        });
         let standard_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("standard.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(STANDARD_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{FOG_WGSL}{STANDARD_WGSL}").into()),
         });
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("model globals"),
@@ -476,6 +486,7 @@ impl ModelRenderer {
             models: Vec::new(),
             lights: Vec::new(),
             dynamic: DynamicLightBlock::default(),
+            fog: FogUniforms::default(),
             frame: Vec::new(),
             burley: false,
         }
@@ -485,6 +496,11 @@ impl ModelRenderer {
     /// The cluster's dynamic point lights for the next `prepare`.
     pub fn set_dynamic_lights(&mut self, lights: &[DynamicLight]) {
         self.dynamic = DynamicLightBlock::pack(lights);
+    }
+
+    /// The world fog the models draw in, from the next `prepare`.
+    pub fn set_fog(&mut self, fog: FogUniforms) {
+        self.fog = fog;
     }
 
     pub fn set_lights(&mut self, lights: Vec<ModelLight>) {
@@ -748,6 +764,11 @@ impl ModelRenderer {
             }),
         };
         let outline = key.pass != PassKind::Color;
+        // `fogPassKind`: additive blends fade into the fog.
+        let fog_kind = match key.blend {
+            BlendKind::Opaque | BlendKind::Alpha => 0.0,
+            BlendKind::Add | BlendKind::OneOne => 1.0,
+        };
         let vertex_entry = match (outline, key.skinned) {
             (false, false) => "vs_main",
             (false, true) => "vs_skinned",
@@ -823,7 +844,10 @@ impl ModelRenderer {
                     &self.shader
                 },
                 entry_point: Some(if outline { "fs_outline" } else { "fs_main" }),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("FOG_KIND", fog_kind)],
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.color_format,
                     blend,
@@ -908,6 +932,7 @@ impl ModelRenderer {
             eye: [eye.x, eye.y, eye.z, 0.0],
             image: [0.0, 0.0, if self.burley { 1.0 } else { 0.0 }, 0.0],
             lights,
+            fog: self.fog,
             dynamic: self.dynamic,
         };
         gpu.queue

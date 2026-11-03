@@ -46,6 +46,7 @@ struct Globals {
     // z: diffuse model (0 Lambert, 1 Burley); x, y unused
     image: vec4f,
     lights: array<Light, 4>,
+    fog: Fog,
     dynamic: DynamicLights,
 };
 
@@ -240,5 +241,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // Image processing runs as a post-process (`applyByPostProcess`), so the
     // output stays linear: pbr.fragment's clamp to 30 for the HDR target.
     color = clamp(color, vec3f(0.0), vec3f(30.0));
+    // World fog (AtmosphericFogPlugin), by the pipeline's blend.
+    color = atm_fog_apply(globals.fog, color, in.world_position, globals.eye.xyz, FOG_KIND, false);
     return vec4f(color, alpha);
 }

@@ -3,7 +3,7 @@
 // (hot radial star), 1 plume (fiery puff), 2 arcs (electric). Instances:
 //   i0: center.xyz, seed   i1: color.rgb, spawn time
 //   i2: scale, intensity, duration, style   i3: unused
-// Not yet: atmospheric fog.
+
 
 struct VertexOut {
     @builtin(position) clip: vec4f,
@@ -14,6 +14,8 @@ struct VertexOut {
     @location(4) seed: f32,
     @location(5) state: f32,
     @location(6) color: vec3f,
+    // vAtmWorld, for world fog.
+    @location(7) atm_world: vec3f,
 };
 
 @vertex
@@ -37,6 +39,7 @@ fn vs_main(in: QuadIn) -> VertexOut {
 
     var out: VertexOut;
     out.clip = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.uv = in.uv;
     out.life = life;
     out.intensity = in.i2.y;
@@ -50,8 +53,14 @@ fn vs_main(in: QuadIn) -> VertexOut {
 
 const PI: f32 = 3.141592653589793;
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: VertexOut) -> vec4f {
     let r = length(in.uv);
     let angle = atan2(in.uv.y, in.uv.x);
     let aa = max(fwidth(r), 0.002);

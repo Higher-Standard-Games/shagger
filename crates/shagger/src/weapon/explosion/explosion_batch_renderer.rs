@@ -15,6 +15,7 @@ use super::explosion_batch_material::{
 use crate::babylon::meshes::ico_sphere_builder::create_ico_sphere;
 use crate::babylon::meshes::mesh_builder::create_cylinder;
 use crate::rendering::gpu::Gpu;
+use crate::rendering::world_fog_controller::FogUniforms;
 use crate::rendering::world_renderer::DEPTH_FORMAT;
 
 /// What one explosion looks like; `ExplosionConfig` supplies it.
@@ -54,6 +55,8 @@ struct Globals {
     view_proj: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
     time: [f32; 4],
+    eye: [f32; 4],
+    fog: FogUniforms,
 }
 
 /// One instanced layer. Slots are written once at spawn; expiry swaps the
@@ -114,6 +117,7 @@ pub struct ExplosionBatchRenderer {
     layers: [LayerBatch; 3],
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    fog: FogUniforms,
 }
 
 /// The fireball's sphere; the shader pushes its spikes out per explosion
@@ -177,7 +181,7 @@ impl ExplosionBatchRenderer {
             label: Some("explosion globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -201,7 +205,9 @@ impl ExplosionBatchRenderer {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("explosion_batch.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(EXPLOSION_BATCH_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{EXPLOSION_BATCH_WGSL}", include_str!("../../rendering/fog.wgsl")).into(),
+            ),
         });
         let layer = |layer: ExplosionLayer, (vertices, indices): (Vec<Vertex>, Vec<u32>), capacity: usize| {
             let pipeline = Self::pipeline(gpu, &layout, &shader, color_format, layer);
@@ -240,6 +246,7 @@ impl ExplosionBatchRenderer {
                     MAX_EXPLOSIONS * SPARKS_PER_EXPLOSION,
                 ),
             ],
+            fog: FogUniforms::default(),
             globals,
             bind_group,
         }
@@ -423,11 +430,21 @@ impl ExplosionBatchRenderer {
     }
 
     /// Writes the camera, the clock and any changed instances.
+    /// The world fog the explosions draw in, from the next `prepare`.
+    pub fn set_fog(&mut self, fog: FogUniforms) {
+        self.fog = fog;
+    }
+
     pub fn prepare(&mut self, gpu: &Gpu, view_proj: Mat4, view: Mat4, now: f64) {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             time: [now as f32, 0.0, 0.0, 0.0],
+            eye: {
+                let eye = view.inverse().w_axis;
+                [eye.x, eye.y, eye.z, 0.0]
+            },
+            fog: self.fog,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         for layer in &mut self.layers {

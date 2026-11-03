@@ -3,7 +3,7 @@
 // its own ballistic arc, 1 a camera-facing hit star. Instances:
 //   i0: origin.xyz, seed   i1: velocity.xyz, kind
 //   i2: color.rgb, spawn time   i3: size, duration, gravity, intensity
-// Not yet: atmospheric fog.
+
 
 struct VertexOut {
     @builtin(position) clip: vec4f,
@@ -13,6 +13,8 @@ struct VertexOut {
     @location(3) seed: f32,
     @location(4) intensity: f32,
     @location(5) color: vec3f,
+    // vAtmWorld, for world fog.
+    @location(6) atm_world: vec3f,
 };
 
 @vertex
@@ -49,6 +51,7 @@ fn vs_main(in: QuadIn) -> VertexOut {
 
     var out: VertexOut;
     out.clip = globals.view_proj * vec4f(pos + offset, 1.0);
+    out.atm_world = pos + offset;
     out.uv = in.uv;
     out.life = life;
     out.kind = kind;
@@ -58,8 +61,14 @@ fn vs_main(in: QuadIn) -> VertexOut {
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: VertexOut) -> vec4f {
     let white = vec3f(1.0, 0.97, 0.89);
     var color: vec3f;
     var shape: f32;

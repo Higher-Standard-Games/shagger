@@ -1,7 +1,7 @@
 // SHAG src/engine/weapon/voltaic/VoltaicShaderMaterial.ts
 // (IMPACT_VERTEX_SHADER, IMPACT_FRAGMENT_SHADER, WORLD_BATCH) in WGSL, after
 // effect_quad.wgsl. Instance: i0 iStartSeed, i1 iEndImpact, i2 iColorLife,
-// i3 iParams, i4 iNormal. No atmospheric fog.
+// i3 iParams, i4 iNormal.
 
 const PI: f32 = 3.141592653589793;
 const REMOTE_FADE_START: f32 = 0.15;
@@ -18,6 +18,8 @@ struct ImpactOut {
     @location(6) is_muzzle: f32,
     @location(7) is_spark: f32,
     @location(8) spark_life: f32,
+    // vAtmWorld, for world fog.
+    @location(9) atm_world: vec3f,
 };
 
 fn sample_life(mode: f32, color_life_w: f32, duration: f32) -> f32 {
@@ -120,6 +122,7 @@ fn vs_main(in: QuadIn) -> ImpactOut {
 
     var out: ImpactOut;
     out.position = globals.view_proj * vec4f(world_position, 1.0);
+    out.atm_world = world_position;
     out.impact_uv = in.uv;
     out.impact_part = oriented_part;
     out.impact_kind = impact_kind;
@@ -132,8 +135,14 @@ fn vs_main(in: QuadIn) -> ImpactOut {
     return out;
 }
 
+// The effect faded by the world fog in front of it (atmFogFadeGlsl), as
+// Warfork's additive passes sink into the fog.
 @fragment
 fn fs_main(in: ImpactOut) -> @location(0) vec4f {
+    return shade(in) * (1.0 - atm_fog_evaluate(globals.fog, in.atm_world, globals.camera.xyz, false).a);
+}
+
+fn shade(in: ImpactOut) -> vec4f {
     let r = length(in.impact_uv);
     let angle = atan2(in.impact_uv.y, in.impact_uv.x);
     let aa = max(fwidth(r), 0.002);
