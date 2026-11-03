@@ -33,8 +33,12 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .map_err(|e| GpuError(format!("no GPU adapter: {e}")))?;
+        // Timestamps where the GPU has them, for measuring its passes
+        // (`washoi bench`); nothing else asks for them.
+        let timing = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("shagger"),
+            required_features: adapter.features() & timing,
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             ..Default::default()
         }))
