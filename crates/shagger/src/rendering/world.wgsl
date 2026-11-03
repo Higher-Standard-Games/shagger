@@ -30,12 +30,18 @@ struct Globals {
     eye: vec4f,
     fog: Fog,
     dynamic: DynamicLights,
+    // The camera's view, for soft particles' view depth.
+    view: mat4x4f,
+    // Soft particles: near, far, fade rate, 1 when the scene depth is bound.
+    soft: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var lightmap: texture_2d_array<f32>;
 @group(0) @binding(2) var lightmap_direction: texture_2d_array<f32>;
 @group(0) @binding(3) var lightmap_sampler: sampler;
+// The scene depth behind soft particles, copied after the opaque pass.
+@group(2) @binding(0) var soft_depth: texture_depth_2d;
 @group(1) @binding(0) var base_texture: texture_2d<f32>;
 @group(1) @binding(1) var base_sampler: sampler;
 
@@ -59,6 +65,9 @@ struct Material {
     gloss: vec4f,
     // x: how world fog meets this pass (0 mix, 1 additive, 2 filter)
     fog: vec4f,
+    // x: 1 for a soft particle (Q3SoftParticlePlugin), y: 1 to fade its
+    // colour instead of its alpha
+    soft: vec4f,
 };
 @group(1) @binding(2) var<uniform> material: Material;
 @group(1) @binding(3) var normal_texture: texture_2d<f32>;
@@ -244,8 +253,30 @@ fn dynamic_specular(position: vec3f, n: vec3f, v: vec3f, glossiness: f32) -> vec
 // World fog over the shaded surface (AtmosphericFogPlugin).
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
-    let color = shade(in, front);
+    let color = soft_particle(in, shade(in, front));
     return vec4f(atm_fog_apply(globals.fog, color.rgb, in.world_position, globals.eye.xyz, material.fog.x, false), color.a);
+}
+
+// Q3SoftParticlePlugin: fade a soft surface where it nears the opaque scene
+// behind it, over 1 / rate units of view depth.
+fn soft_particle(in: VertexOut, color: vec4f) -> vec4f {
+    let size = textureDimensions(soft_depth);
+    let pixel = min(vec2u(in.clip.xy), size - vec2u(1u));
+    let d = textureLoad(soft_depth, pixel, 0);
+    if (material.soft.x < 0.5 || globals.soft.w < 0.5 || d >= 1.0) {
+        return color;
+    }
+    let near = globals.soft.x;
+    let far = globals.soft.y;
+    let scene_z = near * far / (far - d * (far - near));
+    let frag_z = (globals.view * vec4f(in.world_position, 1.0)).z;
+    let fade = clamp((scene_z - frag_z) * globals.soft.z, 0.0, 1.0);
+    let softness = 1.0 - pow(1.0 - fade, 4.0);
+    if (material.soft.y > 0.5) {
+        // Babylon fades the gamma-space colour; ours is linear.
+        return vec4f(color.rgb * pow(softness, 2.2), color.a);
+    }
+    return vec4f(color.rgb, color.a * softness);
 }
 
 fn shade(in: VertexOut, front: bool) -> vec4f {

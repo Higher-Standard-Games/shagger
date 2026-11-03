@@ -43,7 +43,7 @@ use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
 use crate::loader::shader::q3_shader_types::{
-    AlphaGenType, DistanceRamp, Q3ShaderStage, RgbGen, RgbGenType, TcMod, WaveFunc,
+    AlphaGenType, BlendFactor, DistanceRamp, Q3ShaderStage, RgbGen, RgbGenType, TcMod, WaveFunc,
 };
 use crate::loader::shader::q3_stage_evaluation::{TcState, create_tc_state, evaluate_wave_func, step_tc_mods_into};
 use crate::loader::texture::texture_extensions::strip_texture_extension;
@@ -62,7 +62,15 @@ struct Globals {
     /// World fog (`AtmosphericFogPlugin`).
     fog: FogUniforms,
     dynamic: DynamicLightBlock,
+    /// The camera's view (soft particles' camera-space Z).
+    view: [[f32; 4]; 4],
+    /// Soft particles (`Q3SoftParticlePlugin`): near, far, the fade rate,
+    /// 1 when the scene depth is bound.
+    soft: [f32; 4],
 }
+
+/// `Q3_SOFT_FADE_RATE`: a soft particle fades in over 50 units of depth.
+pub const Q3_SOFT_FADE_RATE: f32 = 0.02;
 
 /// One pass's material uniform.
 #[repr(C)]
@@ -90,6 +98,9 @@ struct MaterialUniform {
     /// x: how world fog meets the pass (`fogPassKind`: 0 mix, 1 additive,
     /// 2 filter).
     fog: [f32; 4],
+    /// x: 1 for a soft particle, y: 1 to fade its colour (an additive
+    /// `GL_ONE` source) rather than its alpha.
+    soft: [f32; 4],
 }
 
 impl MaterialUniform {
@@ -248,6 +259,16 @@ pub struct WorldRenderer {
     fog: FogUniforms,
     /// Batches another renderer draws (`set_hidden_batches`).
     hidden: Vec<bool>,
+    /// The scene depth soft particles read: its layout, a copy of the main
+    /// depth taken between the opaque and blended passes, its size, and
+    /// whether this frame reads it.
+    soft_layout: wgpu::BindGroupLayout,
+    soft_depth: Option<(wgpu::Texture, (u32, u32))>,
+    soft_bind_group: wgpu::BindGroup,
+    soft_view: [[f32; 4]; 4],
+    soft_params: [f32; 4],
+    /// Which batches hold a soft particle pass.
+    soft_batches: Vec<bool>,
 }
 
 fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
@@ -438,6 +459,21 @@ impl WorldRenderer {
             ],
         });
 
+        let soft_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("world soft depth"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let soft_bind_group = soft_depth_bind_group(gpu, &soft_layout, &soft_depth_texture(gpu, (1, 1)));
+
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("world globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -483,6 +519,15 @@ impl WorldRenderer {
         let mut missing = Vec::new();
         let mut opaque = Vec::new();
         let mut blended = Vec::new();
+        let soft_batches: Vec<bool> = geometry
+            .batches
+            .iter()
+            .map(|b| {
+                b.passes
+                    .iter()
+                    .any(|p| p.soft_particle == Some(true) && p.is_transparent)
+            })
+            .collect();
         for (batch_index, batch) in geometry.batches.iter().enumerate() {
             for props in &batch.passes {
                 // Only the reflection captured at load draws here.
@@ -685,6 +730,13 @@ impl WorldRenderer {
                         surface: layer.surface,
                         gloss: layer.gloss,
                         fog: [fog_pass_kind(layer.key.blend), 0.0, 0.0, 0.0],
+                        // `configureQ3SoftParticle`: transparent soft passes.
+                        soft: if props.soft_particle == Some(true) && props.is_transparent {
+                            let fade_rgb = props.blend_func.is_some_and(|b| b[0] == BlendFactor::One);
+                            [1.0, f32::from(u8::from(fade_rgb)), 0.0, 0.0]
+                        } else {
+                            [0.0; 4]
+                        },
                     };
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("world material"),
@@ -789,7 +841,7 @@ impl WorldRenderer {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout), Some(&soft_layout)],
             immediate_size: 0,
         });
         let pipeline = |key: &PipelineKey| {
@@ -886,7 +938,53 @@ impl WorldRenderer {
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
             hidden: Vec::new(),
+            soft_batches,
+            soft_layout,
+            soft_depth: None,
+            soft_bind_group,
+            soft_view: Mat4::IDENTITY.to_cols_array_2d(),
+            soft_params: [1.0, 1.0, Q3_SOFT_FADE_RATE, 0.0],
         }
+    }
+
+    /// Whether a soft particle is among the batches `visible` keeps (empty:
+    /// all).
+    #[must_use]
+    pub fn has_visible_soft_particles(&self, visible: &[bool]) -> bool {
+        self.soft_batches.iter().enumerate().any(|(i, &soft)| {
+            soft && visible.get(i).copied().unwrap_or(true) && !self.hidden.get(i).copied().unwrap_or(false)
+        })
+    }
+
+    /// The next frame's soft particle state (`Q3SoftParticleDepth.prepare`):
+    /// the camera's view, near and far, and whether the scene depth is read
+    /// (`r_softhalos` on and a soft particle in view). Makes the depth copy
+    /// at `size` when it is.
+    pub fn set_soft_particles(&mut self, gpu: &Gpu, view: Mat4, near: f32, far: f32, size: (u32, u32), enabled: bool) {
+        self.soft_view = view.to_cols_array_2d();
+        self.soft_params = [near, far, Q3_SOFT_FADE_RATE, f32::from(u8::from(enabled))];
+        if enabled && self.soft_depth.as_ref().is_none_or(|(_, s)| *s != size) {
+            let texture = soft_depth_texture(gpu, size);
+            self.soft_bind_group = soft_depth_bind_group(gpu, &self.soft_layout, &texture);
+            self.soft_depth = Some((texture, size));
+        }
+    }
+
+    /// Copies the main depth for soft particles after the opaque pass, when
+    /// this frame reads it.
+    pub fn capture_soft_depth(&self, encoder: &mut wgpu::CommandEncoder, depth: &wgpu::Texture) {
+        let Some((copy, (width, height))) = self.soft_depth.as_ref().filter(|_| self.soft_params[3] > 0.5) else {
+            return;
+        };
+        let extent = wgpu::Extent3d {
+            width: (*width).max(1),
+            height: (*height).max(1),
+            depth_or_array_layers: 1,
+        };
+        if depth.size() != extent {
+            return;
+        }
+        encoder.copy_texture_to_texture(depth.as_image_copy(), copy.as_image_copy(), extent);
     }
 
     /// The dynamic lights the next `prepare` hands the lightmapped surfaces
@@ -996,6 +1094,8 @@ impl WorldRenderer {
             eye: [eye.x, eye.y, eye.z, 0.0],
             fog: self.fog,
             dynamic: self.dynamic,
+            view: self.soft_view,
+            soft: self.soft_params,
         };
         gpu.queue
             .write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
@@ -1027,6 +1127,7 @@ impl WorldRenderer {
 
     fn draw_passes(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool], range: std::ops::Range<usize>) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        pass.set_bind_group(2, &self.soft_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
@@ -1044,6 +1145,34 @@ impl WorldRenderer {
             pass.draw_indexed(pass_.first_index..pass_.first_index + pass_.index_count, 0, 0..1);
         }
     }
+}
+
+fn soft_depth_texture(gpu: &Gpu, (width, height): (u32, u32)) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("world soft depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn soft_depth_bind_group(gpu: &Gpu, layout: &wgpu::BindGroupLayout, texture: &wgpu::Texture) -> wgpu::BindGroup {
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("world soft depth"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&texture.create_view(&wgpu::TextureViewDescriptor::default())),
+        }],
+    })
 }
 
 pub(crate) fn texture_entry(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
