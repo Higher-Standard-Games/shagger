@@ -2,6 +2,7 @@
 //! with their trails and explosions, bullet streaks, muzzle flashes,
 //! impact sparks and the rail so far.
 
+pub mod ammo_counter_display;
 pub mod effect_geometry;
 pub mod explosion;
 pub mod explosion_effect;

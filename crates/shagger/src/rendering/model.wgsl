@@ -19,6 +19,9 @@
 // pushed out along its normals in bind space by the outline width, in one
 // flat colour.
 
+// The normal map's tangent and bitangent signs (see cotangent_frame).
+const NORMAL_MAP_SIGNS: vec2f = vec2f(1.0, -1.0);
+
 struct Light {
     // x: 0 none, 1 hemispheric, 2 directional
     kind: vec4f,
@@ -69,6 +72,8 @@ struct Material {
     base_color: vec4f,
     // x: metallic, y: roughness, z: 1 unlit, w: alpha
     params: vec4f,
+    // x: 1 with a normal map.
+    maps: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -77,6 +82,27 @@ struct Material {
 @group(2) @binding(0) var base_texture: texture_2d<f32>;
 @group(2) @binding(1) var base_sampler: sampler;
 @group(2) @binding(2) var<uniform> material: Material;
+@group(2) @binding(3) var normal_texture: texture_2d<f32>;
+@group(2) @binding(4) var metallic_roughness_texture: texture_2d<f32>;
+
+// Babylon's cotangent_frame (bumpFragmentFunctions): the tangent frame from
+// the screen-space derivatives of the position and the texture coordinates.
+// WebGPU's y runs down the screen where WebGL's runs up, which turns both
+// tangent and bitangent; `signs` puts them back with glTF's
+// invertNormalMapX for a left-handed scene.
+fn cotangent_frame(normal: vec3f, p: vec3f, uv: vec2f, signs: vec2f) -> mat3x3f {
+    let dp1 = dpdx(p);
+    let dp2 = dpdy(p);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let dp2perp = cross(dp2, normal);
+    let dp1perp = cross(normal, dp1);
+    let tangent = (dp2perp * duv1.x + dp1perp * duv2.x) * signs.x;
+    let bitangent = (dp2perp * duv1.y + dp1perp * duv2.y) * signs.y;
+    let det = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    let invmax = select(0.0, inverseSqrt(det), det > 0.0);
+    return mat3x3f(tangent * invmax, bitangent * invmax, normal);
+}
 
 struct VertexIn {
     @location(0) position: vec3f,
@@ -186,6 +212,10 @@ fn specular_brdf(n: vec3f, v: vec3f, l: vec3f, n_dot_l: f32, n_dot_v: f32, rough
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let texel = textureSample(base_texture, base_sampler, in.uv);
+    // Sampled before any branch: derivatives need uniform control flow.
+    let bump = textureSample(normal_texture, base_sampler, in.uv).xyz * 2.0 - 1.0;
+    let metal_rough = textureSample(metallic_roughness_texture, base_sampler, in.uv);
+    let frame = cotangent_frame(normalize(in.normal), in.world_position, in.uv, NORMAL_MAP_SIGNS);
     let albedo_color = select(material.base_color.rgb, draw.tint.rgb, draw.tint.w > 0.5);
     let albedo = pow(texel.rgb, vec3f(2.2)) * albedo_color;
     // A draw's alpha override (a fade) is stored plus one in uv_origin.w;
@@ -196,6 +226,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         color = albedo;
     } else {
         var n = normalize(in.normal);
+        if material.maps.x > 0.5 {
+            n = normalize(frame * bump);
+        }
         if !front {
             n = -n;
         }
@@ -203,8 +236,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         let n_dot_v = clamp(abs(dot(n, v)), 1e-6, 1.0);
         var diffuse = vec3f(0.0);
         var specular = vec3f(0.0);
-        let roughness = material.params.y;
-        let f0 = mix(vec3f(0.04), albedo, material.params.x);
+        // glTF's metallicRoughnessTexture: roughness in G, metallic in B.
+        let roughness = material.params.y * metal_rough.g;
+        let metallic = material.params.x * metal_rough.b;
+        let f0 = mix(vec3f(0.04), albedo, metallic);
         for (var i = 0; i < 4; i++) {
             let light = globals.lights[i];
             if light.kind.x == 1.0 {
@@ -239,7 +274,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             diffuse += light_color * ndl * diffuse_brdf(ndl, n_dot_v, vdh, roughness);
             specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light_color;
         }
-        color = diffuse * albedo * (1.0 - material.params.x) + specular;
+        color = diffuse * albedo * (1.0 - metallic) + specular;
     }
     // A draw's emissive (a powerup glow), added as PBR adds its own.
     if draw.emissive.w > 0.5 {

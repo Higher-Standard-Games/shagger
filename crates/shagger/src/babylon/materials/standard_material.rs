@@ -71,6 +71,9 @@ pub struct StandardMaterialParams {
     /// is clamped, not inside it.
     pub emissive_as_illumination: bool,
     pub disable_depth_write: bool,
+    /// `depthFunction = Constants.ALWAYS`: passes the depth test whatever
+    /// is drawn there.
+    pub depth_always: bool,
     /// `separateCullingPass`: a two-sided blended mesh draws its back faces,
     /// then its front faces.
     pub separate_culling_pass: bool,
@@ -95,6 +98,7 @@ impl Default for StandardMaterialParams {
             alpha_mode: StandardAlphaMode::Combine,
             emissive_as_illumination: false,
             disable_depth_write: false,
+            depth_always: false,
             separate_culling_pass: false,
             emissive_fresnel: None,
             opacity_fresnel: None,

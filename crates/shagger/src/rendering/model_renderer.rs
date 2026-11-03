@@ -196,6 +196,8 @@ struct Globals {
 struct MaterialUniform {
     base_color: [f32; 4],
     params: [f32; 4],
+    /// x: 1 with a normal map.
+    maps: [f32; 4],
 }
 
 /// Dynamic uniform offsets must be 256-byte aligned.
@@ -206,6 +208,8 @@ struct PipelineKey {
     blend: BlendKind,
     cull: Cull,
     depth_write: bool,
+    /// `depthFunction = ALWAYS`: drawn over whatever is there.
+    depth_always: bool,
     /// Drawn with `standard.wgsl`.
     standard: bool,
     /// Clockwise faces front: the world matrix mirrors.
@@ -222,6 +226,7 @@ fn pipeline_keys(material: &GpuMaterial, mirrored: bool, skinned: bool, outlined
         blend: material.blend,
         cull: if material.two_sided { Cull::None } else { Cull::Back },
         depth_write: material.depth_write,
+        depth_always: material.depth_always,
         standard: material.standard,
         mirrored,
         skinned,
@@ -300,6 +305,7 @@ struct GpuMaterial {
     two_sided: bool,
     standard: bool,
     depth_write: bool,
+    depth_always: bool,
     /// Back faces, then front faces (`separateCullingPass`).
     separate_culling: bool,
 }
@@ -331,6 +337,8 @@ pub struct ModelRenderer {
     draw_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
+    /// A normal map that leaves the normal as it is.
+    flat_normal: wgpu::TextureView,
     models: Vec<GpuModel>,
     lights: Vec<ModelLight>,
     dynamic: DynamicLightBlock,
@@ -420,6 +428,10 @@ impl ModelRenderer {
                 texture_entry(0, wgpu::TextureViewDimension::D2),
                 sampler_entry(1),
                 uniform_entry(2, false),
+                // A PBR material's normal map and its metallic (B) and
+                // roughness (G) map; flat and white without.
+                texture_entry(3, wgpu::TextureViewDimension::D2),
+                texture_entry(4, wgpu::TextureViewDimension::D2),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -490,6 +502,8 @@ impl ModelRenderer {
         });
         let white = upload_texture(gpu, "model white", &Rgba8Image::white())
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let flat_normal = upload_texture(gpu, "model flat normal", &Rgba8Image::solid([128, 128, 255, 255]))
+            .create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             color_format,
             shader,
@@ -510,6 +524,7 @@ impl ModelRenderer {
             draw_bind_group,
             sampler,
             white,
+            flat_normal,
             models: Vec::new(),
             lights: Vec::new(),
             dynamic: DynamicLightBlock::default(),
@@ -567,25 +582,40 @@ impl ModelRenderer {
         for i in 0..count {
             let m = model.materials.get(i).unwrap_or(&fallback);
             let mode = mode(m);
-            if let Some(image) = m.base_color_image
-                && !views.contains_key(&image)
-                && let Some(decoded) = model
+            let lit = !matches!(mode, ModelMaterialMode::Standard(_));
+            let maps = [
+                Some(m.base_color_image),
+                lit.then_some(m.normal_image),
+                lit.then_some(m.metallic_roughness_image),
+            ];
+            for image in maps.into_iter().flatten().flatten() {
+                if views.contains_key(&image) {
+                    continue;
+                }
+                if let Some(decoded) = model
                     .images
                     .get(image)
                     .and_then(|img| decode_image(&img.name, &img.bytes))
-            {
-                let texture = upload_texture(
-                    gpu,
-                    &model.images[image].name,
-                    &Rgba8Image {
-                        width: decoded.width,
-                        height: decoded.height,
-                        pixels: decoded.pixels,
-                    },
-                );
-                views.insert(image, texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                {
+                    let texture = upload_texture(
+                        gpu,
+                        &model.images[image].name,
+                        &Rgba8Image {
+                            width: decoded.width,
+                            height: decoded.height,
+                            pixels: decoded.pixels,
+                        },
+                    );
+                    views.insert(image, texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                }
             }
             let view = m.base_color_image.and_then(|i| views.get(&i)).unwrap_or(&self.white);
+            let normal_view = m.normal_image.filter(|_| lit).and_then(|i| views.get(&i));
+            let mr_view = m
+                .metallic_roughness_image
+                .filter(|_| lit)
+                .and_then(|i| views.get(&i))
+                .unwrap_or(&self.white);
             if let ModelMaterialMode::Standard(params) = mode {
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("standard material"),
@@ -593,7 +623,7 @@ impl ModelRenderer {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
                 materials.push(GpuMaterial {
-                    bind_group: self.material_bind_group(gpu, view, &buffer),
+                    bind_group: self.material_bind_group(gpu, [view, &self.flat_normal, &self.white], &buffer),
                     blend: match (params.blends(), params.alpha_mode) {
                         (false, _) => BlendKind::Opaque,
                         (true, StandardAlphaMode::Combine) => BlendKind::Alpha,
@@ -605,6 +635,7 @@ impl ModelRenderer {
                     // Babylon's transparent pass sets the alpha mode, which
                     // turns depth writes off (`setAlphaMode`).
                     depth_write: !params.disable_depth_write && !params.blends(),
+                    depth_always: params.depth_always,
                     separate_culling: params.separate_culling_pass && !params.back_face_culling,
                 });
                 continue;
@@ -637,6 +668,7 @@ impl ModelRenderer {
             let uniform = MaterialUniform {
                 base_color: m.base_color,
                 params: [m.metallic, m.roughness, unlit, alpha],
+                maps: [f32::from(u8::from(normal_view.is_some())), 0.0, 0.0, 0.0],
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model material"),
@@ -644,11 +676,16 @@ impl ModelRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
             materials.push(GpuMaterial {
-                bind_group: self.material_bind_group(gpu, view, &buffer),
+                bind_group: self.material_bind_group(
+                    gpu,
+                    [view, normal_view.unwrap_or(&self.flat_normal), mr_view],
+                    &buffer,
+                ),
                 blend,
                 two_sided,
                 standard: false,
                 depth_write: blend == BlendKind::Opaque,
+                depth_always: false,
                 separate_culling: false,
             });
         }
@@ -736,7 +773,10 @@ impl ModelRenderer {
         p.bounds_center = (min + max) * 0.5;
     }
 
-    fn material_bind_group(&self, gpu: &Gpu, view: &wgpu::TextureView, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+    /// The base colour, normal and metallic-roughness textures and the
+    /// material's uniform.
+    fn material_bind_group(&self, gpu: &Gpu, views: [&wgpu::TextureView; 3], buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        let [view, normal, metallic_roughness] = views;
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("model material"),
             layout: &self.material_layout,
@@ -752,6 +792,14 @@ impl ModelRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(metallic_roughness),
                 },
             ],
         })
@@ -850,7 +898,11 @@ impl ModelRenderer {
                     PassKind::Outline => false,
                     PassKind::OutlineDepth => true,
                 }),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if key.depth_always {
+                    wgpu::CompareFunction::Always
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 // OutlineRenderer's zOffset 1 and zOffsetUnits 4, negated.
                 bias: if outline {
