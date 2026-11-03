@@ -2,6 +2,7 @@
 
 pub mod bsp_lighting_profile;
 pub mod bsp_loader;
+pub mod liquid_classifier;
 pub mod mesh;
 pub mod pvs_culler;
 pub mod world_fog;

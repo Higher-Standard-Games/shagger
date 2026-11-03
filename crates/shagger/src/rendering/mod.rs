@@ -21,6 +21,7 @@ pub mod model_renderer;
 pub mod offscreen;
 pub mod render_vars;
 pub mod sky_renderer;
+pub mod water;
 pub mod world_culling;
 pub mod world_fog_controller;
 pub mod world_geometry;

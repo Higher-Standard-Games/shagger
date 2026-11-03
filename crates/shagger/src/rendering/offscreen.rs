@@ -171,6 +171,50 @@ pub fn render_hdr_with_ui_to_rgba(
     read_back(gpu, encoder, &color, width, height)
 }
 
+/// [`render_hdr_with_ui_to_rgba`] with the main pass split in two:
+/// `opaque`, then `between` on the encoder (copies of the scene for what
+/// draws over it, such as water), then `rest` over the same colour and depth.
+#[allow(clippy::too_many_arguments)]
+pub fn render_hdr_scene_with_ui_to_rgba(
+    gpu: &Gpu,
+    width: u32,
+    height: u32,
+    clear: wgpu::Color,
+    post: &ImageProcessingPostProcess,
+    config: &ImageProcessingConfiguration,
+    opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    between: impl FnOnce(&mut wgpu::CommandEncoder, &HdrTarget),
+    rest: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    overlay: impl FnOnce(&mut wgpu::RenderPass<'_>),
+    ui: impl FnOnce(&mut wgpu::RenderPass<'_>),
+) -> Vec<u8> {
+    let hdr = HdrTarget::new(gpu, width, height);
+    let color = output_texture(gpu, width, height);
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
+    {
+        let mut pass = begin_main_pass(&mut encoder, &hdr.color, &hdr.depth, clear);
+        opaque(&mut pass);
+    }
+    between(&mut encoder, &hdr);
+    {
+        let mut pass = begin_continue_pass(&mut encoder, &hdr.color, &hdr.depth);
+        rest(&mut pass);
+    }
+    {
+        let mut pass = begin_overlay_pass(&mut encoder, &hdr.color, &hdr.depth);
+        overlay(&mut pass);
+    }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
+    {
+        let mut pass = begin_ui_pass(&mut encoder, &color_view);
+        ui(&mut pass);
+    }
+    read_back(gpu, encoder, &color, width, height)
+}
+
 fn extent(width: u32, height: u32) -> wgpu::Extent3d {
     wgpu::Extent3d {
         width,
@@ -250,6 +294,37 @@ pub fn begin_main_pass<'e>(
             view: depth,
             depth_ops: Some(wgpu::Operations {
                 load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
+/// Continues the main pass after a break: colour and depth kept.
+pub fn begin_continue_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("main, continued"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,

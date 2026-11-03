@@ -246,6 +246,8 @@ pub struct WorldRenderer {
     dynamic: DynamicLightBlock,
     /// World fog, from the next `prepare`.
     fog: FogUniforms,
+    /// Batches another renderer draws (`set_hidden_batches`).
+    hidden: Vec<bool>,
 }
 
 fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
@@ -883,6 +885,7 @@ impl WorldRenderer {
             ],
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
+            hidden: Vec::new(),
         }
     }
 
@@ -961,6 +964,24 @@ impl WorldRenderer {
         }
     }
 
+    /// Batches drawn by something else (the water), by batch index.
+    pub fn set_hidden_batches(&mut self, hidden: &[bool]) {
+        self.hidden = hidden.to_vec();
+    }
+
+    /// The world's vertices ([`WorldVertex`]), for what draws its batches
+    /// with another material.
+    #[must_use]
+    pub fn vertex_buffer(&self) -> &wgpu::Buffer {
+        &self.vertex_buffer
+    }
+
+    /// The world's `u32` indices.
+    #[must_use]
+    pub fn index_buffer(&self) -> &wgpu::Buffer {
+        &self.index_buffer
+    }
+
     /// The world fog to draw, from the next [`prepare`](Self::prepare).
     pub fn set_fog(&mut self, fog: FogUniforms) {
         self.fog = fog;
@@ -1010,7 +1031,9 @@ impl WorldRenderer {
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
         for pass_ in &self.passes[range] {
-            if !visible.get(pass_.batch).copied().unwrap_or(true) {
+            if !visible.get(pass_.batch).copied().unwrap_or(true)
+                || self.hidden.get(pass_.batch).copied().unwrap_or(false)
+            {
                 continue;
             }
             if current != Some(pass_.pipeline) {

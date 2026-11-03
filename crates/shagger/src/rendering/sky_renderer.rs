@@ -38,6 +38,8 @@ pub struct SkyRenderer {
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     fog: FogUniforms,
+    /// The far box as a cube, for what reflects it (water).
+    cube: wgpu::TextureView,
 }
 
 /// The sky's uniform (`sky.wgsl`'s `Sky`).
@@ -185,6 +187,7 @@ impl SkyRenderer {
             buffer,
             bind_group,
             fog: FogUniforms::default(),
+            cube: view,
         }
     }
 
@@ -202,6 +205,13 @@ impl SkyRenderer {
             fog: self.fog,
         };
         gpu.queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// The far box as a cube (`skybox.material.reflectionTexture`): gamma
+    /// space, sampled with Babylon-space directions.
+    #[must_use]
+    pub fn cube(&self) -> &wgpu::TextureView {
+        &self.cube
     }
 
     /// The world fog the sky blends into, from the next [`prepare`](Self::prepare).

@@ -15,6 +15,9 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub struct HdrTarget {
     pub color: wgpu::TextureView,
     pub depth: wgpu::TextureView,
+    /// The textures behind the views, for copies of the scene (water).
+    pub color_texture: wgpu::Texture,
+    pub depth_texture: wgpu::Texture,
     pub size: (u32, u32),
 }
 
@@ -27,26 +30,34 @@ impl HdrTarget {
             depth_or_array_layers: 1,
         };
         let texture = |label, format, usage| {
-            gpu.device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
         };
+        let color_texture = texture(
+            "hdr colour",
+            HDR_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth_texture = texture(
+            "hdr depth",
+            DEPTH_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
         Self {
-            color: texture(
-                "hdr colour",
-                HDR_FORMAT,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
-            depth: texture("hdr depth", DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT),
+            color: color_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            depth: depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            color_texture,
+            depth_texture,
             size: (size.width, size.height),
         }
     }

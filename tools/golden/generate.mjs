@@ -162,6 +162,34 @@ writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_string_number
   writeFileSync(resolve(root, "crates/shagger_shared/tests/golden/js_atan2.txt"), `${atan.join("\n")}\n`);
 }
 
+// --- WaterNoise: the liquid surfaces' generated normal map --------------------------
+{
+  const { waterHeightAt, generateWaterNormalMap, WATER_NOISE_SIZE } = await import(
+    pathToFileURL(resolve(shag, "src/engine/rendering/water/WaterNoise.ts")).href
+  );
+  let s = 0x2545f491;
+  const r = () => {
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 0x1_0000_0000;
+  };
+  const noise = header("WaterNoise.ts: waterHeightAt and generateWaterNormalMap");
+  noise[2] = "# h u v octaves height (f64 bits); then 'map size' and one hex row of RGBA bytes per line";
+  for (let i = 0; i < 400; i++) {
+    const u = (r() - 0.25) * 3;
+    const v = (r() - 0.25) * 3;
+    const octaves = 1 + (i % 5);
+    noise.push(`h ${bits(u)} ${bits(v)} ${octaves} ${bits(waterHeightAt(u, v, octaves))}`);
+  }
+  const map = generateWaterNormalMap();
+  noise.push(`map ${WATER_NOISE_SIZE}`);
+  for (let y = 0; y < WATER_NOISE_SIZE; y++) {
+    noise.push(Buffer.from(map.subarray(y * WATER_NOISE_SIZE * 4, (y + 1) * WATER_NOISE_SIZE * 4)).toString("hex"));
+  }
+  writeFileSync(resolve(root, "crates/shagger/tests/golden/water_noise.txt"), `${noise.join("\n")}\n`);
+}
+
 // --- Highlight reels: DemoAnalyzer, SequenceBuilder, CinematicCameraPaths ----------
 execFileSync(
   process.execPath,
