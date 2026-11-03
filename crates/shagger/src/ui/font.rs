@@ -61,6 +61,13 @@ impl Font {
         (m.ascent, m.descent)
     }
 
+    /// Draws one character's glyph at `size` with a context of its own, for
+    /// a one-off atlas.
+    #[must_use]
+    pub fn rasterize_char(&self, ch: char, size: f32) -> Option<GlyphBitmap> {
+        self.rasterize(&mut ScaleContext::new(), self.glyph(ch), size)
+    }
+
     /// Draws a glyph's coverage at `size`, hinted.
     pub fn rasterize(&self, context: &mut ScaleContext, glyph: u16, size: f32) -> Option<GlyphBitmap> {
         let mut scaler = context.builder(self.font()).size(size).hint(true).build();

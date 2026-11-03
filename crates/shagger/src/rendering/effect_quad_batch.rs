@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use super::gpu::Gpu;
 use super::world_fog_controller::FogUniforms;
-use super::world_renderer::DEPTH_FORMAT;
+use super::world_renderer::{DEPTH_FORMAT, Rgba8Image};
 
 /// One instance: five vec4s (`i0` to `i4`; the quads use four).
 pub type EffectInstance = [f32; 20];
@@ -105,6 +105,47 @@ impl EffectQuadBatch {
         capacity: usize,
         template: &EffectTemplate,
     ) -> Self {
+        Self::build(gpu, color_format, label, effect_wgsl, capacity, template, None, true)
+    }
+
+    /// A quad batch that also samples `image` (an `Rgba8Unorm` texture at
+    /// `@binding(1)`, a bilinear clamped sampler at `@binding(2)`; the
+    /// effect's shader declares both). Without `depth_test` the quads draw
+    /// over the scene, as Babylon's rendering group 1 does after clearing
+    /// the depth.
+    #[must_use]
+    pub fn textured(
+        gpu: &Gpu,
+        color_format: wgpu::TextureFormat,
+        label: &str,
+        effect_wgsl: &str,
+        capacity: usize,
+        image: &Rgba8Image,
+        depth_test: bool,
+    ) -> Self {
+        Self::build(
+            gpu,
+            color_format,
+            label,
+            effect_wgsl,
+            capacity,
+            &EffectTemplate::quad(),
+            Some(image),
+            depth_test,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        gpu: &Gpu,
+        color_format: wgpu::TextureFormat,
+        label: &str,
+        effect_wgsl: &str,
+        capacity: usize,
+        template: &EffectTemplate,
+        image: Option<&Rgba8Image>,
+        depth_test: bool,
+    ) -> Self {
         let device = &gpu.device;
         let template_vertices: Vec<QuadVertex> = template
             .positions
@@ -134,26 +175,85 @@ impl EffectQuadBatch {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some(label),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+        let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        let sampled = image.map(|image| {
+            let texture = device.create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: image.width.max(1),
+                        height: image.height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &image.pixels,
+            );
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            (view, sampler)
+        });
+        if sampled.is_some() {
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
-            }],
+            });
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &layout_entries,
         });
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: globals.as_entire_binding(),
+        }];
+        if let Some((view, sampler)) = &sampled {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
             layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
+            entries: &entries,
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
@@ -196,7 +296,11 @@ impl EffectQuadBatch {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if depth_test {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
