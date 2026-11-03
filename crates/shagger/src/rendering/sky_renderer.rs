@@ -8,6 +8,7 @@ use wgpu::util::DeviceExt;
 
 use super::camera::Camera;
 use super::gpu::Gpu;
+use super::world_fog_controller::FogUniforms;
 use super::world_geometry::SkyShader;
 use super::world_renderer::DEPTH_FORMAT;
 use crate::loader::pk3::pk3_loader::Pk3Loader;
@@ -36,6 +37,16 @@ pub struct SkyRenderer {
     pipeline: wgpu::RenderPipeline,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    fog: FogUniforms,
+}
+
+/// The sky's uniform (`sky.wgsl`'s `Sky`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyUniform {
+    inverse_view_proj: [[f32; 4]; 4],
+    eye: [f32; 4],
+    fog: FogUniforms,
 }
 
 impl SkyRenderer {
@@ -76,7 +87,7 @@ impl SkyRenderer {
         });
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky"),
-            size: 64,
+            size: std::mem::size_of::<SkyUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -129,7 +140,10 @@ impl SkyRenderer {
                 },
             ],
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("fog.wgsl"), include_str!("sky.wgsl")).into()),
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky"),
             bind_group_layouts: &[Some(&layout)],
@@ -170,6 +184,7 @@ impl SkyRenderer {
             pipeline,
             buffer,
             bind_group,
+            fog: FogUniforms::default(),
         }
     }
 
@@ -181,8 +196,17 @@ impl SkyRenderer {
             ..*camera
         };
         let inverse: Mat4 = centred.view_projection(aspect).inverse();
-        gpu.queue
-            .write_buffer(&self.buffer, 0, bytemuck::bytes_of(&inverse.to_cols_array_2d()));
+        let uniform = SkyUniform {
+            inverse_view_proj: inverse.to_cols_array_2d(),
+            eye: [camera.position.x, camera.position.y, camera.position.z, 0.0],
+            fog: self.fog,
+        };
+        gpu.queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// The world fog the sky blends into, from the next [`prepare`](Self::prepare).
+    pub fn set_fog(&mut self, fog: FogUniforms) {
+        self.fog = fog;
     }
 
     /// Records the sky into an open pass; draw it before the world.

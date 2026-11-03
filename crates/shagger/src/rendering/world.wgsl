@@ -28,6 +28,7 @@ struct Globals {
     lighting: vec4f,
     ambient: vec4f,
     eye: vec4f,
+    fog: Fog,
     dynamic: DynamicLights,
 };
 
@@ -56,6 +57,8 @@ struct Material {
     // x: baked gloss strength, y: gloss exponent, z: PBR roughness,
     // w: PBR reflectivity colour
     gloss: vec4f,
+    // x: how world fog meets this pass (0 mix, 1 additive, 2 filter)
+    fog: vec4f,
 };
 @group(1) @binding(2) var<uniform> material: Material;
 @group(1) @binding(3) var normal_texture: texture_2d<f32>;
@@ -238,8 +241,14 @@ fn dynamic_specular(position: vec3f, n: vec3f, v: vec3f, glossiness: f32) -> vec
     return sum;
 }
 
+// World fog over the shaded surface (AtmosphericFogPlugin).
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+    let color = shade(in, front);
+    return vec4f(atm_fog_apply(globals.fog, color.rgb, in.world_position, globals.eye.xyz, material.fog.x, false), color.a);
+}
+
+fn shade(in: VertexOut, front: bool) -> vec4f {
     let base = textureSample(base_texture, base_sampler, in.uv);
     // Sampled in uniform control flow; the masks below choose what counts.
     let bump = textureSample(normal_texture, base_sampler, in.uv0).xyz;

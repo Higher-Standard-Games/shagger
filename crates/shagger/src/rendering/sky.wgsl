@@ -5,6 +5,9 @@
 struct Sky {
     // The inverse of the view-projection without the eye's position.
     inverse_view_proj: mat4x4<f32>,
+    // The eye, for world fog on the sky (AtmosphericFogPlugin's ATMFOG_SKY).
+    eye: vec4<f32>,
+    fog: Fog,
 }
 
 @group(0) @binding(0) var<uniform> sky: Sky;
@@ -31,5 +34,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let direction = far.xyz / far.w;
     // The skybox is a StandardMaterial: linear output for the HDR target.
     let color = textureSample(sky_texture, sky_sampler, direction).rgb;
-    return vec4<f32>(pow(max(color, vec3<f32>(0.0)), vec3<f32>(2.2)), 1.0);
+    let linear = pow(max(color, vec3<f32>(0.0)), vec3<f32>(2.2));
+    // Any point along the view works: the fog puts it on the sky box.
+    let fogged = atm_fog_apply(sky.fog, linear, sky.eye.xyz + normalize(direction), sky.eye.xyz, 0.0, true);
+    return vec4<f32>(fogged, 1.0);
 }

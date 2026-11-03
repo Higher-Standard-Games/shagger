@@ -31,6 +31,7 @@ use wgpu::util::DeviceExt;
 
 use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
+use super::world_fog_controller::FogUniforms;
 use super::world_geometry::{WorldGeometry, WorldVertex};
 use super::world_materials::{
     Blend, GLOSS_SUFFIXES, MissingImage, NORMAL_SUFFIXES, PassState, add_texture_prefixes, build_diffuse_candidates,
@@ -58,6 +59,8 @@ struct Globals {
     ambient: [f32; 4],
     /// The camera position (distance ramps).
     eye: [f32; 4],
+    /// World fog (`AtmosphericFogPlugin`).
+    fog: FogUniforms,
     dynamic: DynamicLightBlock,
 }
 
@@ -84,6 +87,9 @@ struct MaterialUniform {
     /// x: baked gloss strength (`glossIntensity`), y: gloss exponent,
     /// z: PBR roughness (`1 - microSurface`), w: PBR reflectivity colour.
     gloss: [f32; 4],
+    /// x: how world fog meets the pass (`fogPassKind`: 0 mix, 1 additive,
+    /// 2 filter).
+    fog: [f32; 4],
 }
 
 impl MaterialUniform {
@@ -102,6 +108,16 @@ impl MaterialUniform {
             m.v_row[1] as f32,
         ];
         self.uv_origin = [m.origin[0] as f32, m.origin[1] as f32, 0.0, 0.0];
+    }
+}
+
+/// `fogPassKind`: how a pass's blend meets world fog (0 mix, 1 additive,
+/// 2 filter).
+fn fog_pass_kind(blend: Blend) -> f32 {
+    match blend {
+        Blend::Opaque | Blend::Combine => 0.0,
+        Blend::OneOne | Blend::Add => 1.0,
+        Blend::Multiply => 2.0,
     }
 }
 
@@ -228,6 +244,8 @@ pub struct WorldRenderer {
     lighting: [f32; 4],
     ambient: [f32; 4],
     dynamic: DynamicLightBlock,
+    /// World fog, from the next `prepare`.
+    fog: FogUniforms,
 }
 
 fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
@@ -664,6 +682,7 @@ impl WorldRenderer {
                         ramp_alpha: layer.ramps.1,
                         surface: layer.surface,
                         gloss: layer.gloss,
+                        fog: [fog_pass_kind(layer.key.blend), 0.0, 0.0, 0.0],
                     };
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("world material"),
@@ -762,7 +781,10 @@ impl WorldRenderer {
             passes.push(pass);
         }
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("world.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("world.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("fog.wgsl"), include_str!("world.wgsl")).into()),
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
             bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
@@ -860,6 +882,7 @@ impl WorldRenderer {
                 0.0,
             ],
             dynamic: DynamicLightBlock::default(),
+            fog: FogUniforms::default(),
         }
     }
 
@@ -938,6 +961,11 @@ impl WorldRenderer {
         }
     }
 
+    /// The world fog to draw, from the next [`prepare`](Self::prepare).
+    pub fn set_fog(&mut self, fog: FogUniforms) {
+        self.fog = fog;
+    }
+
     /// Writes this frame's camera.
     pub fn prepare(&self, gpu: &Gpu, view_proj: Mat4, eye: Vec3) {
         let globals = Globals {
@@ -945,6 +973,7 @@ impl WorldRenderer {
             lighting: self.lighting,
             ambient: self.ambient,
             eye: [eye.x, eye.y, eye.z, 0.0],
+            fog: self.fog,
             dynamic: self.dynamic,
         };
         gpu.queue
