@@ -18,19 +18,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         std::fs::create_dir_all(dir)?;
     }
+    // This process's own: two games sharing a folder never write into one
+    // part file together.
     let mut part = path.as_os_str().to_os_string();
-    part.push(".part");
+    part.push(format!(".{}.part", std::process::id()));
     let part = std::path::PathBuf::from(part);
     let mut file = std::fs::File::create(&part)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
     // Windows refuses to replace a file another program holds open for a
-    // moment (a virus scanner, a sync client): try again a few times.
+    // moment (a virus scanner, a sync client): access denied (5) or a
+    // sharing violation (32). Try again a few times there; elsewhere a
+    // refusal is final.
+    let busy = |e: &std::io::Error| cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32));
     let mut tries = 0;
     loop {
         match std::fs::rename(&part, path) {
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && tries < 5 => {
+            Err(e) if busy(&e) && tries < 5 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(20 * tries));
             }
@@ -131,7 +136,11 @@ mod tests {
         write_atomic(&path, b"one").unwrap();
         write_atomic(&path, b"two").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
-        assert!(!dir.join("deep").join("cvars.json.part").exists());
+        assert!(
+            !dir.join("deep")
+                .join(format!("cvars.json.{}.part", std::process::id()))
+                .exists()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

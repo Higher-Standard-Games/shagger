@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 use shagger::audio::decode::decode_sound;
 use shagger::audio::music::Playlist;
 use shagger::babylon::maths::math_vector::Vector3;
+use shagger::console::command_registry::parse_input;
+use shagger::core::cvar::{CvarOptions, Cvars};
+use shagger::lighting::map_emissive_surfaces::{SurfaceEmission, extract_emissive_surfaces};
 use shagger::loader::bsp::bsp_loader::{load, load_collision};
 use shagger::loader::bsp::mesh::pvs::build_face_clusters;
 use shagger::loader::bsp::pvs_culler::PvsCuller;
@@ -32,6 +35,7 @@ use shagger::loader::model::gltf_animation::AnimationClip;
 use shagger::loader::model::gltf_model::GltfModel;
 use shagger::loader::model::md3_loader::parse_md3;
 use shagger::loader::pk3::pk3_loader::Pk3Loader;
+use shagger::loader::pk3::published_index::{parse_published_index, pk3_index_hash};
 use shagger::loader::shader::q3_shader_parser::Q3ShaderParser;
 use shagger::loader::texture::decode_image;
 use shagger::loader::texture::ktx1_loader::{ktx1_rgba, parse_ktx1, parse_ktx1_cube_faces};
@@ -140,6 +144,10 @@ fn fuzz_bsp(bytes: &[u8]) {
     if let Ok(bsp) = load(bytes) {
         let _ = build_world_geometry(&bsp, |_, _| Vec::new());
         let _ = build_face_clusters(&bsp);
+        let _ = extract_emissive_surfaces(&bsp, |_| SurfaceEmission {
+            emissive: true,
+            surface_light: 100.0,
+        });
         let culler = PvsCuller::new(&bsp);
         let _ = culler.find_cluster_at_position(glam::Vec3::ZERO);
     }
@@ -202,6 +210,52 @@ fn fuzz_json(bytes: &[u8]) {
     let _ = json::parse(&source);
     let _ = Playlist::parse(&source);
     let _ = LobbyIn::parse(&source);
+}
+
+/// The package index, with a manifest that names its packages and matches
+/// its hash, so the parse gets past the hash check to the records.
+fn fuzz_index(bytes: &[u8]) {
+    let text = text(bytes);
+    let names: Vec<serde_json::Value> = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("packages")?
+                .as_array()
+                .map(|p| p.iter().filter_map(|e| e.get("pk3").cloned()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    let manifest = serde_json::json!({
+        "files": names,
+        "indexHash": pk3_index_hash(&text),
+        "indexFile": format!("pk3_index.{}.json", pk3_index_hash(&text)),
+    });
+    let _ = parse_published_index(&text, &manifest, "/data/");
+    let _ = json::parse(&text);
+}
+
+/// A config file and console lines.
+fn fuzz_config(bytes: &[u8]) {
+    let text = text(bytes);
+    let mut cvars = Cvars::new(None, false);
+    cvars.register("cl_fov", 90, CvarOptions::default().range(60.0, 130.0));
+    cvars.register("s_volume", 0.8, CvarOptions::default().range(0.0, 1.0));
+    cvars.register("name", "Player", CvarOptions::default());
+    cvars.register("r_bloom", true, CvarOptions::default());
+    let _ = cvars.exec_config(&text);
+    let _ = cvars.export_config();
+    for line in text.lines() {
+        let _ = parse_input(line);
+    }
+}
+
+fn config_seeds() -> Vec<Vec<u8>> {
+    [
+        "// settings\ncl_fov 105\ns_volume \"0.5\"\nname \"Ramen \\\"the\\\" Cat\"\nr_bloom 0\nbind w +forward; say \"hi there\"",
+        "seta cl_fov 1e400\nset s_volume -0\nunknown_cvar 12\n# comment\nname",
+    ]
+    .iter()
+    .map(|s| s.as_bytes().to_vec())
+    .collect()
 }
 
 fn fuzz_pk3(bytes: &[u8]) {
@@ -293,9 +347,10 @@ fn seeds(data: &Path) -> Vec<Seed> {
             .unwrap_or_default();
         let Ok(bytes) = std::fs::read(&path) else { continue };
         if name.ends_with(".json") {
+            let index = name == "index.json";
             out.push(Seed {
-                target: "json",
-                run: fuzz_json,
+                target: if index { "index" } else { "json" },
+                run: if index { fuzz_index } else { fuzz_json },
                 name,
                 bytes,
             });
@@ -346,6 +401,14 @@ fn seeds(data: &Path) -> Vec<Seed> {
                 });
             }
         }
+    }
+    for (i, bytes) in config_seeds().into_iter().enumerate() {
+        out.push(Seed {
+            target: "config",
+            run: fuzz_config,
+            name: format!("config#{i}"),
+            bytes,
+        });
     }
     for (i, bytes) in net_seeds().into_iter().enumerate() {
         out.push(Seed {
@@ -491,6 +554,8 @@ fn fuzz_replay() {
     let run: Target = match target.as_str() {
         "pk3" => fuzz_pk3,
         "net" => fuzz_net,
+        "index" => fuzz_index,
+        "config" => fuzz_config,
         other => target_for(&format!("x.{other}")).expect("a target").1,
     };
     let started = Instant::now();

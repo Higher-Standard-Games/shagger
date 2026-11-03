@@ -474,6 +474,15 @@ impl MusicPlayer {
             let handle = std::thread::Builder::new()
                 .name("music".into())
                 .spawn(move || {
+                    // However the thread ends, a panic in the decoder
+                    // included, the player hears of it and moves on.
+                    struct Ended(Arc<AtomicBool>);
+                    impl Drop for Ended {
+                        fn drop(&mut self) {
+                            self.0.store(true, Ordering::Release);
+                        }
+                    }
+                    let _ended = Ended(thread_ended.clone());
                     let mut decoded = false;
                     while !thread_stop.load(Ordering::Acquire) {
                         if !decoded {

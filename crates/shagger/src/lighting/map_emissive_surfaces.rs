@@ -67,8 +67,8 @@ pub fn extract_emissive_surfaces(bsp: &BspFile, resolve: impl Fn(&str) -> Surfac
         let mut min = DVec3::INFINITY;
         let mut max = DVec3::NEG_INFINITY;
         let mut count = 0;
-        for v in face.first_vertex..face.first_vertex + face.num_vertices {
-            let Some(p) = usize::try_from(v).ok().and_then(|v| bsp.vertices.position(v)) else {
+        for v in record_range(face.first_vertex, face.num_vertices, bsp.vertices.len()) {
+            let Some(p) = bsp.vertices.position(v) else {
                 continue;
             };
             let b = DVec3::new(f64::from(p[0]), f64::from(p[2]), f64::from(p[1]));

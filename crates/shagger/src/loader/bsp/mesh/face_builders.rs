@@ -31,7 +31,12 @@ pub fn build_polygon_face(bsp: &BspFile, face: &BspFace) -> Option<FaceGeometry>
         g.uv2s.extend(get_vertex_lightmap_coord(v));
         g.colors.extend(get_vertex_color(v));
     }
-    let mut raw = Vec::with_capacity(usize::try_from(face.num_mesh_verts.max(0)).unwrap_or(0));
+    // At most what the file holds: a damaged count reserves no gigabytes.
+    let mut raw = Vec::with_capacity(
+        usize::try_from(face.num_mesh_verts.max(0))
+            .unwrap_or(0)
+            .min(bsp.mesh_verts.len()),
+    );
     for i in 0..i64::from(face.num_mesh_verts.max(0)) {
         let at = usize::try_from(i64::from(face.first_mesh_vert) + i).ok()?;
         raw.push(u32::try_from(*bsp.mesh_verts.get(at)?).ok()?);
@@ -76,7 +81,7 @@ pub fn build_patch_face(bsp: &BspFile, face: &BspFace) -> Option<FaceGeometry> {
         return Some(g);
     }
     let (width, height) = (width as usize, height as usize);
-    let mut control = Vec::with_capacity(width * height);
+    let mut control = Vec::with_capacity(width.saturating_mul(height).min(bsp.vertices.len()));
     for row in 0..height {
         for col in 0..width {
             control.push(vertex(bsp, i64::from(face.first_vertex) + (row * width + col) as i64)?);

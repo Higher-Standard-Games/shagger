@@ -126,7 +126,10 @@ impl Device {
                     return;
                 }
             }
-            Command::StopAll => self.pending.retain(|c| voice(c).is_none()),
+            Command::StopAll => {
+                self.pending
+                    .retain(|c| voice(c).is_none() && !matches!(c, Command::StopAll));
+            }
             _ => {}
         }
         // Past the cap only volume changes give way; a stream or a stop is

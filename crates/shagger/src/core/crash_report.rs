@@ -86,8 +86,24 @@ pub fn install(program: &'static str, version: &'static str, dir: PathBuf) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let text = report(program, version, info, &Backtrace::force_capture());
+        let thread = std::thread::current();
+        let main = thread.name() == Some("main");
         if let Some(path) = write_report(&dir, &text) {
-            eprintln!("{program} crashed; the report is in {}", path.display());
+            if main {
+                eprintln!("{program} crashed; the report is in {}", path.display());
+            } else {
+                // A worker's panic ends that worker, not the game.
+                eprintln!(
+                    "{program}: thread {} failed; the report is in {}",
+                    thread.name().unwrap_or("unnamed"),
+                    path.display()
+                );
+            }
+        }
+        // The settings still on their way to disk land before the game
+        // ends (the writer itself cannot wait for itself).
+        if main {
+            crate::core::atomic_file::flush_pending(std::time::Duration::from_secs(1));
         }
         default(info);
     }));

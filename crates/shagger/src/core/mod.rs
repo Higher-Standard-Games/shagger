@@ -3,3 +3,4 @@
 pub mod atomic_file;
 pub mod crash_report;
 pub mod cvar;
+pub mod join;

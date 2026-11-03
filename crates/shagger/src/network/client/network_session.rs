@@ -111,6 +111,8 @@ impl<E: Send + 'static> NetworkSession<E> {
                     .expect("network runtime");
                 let reason = runtime.block_on(run(config, codec, request_rx, &event_tx));
                 let _ = event_tx.send(SessionEvent::Closed(reason));
+                // Not waiting for a lookup still running on the blocking pool.
+                runtime.shutdown_background();
             })
             .expect("network thread");
         Self {
@@ -139,8 +141,10 @@ impl<E: Send + 'static> NetworkSession<E> {
 impl<E> Drop for NetworkSession<E> {
     fn drop(&mut self) {
         let _ = self.requests.send(SessionRequest::Disconnect);
+        // A worker stuck in a name lookup is left to end on its own rather
+        // than freezing the game thread (`core::join`).
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            crate::core::join::join_within(thread, std::time::Duration::from_millis(1500));
         }
     }
 }

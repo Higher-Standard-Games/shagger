@@ -104,6 +104,8 @@ struct TraceState {
     content_mask: i32,
     face_index: usize,
     result: TraceResultQ3,
+    /// How deep `trace_node` has gone.
+    depth: u32,
 }
 
 /// Lift data a trace reads: the definitions and current offsets.
@@ -599,6 +601,7 @@ impl SweepCollisionBackend {
             extents: std::array::from_fn(|i| js_max(mins[i].abs(), maxs[i].abs())),
             content_mask,
             face_index: 0,
+            depth: 0,
             result: TraceResultQ3 {
                 fraction: 1.0,
                 end_pos: q3_end,
@@ -698,7 +701,28 @@ impl SweepCollisionBackend {
         }
     }
 
+    /// Not in SHAG: a damaged tree can be a chain of every node, each the
+    /// next's parent; recursing that deep would overflow the stack (SHAG
+    /// throws a `RangeError`). A compiled map is a few dozen deep.
     fn trace_node(
+        &mut self,
+        node_index: i32,
+        start_fraction: f64,
+        end_fraction: f64,
+        start: [f64; 3],
+        end: [f64; 3],
+        state: &mut TraceState,
+    ) {
+        const MAX_DEPTH: u32 = 1024;
+        if state.depth >= MAX_DEPTH {
+            return;
+        }
+        state.depth += 1;
+        self.trace_node_within(node_index, start_fraction, end_fraction, start, end, state);
+        state.depth -= 1;
+    }
+
+    fn trace_node_within(
         &mut self,
         node_index: i32,
         start_fraction: f64,
