@@ -47,13 +47,23 @@ pub fn report(program: &str, version: &str, info: &PanicHookInfo<'_>, backtrace:
 pub fn write_report(dir: &Path, text: &str) -> Option<PathBuf> {
     fs::create_dir_all(dir).ok()?;
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let mut path = dir.join(format!("crash-{seconds}.txt"));
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("crash-{seconds}-{n}.txt"));
-        n += 1;
-    }
-    fs::write(&path, text).ok()?;
+    // `create_new`, so two reports in the same second never share a file.
+    let mut n = 0;
+    let path = loop {
+        let path = if n == 0 {
+            dir.join(format!("crash-{seconds}.txt"))
+        } else {
+            dir.join(format!("crash-{seconds}-{n}.txt"))
+        };
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
+                break path;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 1000 => n += 1,
+            Err(_) => return None,
+        }
+    };
     let mut reports: Vec<(SystemTime, PathBuf)> = fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)

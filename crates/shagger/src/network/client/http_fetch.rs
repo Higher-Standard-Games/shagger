@@ -22,6 +22,8 @@ pub enum FetchError {
     /// The whole transfer passed the total deadline.
     TooLong,
     Cancelled,
+    /// The body is longer than the caller allows; trying again will not help.
+    TooLarge,
     /// Could not connect, or the transfer broke.
     Network(String),
 }
@@ -124,7 +126,7 @@ const MAX_RESERVE: u64 = 64 * 1024 * 1024;
 /// the index gives) as soon as it passes it.
 ///
 /// # Errors
-/// Any [`FetchError`]; a body over `max` is [`FetchError::Network`].
+/// Any [`FetchError`]; a body over `max` is [`FetchError::TooLarge`].
 pub fn fetch_at_most(
     url: &str,
     idle: Duration,
@@ -159,7 +161,7 @@ pub fn fetch_at_most(
         }
         let length = response.content_length();
         if length.is_some_and(|l| too_long(usize::try_from(l).unwrap_or(usize::MAX))) {
-            return Err(FetchError::Network("the body is longer than expected".into()));
+            return Err(FetchError::TooLarge);
         }
         let reserve = length.unwrap_or(0).min(max.unwrap_or(MAX_RESERVE)).min(MAX_RESERVE);
         let mut data = Vec::with_capacity(usize::try_from(reserve).unwrap_or(0));
@@ -171,28 +173,16 @@ pub fn fetch_at_most(
             let wait = deadline.min(tokio::time::Instant::now() + Duration::from_secs(1));
             match tokio::time::timeout_at(wait, response.chunk()).await {
                 Err(_) if over() => return Err(FetchError::TooLong),
-                Err(_) => {
-                    // No chunk this second: the read timeout decides stalls.
-                    if cancel.load(Ordering::Relaxed) {
-                        return Err(FetchError::Cancelled);
-                    }
-                    let chunk = tokio::time::timeout_at(deadline, response.chunk())
-                        .await
-                        .map_err(|_| FetchError::TooLong)?
-                        .map_err(|e| classify(&e, over()))?;
-                    let Some(chunk) = chunk else { break };
-                    data.extend_from_slice(&chunk);
-                    if too_long(data.len()) {
-                        return Err(FetchError::Network("the body is longer than expected".into()));
-                    }
-                }
+                // No chunk this second: look at cancelling again. The body keeps
+                // its read timeout across waits, so stalls are still caught.
+                Err(_) => continue,
                 Ok(chunk) => {
                     let Some(chunk) = chunk.map_err(|e| classify(&e, over()))? else {
                         break;
                     };
                     data.extend_from_slice(&chunk);
                     if too_long(data.len()) {
-                        return Err(FetchError::Network("the body is longer than expected".into()));
+                        return Err(FetchError::TooLarge);
                     }
                 }
             }
