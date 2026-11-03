@@ -57,6 +57,11 @@ Ported files, with the Babylon.js source each came from and its version:
     and helperFunctions.fx, Babylon.js 9.31.2: exposure, the vignette, gamma
     and contrast from an HDR target, rewritten in WGSL.
 
+  meshes/trail_mesh.rs
+    from packages/dev/core/src/Meshes/trailMesh.ts (TrailMesh), Babylon.js
+    9.31.2: the tube of rings and its per-frame update, as SHAG's ragdolls
+    trail one behind the hips.
+
   physics/v2/ragdoll.rs
     from packages/dev/core/src/Physics/v2/ragdoll.ts (Ragdoll), Babylon.js
     9.31.2: the boxes, their joints and the bone sync, on rapier3d bodies

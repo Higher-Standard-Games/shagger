@@ -6,4 +6,5 @@
 pub mod ico_sphere_builder;
 pub mod mesh_builder;
 pub mod ribbon_builder;
+pub mod trail_mesh;
 pub mod vertex_data;

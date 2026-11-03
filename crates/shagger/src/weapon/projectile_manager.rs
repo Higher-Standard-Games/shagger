@@ -424,10 +424,27 @@ fn upload_trail(
     ribbons: &[VertexData],
     light_color: Option<Vec3>,
 ) -> ModelHandle {
-    let primitives = ribbons
+    let parts: Vec<(&str, &VertexData)> = ribbons
         .iter()
         .enumerate()
-        .map(|(i, data)| {
+        .map(|(i, data)| (if i == 0 { "trail" } else { "trailCross" }, data))
+        .collect();
+    upload_standard_mesh(gpu, models, &parts, trail_material(light_color))
+}
+
+/// Uploads Babylon vertex data as one model, a primitive per part, all
+/// drawn with one StandardMaterial; Babylon's counter-clockwise front is
+/// turned to the renderer's clockwise one.
+pub fn upload_standard_mesh(
+    gpu: &Gpu,
+    models: &mut ModelRenderer,
+    parts: &[(&str, &VertexData)],
+    material: StandardMaterialParams,
+) -> ModelHandle {
+    let primitives = parts
+        .iter()
+        .enumerate()
+        .map(|(i, (name, data))| {
             let positions: Vec<[f32; 3]> = data
                 .positions
                 .as_chunks::<3>()
@@ -436,7 +453,7 @@ fn upload_trail(
                 .map(|p| [p[0], p[1], p[2]])
                 .collect();
             ModelPrimitive {
-                name: if i == 0 { "trail" } else { "trailCross" }.to_owned(),
+                name: (*name).to_owned(),
                 node: 0,
                 node_scale: Vec3::ONE,
                 node_matrix: Mat4::IDENTITY,
@@ -450,8 +467,6 @@ fn upload_trail(
                     .map(|n| [n[0], n[1], n[2]])
                     .collect(),
                 uvs: data.uvs.as_chunks::<2>().0.iter().map(|t| [t[0], t[1]]).collect(),
-                // Babylon's counter-clockwise front, turned to the renderer's
-                // clockwise one.
                 indices: data
                     .indices
                     .as_chunks::<3>()
@@ -468,7 +483,7 @@ fn upload_trail(
     let model = GltfModel {
         primitives,
         materials: vec![ModelMaterial {
-            name: "trail".to_owned(),
+            name: parts.first().map_or("mesh", |p| p.0).to_owned(),
             base_color: [1.0; 4],
             base_color_image: None,
             metallic: 0.0,
@@ -485,8 +500,21 @@ fn upload_trail(
         attachment_points: Default::default(),
         skeleton: Skeleton::default(),
     };
-    let material = trail_material(light_color);
     models.upload(gpu, &model, |_| ModelMaterialMode::Standard(material))
+}
+
+/// Streams new vertex data into an uploaded primitive (same vertex count).
+pub fn update_standard_mesh(
+    gpu: &Gpu,
+    models: &mut ModelRenderer,
+    model: ModelHandle,
+    primitive: usize,
+    data: &VertexData,
+) {
+    let positions: Vec<[f32; 3]> = data.positions.as_chunks::<3>().0.to_vec();
+    let normals: Vec<[f32; 3]> = data.normals.as_chunks::<3>().0.to_vec();
+    let uvs: Vec<[f32; 2]> = data.uvs.as_chunks::<2>().0.to_vec();
+    models.update_vertices(gpu, model, primitive, &positions, &normals, &uvs);
 }
 
 #[cfg(test)]
