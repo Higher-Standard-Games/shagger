@@ -58,7 +58,8 @@ struct Draw {
     outline: vec4f,
     // x: the draw's first joint in the palette.
     skin: vec4u,
-    // StandardMaterial only: emissive override, texture matrix and level.
+    // Emissive: a StandardMaterial's override, added to a lit material's
+    // light. Texture matrix and level: StandardMaterial only.
     emissive: vec4f,
     uv_rows: vec4f,
     uv_origin: vec4f,
@@ -237,6 +238,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light_color;
         }
         color = diffuse * albedo * (1.0 - material.params.x) + specular;
+    }
+    // A draw's emissive (a powerup glow), added as PBR adds its own.
+    if draw.emissive.w > 0.5 {
+        color += draw.emissive.rgb;
     }
     // Image processing runs as a post-process (`applyByPostProcess`), so the
     // output stays linear: pbr.fragment's clamp to 30 for the HDR target.

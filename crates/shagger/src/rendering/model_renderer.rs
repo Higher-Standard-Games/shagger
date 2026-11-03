@@ -85,8 +85,8 @@ pub enum ModelLight {
     },
 }
 
-/// An uploaded model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An uploaded model (the default is the first, for tests).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ModelHandle(usize);
 
 /// Babylon's mesh outline (`renderOutline`, `outlineColor`, `outlineWidth`).
@@ -105,7 +105,8 @@ pub struct ModelDraw {
     pub world: Mat4,
     /// Replaces the material's albedo colour.
     pub tint: Option<Vec3>,
-    /// Replaces a standard material's emissive colour (a pulse).
+    /// Replaces a standard material's emissive colour (a pulse), or is
+    /// added to a lit material's light (a powerup glow).
     pub emissive: Option<Vec3>,
     /// Replaces a standard material's alpha (a fade); the material must
     /// already blend.
