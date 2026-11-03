@@ -24,6 +24,7 @@ pub mod network;
 pub mod physics;
 pub mod rendering;
 pub mod ui;
+pub mod viewport;
 pub mod weapon;
 pub mod world;
 
