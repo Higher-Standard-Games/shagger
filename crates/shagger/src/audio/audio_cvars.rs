@@ -53,7 +53,11 @@ pub fn apply_audio_cvars(
     fetch: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
 ) {
     sfx.set_volume(cvars.get_number("s_sfxvolume") as f32);
-    sfx.set_loops_muted(!cvars.get_bool("s_sfxenabled"));
+    // `sfxEnabled`: off, no effect plays (`playSfx*` return) and the loops
+    // fall silent.
+    let enabled = cvars.get_bool("s_sfxenabled");
+    sfx.set_muted(!enabled);
+    sfx.set_loops_muted(!enabled);
     for (name, channel, _) in CHANNEL_CVARS {
         sfx.set_channel_volume(channel, cvars.get_number(name) as f32);
     }

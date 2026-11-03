@@ -63,6 +63,13 @@ impl Default for InputSystem {
 }
 
 impl InputSystem {
+    /// The folder `synced-storage.json` is kept in, which the settings sync
+    /// must share so the bindings it brings down are the ones read.
+    #[must_use]
+    pub fn storage(&self) -> Option<&std::path::Path> {
+        self.storage.as_deref()
+    }
+
     /// An input system saving its bindings in `storage`, with nothing registered.
     #[must_use]
     pub fn new(storage: Option<PathBuf>) -> Self {

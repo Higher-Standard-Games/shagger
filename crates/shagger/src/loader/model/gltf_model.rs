@@ -402,6 +402,12 @@ impl GltfModel {
                     (None, Some(a)) => glb.read_uints(a)?,
                     (None, None) => (0..positions.len() as u32).collect(),
                 };
+                // A truncated or odd file: an index past the vertices would
+                // draw garbage (or panic in anything that reads them back),
+                // so the primitive is left out.
+                if indices.iter().any(|&i| i as usize >= positions.len()) || normals.len() != positions.len() {
+                    continue;
+                }
                 let mut node_matrix = globals[node_index];
                 let mut kept_skin = None;
                 if let (Some(skin_index), Some((4, joint_ids)), Some((4, weights))) =
@@ -428,11 +434,12 @@ impl GltfModel {
                     } else {
                         kept_skin = Some(PrimitiveSkin {
                             skin: skin_index,
+                            // A joint past the skin's reads as its root.
                             joints: joint_ids
                                 .as_chunks::<4>()
                                 .0
                                 .iter()
-                                .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32])
+                                .map(|c| c.map(|j| if (j as usize) < joints.len() { j as u32 } else { 0 }))
                                 .collect(),
                             weights: weights
                                 .as_chunks::<4>()

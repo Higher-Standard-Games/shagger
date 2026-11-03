@@ -39,6 +39,11 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| GpuError(format!("no GPU device: {e}")))?;
+        // wgpu's default panics on any validation error; one bad resource
+        // from a package should cost that resource, not the game.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            eprintln!("gpu: {e}");
+        }));
         Ok(Self {
             instance,
             adapter,

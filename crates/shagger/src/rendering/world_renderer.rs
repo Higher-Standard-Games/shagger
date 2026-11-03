@@ -287,7 +287,40 @@ fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
     levels
 }
 
+/// `image` as the device can take it: larger than its biggest texture,
+/// scaled down to fit (Babylon would fail that one texture); empty or cut
+/// short, one white texel.
+fn fit_to_device(gpu: &Gpu, image: &Rgba8Image) -> Option<Rgba8Image> {
+    let whole =
+        image.width > 0 && image.height > 0 && image.pixels.len() == image.width as usize * image.height as usize * 4;
+    if !whole {
+        return Some(Rgba8Image {
+            width: 1,
+            height: 1,
+            pixels: vec![255; 4],
+        });
+    }
+    let max = gpu.device.limits().max_texture_dimension_2d.max(1);
+    if image.width <= max && image.height <= max {
+        return None;
+    }
+    let scale = f64::from(max) / f64::from(image.width.max(image.height));
+    let (w, h) = (
+        ((f64::from(image.width) * scale) as u32).clamp(1, max),
+        ((f64::from(image.height) * scale) as u32).clamp(1, max),
+    );
+    let source = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())?;
+    let scaled = image::imageops::resize(&source, w, h, image::imageops::FilterType::Triangle);
+    Some(Rgba8Image {
+        width: w,
+        height: h,
+        pixels: scaled.into_raw(),
+    })
+}
+
 pub(crate) fn upload_texture(gpu: &Gpu, label: &str, image: &Rgba8Image) -> wgpu::Texture {
+    let fitted = fit_to_device(gpu, image);
+    let image = fitted.as_ref().unwrap_or(image);
     let levels = mip_chain(image);
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),

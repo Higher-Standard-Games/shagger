@@ -614,11 +614,9 @@ impl Cvars {
     fn save_to_storage(&self) {
         let Some(path) = &self.storage else { return };
         let text = Value::Object(self.persisted()).to_string();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // A failed write keeps the values for this run, as the browser does.
-        let _ = std::fs::write(path, text);
+        // A failed write keeps the values for this run, as the browser does;
+        // a crash mid write keeps the last whole file.
+        let _ = crate::core::atomic_file::write_atomic(path, text.as_bytes());
     }
 
     // ── Batch ──

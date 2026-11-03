@@ -160,10 +160,7 @@ fn read_json(path: &Path) -> Option<Value> {
 }
 
 fn write_text(path: &Path, text: &str) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, text);
+    let _ = crate::core::atomic_file::write_atomic(path, text.as_bytes());
 }
 
 /// The synced storage entries kept in `dir`.
@@ -416,6 +413,15 @@ impl SettingsSync {
         if self.state.as_ref().map(|s| s.synced.as_str()) != Some(text.as_str()) {
             self.upload(client, text);
         }
+    }
+
+    /// An upload is waiting for the lobby's `settings:saved`. A client that
+    /// disconnects before it arrives keeps the old `syncedAt`, and the next
+    /// login then takes the account's copy over edits made since; so the
+    /// way out waits for it ([`Self::flush`], then this, briefly).
+    #[must_use]
+    pub fn awaiting_save(&self) -> bool {
+        self.save_request.is_some()
     }
 }
 

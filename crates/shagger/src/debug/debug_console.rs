@@ -116,10 +116,8 @@ impl DebugConsole {
         self.history.insert(0, command.to_owned());
         self.history.truncate(MAX_HISTORY);
         if let Some(file) = &self.history_file {
-            if let Some(dir) = file.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(file, serde_json::to_string(&self.history).unwrap_or_default());
+            let text = serde_json::to_string(&self.history).unwrap_or_default();
+            let _ = crate::core::atomic_file::write_atomic(file, text.as_bytes());
         }
     }
 

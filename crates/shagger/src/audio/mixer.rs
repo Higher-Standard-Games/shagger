@@ -172,6 +172,8 @@ impl Voice {
 
 /// Music streams at once (a track and the one fading out).
 const MAX_STREAMS: usize = 4;
+/// Stream queues waiting to be freed off the audio thread.
+const RETIRED: usize = 16;
 
 #[derive(Debug)]
 struct StreamVoice {
@@ -185,6 +187,7 @@ pub struct Mixer {
     ramp_frames: f32,
     voices: Vec<Voice>,
     streams: Vec<StreamVoice>,
+    retired: Vec<rtrb::Consumer<f32>>,
     /// sfx, then the four channels, then music.
     sfx: Ramp,
     buses: [Ramp; 5],
@@ -202,6 +205,7 @@ impl Mixer {
             ramp_frames: (PARAMETER_RAMP_SECONDS * f64::from(sample_rate)) as f32,
             voices: Vec::with_capacity(MAX_VOICES),
             streams: Vec::with_capacity(MAX_STREAMS),
+            retired: Vec::with_capacity(RETIRED),
             sfx: Ramp::new(1.0),
             buses: [Ramp::new(1.0); 5],
             bus_gains: [[0.0; RENDER_QUANTUM]; 5],
@@ -232,6 +236,19 @@ impl Mixer {
         self.voices.iter().any(|v| v.id == id) || self.streams.iter().any(|v| v.id == id)
     }
 
+    /// Keeps a finished stream's queue for [`Self::take_retired`]: dropping
+    /// it here would free its buffer on the audio thread.
+    fn retire(&mut self, samples: rtrb::Consumer<f32>) {
+        if self.retired.len() < RETIRED {
+            self.retired.push(samples);
+        }
+    }
+
+    /// A stream queue the mixer is done with, to drop off the audio thread.
+    pub fn take_retired(&mut self) -> Option<rtrb::Consumer<f32>> {
+        self.retired.pop()
+    }
+
     pub fn apply(&mut self, command: Command) {
         match command {
             Command::Play(play) => self.play(play),
@@ -242,11 +259,16 @@ impl Mixer {
                         samples,
                         gain: Ramp::new(volume.max(0.0)),
                     });
+                } else {
+                    self.retire(samples);
                 }
             }
             Command::Stop(id) => {
                 self.voices.retain(|v| v.id != id);
-                self.streams.retain(|v| v.id != id);
+                if let Some(at) = self.streams.iter().position(|v| v.id == id) {
+                    let stream = self.streams.remove(at);
+                    self.retire(stream.samples);
+                }
             }
             Command::SetVoiceVolume(id, volume) => {
                 let frames = self.ramp_frames;
@@ -513,6 +535,11 @@ mod tests {
         assert!(mixer.is_playing(9));
         mixer.apply(Command::Stop(9));
         assert!(!mixer.is_playing(9));
+        // Its queue waits to be freed off the audio thread; the producer
+        // still sees it until then.
+        assert!(!producer.is_abandoned());
+        drop(mixer.take_retired().unwrap());
+        assert!(producer.is_abandoned());
     }
 
     #[test]

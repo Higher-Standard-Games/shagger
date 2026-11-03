@@ -37,7 +37,10 @@ pub fn build_polygon_face(bsp: &BspFile, face: &BspFace) -> Option<FaceGeometry>
         raw.push(u32::try_from(*bsp.mesh_verts.get(at)?).ok()?);
     }
     // `for (i = 0; i < raw.length; i += 3)` reads past a partial triangle.
-    if raw.len() % 3 != 0 {
+    // An index past the face's own vertices would draw another face's (or
+    // none, and the tangents would index out of range): the face is dropped.
+    let count = u32::try_from(face.num_vertices.max(0)).unwrap_or(0);
+    if raw.len() % 3 != 0 || raw.iter().any(|&i| i >= count) {
         return None;
     }
     for t in raw.as_chunks::<3>().0.iter() {

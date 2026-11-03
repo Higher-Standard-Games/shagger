@@ -8,10 +8,11 @@
 //! mixer that [`AudioV2Sfx::render`] pulls from (tests, the parity harness,
 //! `--audio-out`). There is no unlock, epoch or async loading to track.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use glam::DVec3;
 
@@ -50,8 +51,88 @@ pub struct SfxPlayOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SfxLoop(VoiceId);
 
+/// How often a missing or lost sound card is looked for again.
+const REOPEN_EVERY: Duration = Duration::from_secs(2);
+/// Commands held for a device that cannot take them; past it, the oldest
+/// volume changes go first.
+const PENDING_MAX: usize = 4096;
+/// The rate sounds are decoded at when there is no device to ask.
+const FALLBACK_RATE: u32 = 48_000;
+
+/// The sound card, or the wait for one.
+struct Device {
+    output: Option<DeviceOutput>,
+    /// The rate the sounds were decoded at; a new device is opened at it.
+    rate: u32,
+    reopen_at: Instant,
+    /// What must still reach the mixer (streams, stops, volumes) when the
+    /// queue was full or there was no device. A one-shot that cannot play
+    /// now is dropped instead: late, it would be wrong.
+    pending: VecDeque<Command>,
+}
+
+/// Commands that change what plays from now on, which a full queue must
+/// not lose.
+fn must_arrive(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Play(Play { looped: false, .. }) | Command::SetListener(_)
+    )
+}
+
+impl Device {
+    fn hold(&mut self, command: Command) {
+        // A newer volume for the same voice replaces the one waiting.
+        if let Command::SetVoiceVolume(id, _) = &command
+            && let Some(at) = self
+                .pending
+                .iter()
+                .position(|c| matches!(c, Command::SetVoiceVolume(other, _) if other == id))
+        {
+            self.pending[at] = command;
+            return;
+        }
+        if self.pending.len() >= PENDING_MAX
+            && let Some(at) = self
+                .pending
+                .iter()
+                .position(|c| matches!(c, Command::SetVoiceVolume(..)))
+        {
+            self.pending.remove(at);
+        }
+        if self.pending.len() < PENDING_MAX {
+            self.pending.push_back(command);
+        }
+    }
+
+    /// Sends what waits, in order, until the queue is full again.
+    fn flush(&mut self) {
+        let Some(output) = &mut self.output else { return };
+        while let Some(command) = self.pending.pop_front() {
+            if let Err(back) = output.send(command) {
+                self.pending.push_front(back);
+                return;
+            }
+        }
+    }
+
+    fn send(&mut self, command: Command) {
+        self.flush();
+        let back = match &mut self.output {
+            Some(output) if self.pending.is_empty() => match output.send(command) {
+                Ok(()) => return,
+                Err(back) => back,
+            },
+            _ => command,
+        };
+        if must_arrive(&back) {
+            self.hold(back);
+        }
+    }
+}
+
 enum Output {
-    Device(DeviceOutput),
+    Device(Box<Device>),
     Offline(Box<Mixer>),
 }
 
@@ -81,8 +162,85 @@ fn hash(text: &str) -> u64 {
 
 impl AudioV2Sfx {
     /// The sound card's default output.
+    ///
+    /// # Errors
+    /// No device would open.
     pub fn open_device() -> Result<Self, String> {
-        Ok(Self::with_output(Output::Device(DeviceOutput::open()?)))
+        let output = DeviceOutput::open(None)?;
+        Ok(Self::with_output(Output::Device(Box::new(Device {
+            rate: output.sample_rate(),
+            output: Some(output),
+            reopen_at: Instant::now(),
+            pending: VecDeque::new(),
+        }))))
+    }
+
+    /// The sound card's default output, or silence until one appears (the
+    /// game looks for it every two seconds, from [`Self::maintain`]).
+    #[must_use]
+    pub fn open_device_or_wait() -> Self {
+        Self::open_device().unwrap_or_else(|why| {
+            println!("audio: {why}; looking again every {} s", REOPEN_EVERY.as_secs());
+            Self::with_output(Output::Device(Box::new(Device {
+                output: None,
+                rate: FALLBACK_RATE,
+                reopen_at: Instant::now() + REOPEN_EVERY,
+                pending: VecDeque::new(),
+            })))
+        })
+    }
+
+    /// Whether a sound card is playing now.
+    #[must_use]
+    pub fn has_device(&self) -> bool {
+        match &self.output {
+            Output::Device(d) => d.output.is_some(),
+            Output::Offline(_) => false,
+        }
+    }
+
+    /// Once a frame: frees what the mixer finished with, and replaces a
+    /// device that died (unplugged, the server gone) or never opened, then
+    /// gives it the volumes and whatever waited for it.
+    pub fn maintain(&mut self) {
+        let Output::Device(device) = &mut self.output else {
+            return;
+        };
+        if let Some(output) = &mut device.output {
+            output.collect_garbage();
+            if output.lost() {
+                println!("audio: the output device is gone; looking for another");
+                device.output = None;
+                device.reopen_at = Instant::now();
+            }
+        }
+        if device.output.is_none() && Instant::now() >= device.reopen_at {
+            match DeviceOutput::open(Some(device.rate)) {
+                Ok(output) => {
+                    if output.sample_rate() != device.rate {
+                        println!(
+                            "audio: the new device plays {} Hz, not {} Hz; sounds will be off pitch",
+                            output.sample_rate(),
+                            device.rate
+                        );
+                    }
+                    device.output = Some(output);
+                    // The new mixer knows nothing: the volumes go first.
+                    let gain = if self.muted { 0.0 } else { self.volume };
+                    let mut state = vec![Command::SetSfxGain(gain)];
+                    for channel in SfxChannel::ALL {
+                        state.push(Command::SetChannelGain(channel, self.channel_volumes[channel as usize]));
+                    }
+                    for command in state.into_iter().rev() {
+                        device.pending.push_front(command);
+                    }
+                    device.flush();
+                }
+                Err(_) => device.reopen_at = Instant::now() + REOPEN_EVERY,
+            }
+        } else {
+            device.flush();
+        }
     }
 
     /// A mixer at `sample_rate` that [`Self::render`] pulls from.
@@ -107,7 +265,7 @@ impl AudioV2Sfx {
     #[must_use]
     pub fn sample_rate(&self) -> u32 {
         match &self.output {
-            Output::Device(d) => d.sample_rate(),
+            Output::Device(d) => d.rate,
             Output::Offline(m) => m.sample_rate(),
         }
     }
@@ -115,7 +273,10 @@ impl AudioV2Sfx {
     fn send(&mut self, command: Command) {
         match &mut self.output {
             Output::Device(d) => d.send(command),
-            Output::Offline(m) => m.apply(command),
+            Output::Offline(m) => {
+                m.apply(command);
+                while m.take_retired().is_some() {}
+            }
         }
     }
 
@@ -162,7 +323,15 @@ impl AudioV2Sfx {
     /// The listener, from the eye each frame (`syncListener`): `look` is
     /// where the camera faces in game space.
     pub fn set_listener(&mut self, position: DVec3, look: DVec3, up: DVec3) {
-        self.send(Command::SetListener(Listener::from_camera(position, look, up)));
+        let listener = Listener::from_camera(position, look, up);
+        match &mut self.output {
+            Output::Device(d) => {
+                if let Some(output) = &mut d.output {
+                    output.set_listener(listener);
+                }
+            }
+            Output::Offline(m) => m.apply(Command::SetListener(listener)),
+        }
     }
 
     /// `preload`: decodes each path not yet loaded, trying the sound
@@ -369,5 +538,40 @@ mod tests {
         assert_eq!(sfx.offline_mixer().unwrap().voice_count(), 0);
         sfx.set_muted(true);
         assert!(!sfx.play_2d("sounds/misc/hit_0.wav", &SfxPlayOptions::default()));
+    }
+
+    #[test]
+    fn without_a_device_what_must_arrive_waits_and_one_shots_do_not() {
+        let mut device = Device {
+            output: None,
+            rate: FALLBACK_RATE,
+            reopen_at: Instant::now(),
+            pending: VecDeque::new(),
+        };
+        let buffer = Arc::new(decode_sound(&wav(), 48000).unwrap());
+        device.send(Command::Play(Play {
+            id: 1,
+            buffer,
+            route: Route::Sfx(SfxChannel::Effects),
+            volume: 1.0,
+            looped: false,
+            spatial: None,
+            slot: None,
+            instances: None,
+        }));
+        assert!(device.pending.is_empty());
+        let (_producer, consumer) = rtrb::RingBuffer::<f32>::new(8);
+        device.send(Command::PlayStream {
+            id: 2,
+            samples: consumer,
+            volume: 0.0,
+        });
+        // A fade's steps collapse into the newest.
+        for step in 1..=10 {
+            device.send(Command::SetVoiceVolume(2, step as f32 / 10.0));
+        }
+        device.send(Command::Stop(3));
+        assert_eq!(device.pending.len(), 3);
+        assert!(matches!(device.pending[1], Command::SetVoiceVolume(2, v) if v == 1.0));
     }
 }

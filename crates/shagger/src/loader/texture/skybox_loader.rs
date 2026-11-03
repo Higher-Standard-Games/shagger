@@ -278,15 +278,22 @@ pub struct SkyboxFaces {
 /// The extensions `loadSkyboxFace` tries, in order.
 const FACE_EXTENSIONS: [&str; 6] = [PACKAGED_TEXTURE_EXTENSION, ".ktx", ".tga", ".jpg", ".png", ".jpeg"];
 
+/// A face a cube can take: square, not empty, its data all there. WebGL
+/// refuses the upload of any other and the sky is missing; here it is
+/// passed over for the next candidate.
+fn is_square(face: &RgbaFace) -> bool {
+    face.size > 0 && face.data.len() == face.size as usize * face.size as usize * 4
+}
+
 /// `loadSkyboxFace`: the first file under either prefix and any extension
-/// that decodes.
+/// that decodes (and is square).
 #[must_use]
 pub fn load_skybox_face(pk3: &mut Pk3Loader, base_path: &str, suffix: &str) -> Option<(RgbaFace, String)> {
     for prefix in ["", "textures/"] {
         for ext in FACE_EXTENSIONS {
             let path = format!("{prefix}{base_path}{suffix}{ext}");
             let Some(bytes) = pk3.get_file(&path) else { continue };
-            if let Some(rgba) = parse_image_to_rgba(&bytes, ext) {
+            if let Some(rgba) = parse_image_to_rgba(&bytes, ext).filter(is_square) {
                 return Some((rgba, path));
             }
         }
@@ -338,6 +345,7 @@ pub fn load_environment_cubemap(pk3: &mut Pk3Loader, base_path: &str) -> Result<
                 .iter()
                 .map(|face| parse_ktx_to_rgba(face))
                 .collect::<Option<Vec<RgbaFace>>>()
+                .filter(|faces| faces.iter().all(|f| is_square(f) && f.size == faces[0].size))
         });
         match decoded {
             Some(pixels) => {
@@ -386,6 +394,23 @@ pub fn load_environment_cubemap(pk3: &mut Pk3Loader, base_path: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_square_faces_make_a_cube() {
+        assert!(is_square(&RgbaFace {
+            data: vec![0; 16],
+            size: 2
+        }));
+        // A 2 × 1 image decodes to half a 2 × 2 face.
+        assert!(!is_square(&RgbaFace {
+            data: vec![0; 8],
+            size: 2
+        }));
+        assert!(!is_square(&RgbaFace {
+            data: Vec::new(),
+            size: 0
+        }));
+    }
 
     #[test]
     fn transforms_move_the_corner() {

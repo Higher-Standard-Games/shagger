@@ -225,8 +225,10 @@ impl Drop for Feeder {
     fn drop(&mut self) {
         if let Feeder::Thread { stop, handle, .. } = self {
             stop.store(true, Ordering::Release);
+            // Woken and left to finish on its own: joining here would hold
+            // the frame for up to its 20 ms nap.
             if let Some(handle) = handle.take() {
-                let _ = handle.join();
+                handle.thread().unpark();
             }
         }
     }
@@ -340,7 +342,12 @@ impl MusicPlayer {
 
     /// `setMusicVolume` (`s_volume`).
     pub fn set_music_volume(&mut self, audio: &mut AudioV2Sfx, volume: f32) {
-        self.music_volume = volume.clamp(0.0, 1.0);
+        // The same volume again changes nothing: a fade in keeps fading.
+        let volume = volume.clamp(0.0, 1.0);
+        if volume == self.music_volume {
+            return;
+        }
+        self.music_volume = volume;
         if let Some(track) = &mut self.current {
             track.volume = self.music_volume;
             audio.set_voice_volume(track.id, track.volume);
@@ -472,11 +479,13 @@ impl MusicPlayer {
                         if !decoded {
                             decoded = decoder.pump(&mut producer);
                         }
-                        if decoded && producer.slots() == producer.buffer().capacity() {
+                        // Played out, or the device that played it is gone
+                        // (its mixer dropped the queue): the next track.
+                        if (decoded && producer.slots() == producer.buffer().capacity()) || producer.is_abandoned() {
                             thread_ended.store(true, Ordering::Release);
                             return;
                         }
-                        std::thread::sleep(Duration::from_millis(20));
+                        std::thread::park_timeout(Duration::from_millis(20));
                     }
                 })
                 .ok();
