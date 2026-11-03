@@ -9,12 +9,16 @@
 //! shows. The cloud layers, the sky sphere and the debug box are not ported
 //! yet: no shipped map draws them.
 
-use super::ktx1_loader::{can_software_decode, gl_formats as gl, parse_ktx1, software_decode_mip};
+use super::ktx1_loader::{
+    can_software_decode, gl_formats as gl, parse_ktx1, parse_ktx1_cube_faces, software_decode_mip,
+};
 use super::texture_extensions::PACKAGED_TEXTURE_EXTENSION;
 use crate::loader::pk3::pk3_loader::Pk3Loader;
 
 /// `Q3_FACE_SUFFIXES`, in Quake 3's `tr_shader.c` order.
 pub const Q3_FACE_SUFFIXES: [&str; 6] = ["_rt", "_bk", "_lf", "_ft", "_up", "_dn"];
+/// `QF_FACE_SUFFIXES`: QFusion's names for the same faces, in the same order.
+pub const QF_FACE_SUFFIXES: [&str; 6] = ["_px", "_ny", "_nx", "_py", "_pz", "_nz"];
 
 /// `FaceTransform`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +317,70 @@ pub fn load_skybox(pk3: &mut Pk3Loader, base_path: &str) -> Result<SkyboxFaces, 
         faces: slots,
         loaded_faces,
     })
+}
+
+/// `loadEnvironmentCubemap` up to the cube texture: a liquid's `cubemap`
+/// (its shader's environment), from a six-face KTX container at
+/// `{base_path}.ktx`, else from complete Quake 3 (`_rt`...) or QFusion
+/// (`_px`...) face sets of one size, laid out as [`load_skybox`] lays them.
+pub fn load_environment_cubemap(pk3: &mut Pk3Loader, base_path: &str) -> Result<SkyboxFaces, String> {
+    let stem = base_path
+        .strip_suffix(".ktx")
+        .or_else(|| base_path.strip_suffix(".KTX"))
+        .unwrap_or(base_path);
+    let container_path = format!("{stem}.ktx");
+    if let Some(container) = pk3.get_file(&container_path)
+        && container.len() >= 64
+        && u32::from_le_bytes(container[52..56].try_into().unwrap()) == 6
+    {
+        let decoded = parse_ktx1_cube_faces(&container).ok().and_then(|faces| {
+            faces
+                .iter()
+                .map(|face| parse_ktx_to_rgba(face))
+                .collect::<Option<Vec<RgbaFace>>>()
+        });
+        match decoded {
+            Some(pixels) => {
+                // KTX holds +X, -X, +Y, -Y, +Z, -Z in Q3 space; the sky's
+                // face conversion applies.
+                let size = pixels[0].size;
+                let q3 = [&pixels[0], &pixels[3], &pixels[1], &pixels[2], &pixels[4], &pixels[5]];
+                let faces =
+                    Q3_TO_BABYLON_FACE_MAP.map(|(index, transform)| transform_face(&q3[index].data, size, transform));
+                return Ok(SkyboxFaces {
+                    size,
+                    faces,
+                    loaded_faces: vec![container_path],
+                });
+            }
+            None => eprintln!("[SkyboxLoader] Cannot load environment cube {container_path}"),
+        }
+    }
+    'sets: for suffixes in [Q3_FACE_SUFFIXES, QF_FACE_SUFFIXES] {
+        let mut images = Vec::with_capacity(6);
+        let mut loaded_faces = Vec::with_capacity(6);
+        let mut size = 0;
+        for suffix in suffixes {
+            let Some((face, path)) = load_skybox_face(pk3, base_path, suffix) else {
+                continue 'sets;
+            };
+            if size != 0 && face.size != size {
+                continue 'sets;
+            }
+            size = face.size;
+            images.push(face.data);
+            loaded_faces.push(path);
+        }
+        let faces = Q3_TO_BABYLON_FACE_MAP.map(|(index, transform)| transform_face(&images[index], size, transform));
+        return Ok(SkyboxFaces {
+            size,
+            faces,
+            loaded_faces,
+        });
+    }
+    Err(format!(
+        "No complete Q3 (_rt...) or QFusion (_px...) cubemap found for {base_path}"
+    ))
 }
 
 #[cfg(test)]

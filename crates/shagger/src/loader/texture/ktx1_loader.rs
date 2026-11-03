@@ -94,6 +94,69 @@ fn compressed_block(format: u32) -> Option<(u32, u32, u32)> {
     }
 }
 
+/// `parseKTX1CubeFaces`: a six-face KTX cube split into six one-face KTX
+/// files (the header with one face, then each level's size and that face's
+/// padded image), each for [`parse_ktx1`], in the file's face order.
+pub fn parse_ktx1_cube_faces(data: &[u8]) -> Result<Vec<Vec<u8>>, Ktx1Error> {
+    if data.len() < 64 {
+        return err("Truncated KTX1 cube header");
+    }
+    let endian = u32::from_le_bytes(data[12..16].try_into().unwrap());
+    if endian != 0x0403_0201 && endian != 0x0102_0304 {
+        return err("Invalid KTX1 cube byte order");
+    }
+    let little = endian == 0x0403_0201;
+    let read = |offset: usize| {
+        let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+        if little {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        }
+    };
+    if read(52) != 6 || read(36) != read(40) {
+        return err("KTX1 cube requires six square faces");
+    }
+    let levels = read(56).max(1);
+    if levels > 32 {
+        return err("Invalid KTX1 cube mip count");
+    }
+    let header_size = 64 + read(60) as usize;
+    if header_size > data.len() {
+        return err("Truncated KTX1 cube metadata");
+    }
+    let one = if little { 1u32.to_le_bytes() } else { 1u32.to_be_bytes() };
+    let mut faces: Vec<Vec<u8>> = (0..6)
+        .map(|_| {
+            let mut face = data[..header_size].to_vec();
+            face[52..56].copy_from_slice(&one);
+            face
+        })
+        .collect();
+    let mut offset = header_size;
+    for _ in 0..levels {
+        if offset + 4 > data.len() {
+            return err("Truncated KTX1 cube mip size");
+        }
+        let size = read(offset) as usize;
+        let size_bytes = &data[offset..offset + 4];
+        offset += 4;
+        for face in &mut faces {
+            if offset + size > data.len() {
+                return err("Truncated KTX1 cube face");
+            }
+            let padded = size.div_ceil(4) * 4;
+            if offset + padded > data.len() {
+                return err("Truncated KTX1 cube padding");
+            }
+            face.extend_from_slice(size_bytes);
+            face.extend_from_slice(&data[offset..offset + padded]);
+            offset += padded;
+        }
+    }
+    Ok(faces)
+}
+
 /// `parseKTX1`: a one-face 2D KTX and its mip levels.
 pub fn parse_ktx1(data: &[u8]) -> Result<Ktx1ParseResult<'_>, Ktx1Error> {
     if data.len() < KTX_HEADER_SIZE {
@@ -492,6 +555,25 @@ mod tests {
         }
         out.extend_from_slice(payload);
         out
+    }
+
+    #[test]
+    fn a_cube_splits_into_its_faces() {
+        // 1x1 RGBA, one level: six 4-byte faces after the one size.
+        let mut file = ktx(0x1401, 0x1908, 0x8058, 0x1908, 1, 1, &[0, 0, 0, 255]);
+        file[52..56].copy_from_slice(&6u32.to_le_bytes());
+        for face in 1..6u8 {
+            file.extend_from_slice(&[face, face, face, 255]);
+        }
+        let faces = parse_ktx1_cube_faces(&file).unwrap();
+        assert_eq!(faces.len(), 6);
+        for (i, face) in faces.iter().enumerate() {
+            let parsed = parse_ktx1(face).unwrap();
+            assert_eq!(parsed.mip_levels[0].data, &[i as u8, i as u8, i as u8, 255]);
+        }
+        // Not square, or not six faces: refused.
+        file[40..44].copy_from_slice(&2u32.to_le_bytes());
+        assert!(parse_ktx1_cube_faces(&file).is_err());
     }
 
     #[test]

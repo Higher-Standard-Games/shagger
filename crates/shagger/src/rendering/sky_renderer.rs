@@ -51,16 +51,15 @@ struct SkyUniform {
     fog: FogUniforms,
 }
 
-impl SkyRenderer {
-    /// Uploads the faces, slot `i` to cube layer `i` as Babylon uploads
-    /// them to `TEXTURE_CUBE_MAP_POSITIVE_X + i`.
-    #[must_use]
-    pub fn new(gpu: &Gpu, faces: &SkyboxFaces, color_format: wgpu::TextureFormat) -> Self {
-        let device = &gpu.device;
-        let texture = device.create_texture_with_data(
+/// Uploads `faces` as a gamma-space RGBA8 cube, slot `i` to layer `i` as
+/// Babylon's `RawCubeTexture` uploads them.
+#[must_use]
+pub fn upload_cube(gpu: &Gpu, faces: &SkyboxFaces, label: &str) -> wgpu::TextureView {
+    gpu.device
+        .create_texture_with_data(
             &gpu.queue,
             &wgpu::TextureDescriptor {
-                label: Some("sky"),
+                label: Some(label),
                 size: wgpu::Extent3d {
                     width: faces.size,
                     height: faces.size,
@@ -75,11 +74,20 @@ impl SkyRenderer {
             },
             wgpu::util::TextureDataOrder::LayerMajor,
             &faces.faces.concat(),
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        )
+        .create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::Cube),
             ..Default::default()
-        });
+        })
+}
+
+impl SkyRenderer {
+    /// Uploads the faces, slot `i` to cube layer `i` as Babylon uploads
+    /// them to `TEXTURE_CUBE_MAP_POSITIVE_X + i`.
+    #[must_use]
+    pub fn new(gpu: &Gpu, faces: &SkyboxFaces, color_format: wgpu::TextureFormat) -> Self {
+        let device = &gpu.device;
+        let view = upload_cube(gpu, faces, "sky");
         // Trilinear without mip maps: linear, clamped as cube textures are.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sky"),

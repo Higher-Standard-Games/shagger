@@ -21,8 +21,10 @@
 //! surface ([`LiquidSurfaceSystem::add_disturbance`]); each surface packs
 //! the ones on its patch.
 //!
-//! Not yet: the actor reflection pass, and per-liquid
-//! environment cubemaps from the shaders.
+//! A liquid whose shader names a `cubemap` reflects it where no room was
+//! captured (`setEnvironmentTexture(texture, { kind })`), the sky elsewhere.
+//!
+//! Not yet: the actor reflection pass.
 
 use std::collections::HashMap;
 
@@ -122,6 +124,8 @@ pub struct LiquidSurfaceSystem {
     noise: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
     environment: wgpu::TextureView,
+    /// Liquids' own cubemaps, by kind.
+    kind_environments: Vec<(WaterKind, wgpu::TextureView)>,
     environment_sampler: wgpu::Sampler,
     capture_sampler: wgpu::Sampler,
     has_environment: bool,
@@ -167,6 +171,7 @@ impl LiquidSurfaceSystem {
         geometry: &WorldGeometry,
         liquids: &[LiquidSurfaceDescriptor],
         environment: Option<&wgpu::TextureView>,
+        kind_environments: &[(WaterKind, wgpu::TextureView)],
         color_format: wgpu::TextureFormat,
         probe_lift: f64,
     ) -> Option<Self> {
@@ -354,7 +359,8 @@ impl LiquidSurfaceSystem {
             .map(|(batch, kind, profile)| {
                 let mut uniforms = unified_water_uniforms(kind, &profile, None);
                 // `setWaterEnvironment`: the sky cube, skybox mode, gamma space.
-                uniforms.env[0] = if has_environment { 1.0 } else { 0.0 };
+                let own = kind_environments.iter().any(|(k, _)| *k == kind);
+                uniforms.env[0] = if has_environment || own { 1.0 } else { 0.0 };
                 Surface {
                     batch,
                     kind,
@@ -412,6 +418,7 @@ impl LiquidSurfaceSystem {
             noise,
             noise_sampler,
             environment,
+            kind_environments: kind_environments.to_vec(),
             environment_sampler,
             capture_sampler,
             has_environment,
@@ -691,7 +698,12 @@ impl LiquidSurfaceSystem {
     fn rebind(&mut self, gpu: &Gpu) {
         let Some(captures) = self.captures.as_ref() else { return };
         for surface in &mut self.surfaces {
-            let environment = surface.probe.map_or(&self.environment, |p| &self.probes[p].cube);
+            let fallback = self
+                .kind_environments
+                .iter()
+                .find(|(k, _)| *k == surface.kind)
+                .map_or(&self.environment, |(_, view)| view);
+            let environment = surface.probe.map_or(fallback, |p| &self.probes[p].cube);
             let mask = surface.mask.map_or(&self.no_mask, |m| &self.masks[m]);
             surface.bind_group = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("unified water"),
