@@ -14,16 +14,21 @@
 //! through the weapon camera, then put on the main camera's matching
 //! screen ray, or the camera fallback for a model without one.
 //!
-//! Not yet: MD3 view models, the holster and blade charge animations, the
-//! slash trail, the muzzle flash light and model, the on-weapon ammo
-//! counter, spinning barrels, the quad outline, the underwater drift and the light
-//! grid tint (`WeaponLighting`, which only reaches StandardMaterial layers
+//! Barrel sub-models turn and slide with the shots and reloads
+//! (`WeaponBarrels`); the caller places and draws them.
+//!
+//! The blade's charge (`WeaponCharge`): aiming a melee weapon shakes it
+//! and puts the charge's outline on it.
+//!
+//! Not yet: MD3 view models, the holster animation, the muzzle flash
+//! light, the underwater drift and the light grid tint (`WeaponLighting`, which only reaches StandardMaterial layers
 //! and the blade's light).
 
 use glam::{DVec3, Mat4, Vec3};
 
-use super::weapon_barrels::babylon_euler;
+use super::weapon_barrels::{BarrelSpin, babylon_euler};
 use super::weapon_bob::{BobInput, GunBobVars, WeaponBob};
+use super::weapon_charge::WeaponCharge;
 use super::weapon_recoil::WeaponRecoil;
 use super::weapon_reload_anim::WeaponReloadAnim;
 use super::weapon_slash::WeaponSlash;
@@ -95,6 +100,10 @@ pub struct ViewModelDef {
     /// `ads.time`.
     pub ads_time: Option<f64>,
     pub ads_require_ready: bool,
+    /// `meleeRadius` is set: aiming charges the weapon instead.
+    pub melee: bool,
+    /// `chargeTime`, seconds.
+    pub charge_time: Option<f64>,
 }
 
 /// `weaponLight`: a hemispheric fill for the weapon layer only.
@@ -257,6 +266,13 @@ pub struct WeaponView {
     /// This view's clock, seconds: the animations' `performance.now()`.
     pub clock: f64,
     pub slash: WeaponSlash,
+    pub charge: WeaponCharge,
+    /// The barrel sub-models' motion (`WeaponBarrels`), in the order the
+    /// caller loaded them.
+    pub barrels: Vec<BarrelSpin>,
+    /// The charge's outline this frame (its width before the root's
+    /// scale), worn in place of the black one.
+    pub charge_outline: Option<Outline>,
     pub reload_anim: WeaponReloadAnim,
     /// The holder's switch slide this frame.
     pub switch_offsets: SwitchAnimOffsets,
@@ -295,6 +311,9 @@ impl WeaponView {
             scale: 1.0,
             clock: 0.0,
             slash: WeaponSlash::default(),
+            charge: WeaponCharge::default(),
+            barrels: Vec::new(),
+            charge_outline: None,
             reload_anim: WeaponReloadAnim::default(),
             switch_offsets: SwitchAnimOffsets::default(),
         };
@@ -321,6 +340,9 @@ impl WeaponView {
             shot.ads_recoil_scale,
             shot.refire_seconds,
         );
+        for barrel in &mut self.barrels {
+            barrel.fire(shot.refire_seconds);
+        }
         if shot.melee && !projectile_fire {
             self.slash.trigger(self.clock * 1000.0);
         }
@@ -329,6 +351,9 @@ impl WeaponView {
     /// `startReload`.
     pub fn start_reload(&mut self, duration: f64) {
         self.reload_anim.start(duration, self.clock);
+        for barrel in &mut self.barrels {
+            barrel.reload(duration);
+        }
     }
 
     /// `cancelReload`.
@@ -343,6 +368,9 @@ impl WeaponView {
         let dt = input.delta_time;
         self.clock += dt;
         self.recoil.update(dt);
+        for barrel in &mut self.barrels {
+            barrel.update(dt);
+        }
         let reload = self.reload_anim.offsets(self.clock);
         let reloading = input.reloading || self.reload_anim.is_reloading();
         let switch = self.switch_offsets;
@@ -389,9 +417,26 @@ impl WeaponView {
         let ads_y = (ads_target.y - base.y) * self.ads_progress;
         let ads_z = (ads_target.z - base.z) * self.ads_progress;
 
+        // The blade's charge: aiming a melee weapon holds its charge.
+        let charging = input.aiming && self.def.is_some_and(|d| d.melee);
+        let charge_time = self
+            .def
+            .and_then(|d| d.charge_time)
+            .filter(|t| *t != 0.0)
+            .unwrap_or(1.0);
+        let charge = self.charge.update(charging, charge_time, self.clock * 1000.0);
+        self.charge_outline = charge.outline;
+
         self.position = DVec3::new(
-            ads_x + bob.bob_x + reload.x_offset + switch.x_offset + slash.x_offset,
-            base.y + bob.bob_y + bob.jump_land_bob + ads_y + reload.y_offset + switch.y_offset + slash.y_offset,
+            ads_x + bob.bob_x + reload.x_offset + switch.x_offset + charge.shake.x + slash.x_offset,
+            base.y
+                + bob.bob_y
+                + bob.jump_land_bob
+                + ads_y
+                + reload.y_offset
+                + switch.y_offset
+                + charge.shake.y
+                + slash.y_offset,
             base.z + ads_z + reload.z_offset - self.recoil.offset + switch.z_offset + slash.z_offset,
         );
         // Aimed, the sprint tilt drops by 80%.
@@ -507,7 +552,41 @@ mod tests {
             scale: 2.0,
             ads_time: None,
             ads_require_ready: false,
+            melee: false,
+            charge_time: None,
         }
+    }
+
+    #[test]
+    fn aiming_a_blade_charges_it() {
+        let blade_def = ViewModelDef {
+            melee: true,
+            charge_time: Some(1.0),
+            ..plasmagun()
+        };
+        let mut blade = WeaponView::new("blade", Some(blade_def));
+        let hold = ViewModelInput {
+            delta_time: 0.01,
+            grounded: true,
+            aiming: true,
+            ..ViewModelInput::default()
+        };
+        blade.update(&hold);
+        assert!(blade.charge_outline.is_some());
+        for _ in 0..120 {
+            blade.update(&hold);
+        }
+        assert_eq!(blade.charge.progress, 1.0);
+        let width = blade.charge_outline.unwrap().width;
+        assert!((width - 4.8).abs() < 1e-5, "{width}");
+        blade.update(&ViewModelInput { aiming: false, ..hold });
+        assert!(blade.charge_outline.is_none());
+        assert_eq!(blade.charge.progress, 0.0);
+
+        // A gun aims; it does not charge.
+        let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
+        gun.update(&hold);
+        assert!(gun.charge_outline.is_none());
     }
 
     #[test]

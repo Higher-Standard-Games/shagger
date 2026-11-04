@@ -418,6 +418,7 @@ impl GltfModel {
                     if pose {
                         for (v, (pos, nor)) in positions.iter_mut().zip(normals.iter_mut()).enumerate() {
                             let mut skin = Mat4::ZERO;
+                            let mut total = 0.0;
                             for k in 0..4 {
                                 let w = weights.get(v * 4 + k).copied().unwrap_or(0.0);
                                 if w == 0.0 {
@@ -425,6 +426,15 @@ impl GltfModel {
                                 }
                                 let j = joint_ids.get(v * 4 + k).copied().unwrap_or(0.0) as usize;
                                 skin += joints.get(j).copied().unwrap_or(Mat4::IDENTITY) * w;
+                                total += w;
+                            }
+                            // Babylon skins on the GPU and keeps the weighted
+                            // matrix's w, which the perspective divide then
+                            // takes out: weights that do not sum to one (the
+                            // Electrobolt's sight carries 1/255) place the
+                            // vertex as if they did.
+                            if total > 0.0 && total != 1.0 {
+                                skin *= 1.0 / total;
                             }
                             let p = skin.transform_point3(Vec3::from(*pos));
                             let n = skin.transform_vector3(Vec3::from(*nor)).normalize_or_zero();
@@ -561,6 +571,11 @@ mod tests {
     /// animation keyed to +3 on X, its inverse bind undoing the rest; a
     /// `tag_barrel` child; a WebP-only texture.
     fn glb() -> Vec<u8> {
+        glb_weighted(1.0)
+    }
+
+    /// [`glb`] with every vertex's one weight `w`.
+    fn glb_weighted(w: f32) -> Vec<u8> {
         let mut bin: Vec<u8> = Vec::new();
         let f = |bin: &mut Vec<u8>, values: &[f32]| {
             for v in values {
@@ -572,7 +587,7 @@ mod tests {
         // 1: normals at 36
         f(&mut bin, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
         // 2: weights at 72 (3 x VEC4)
-        f(&mut bin, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        f(&mut bin, &[w, 0.0, 0.0, 0.0, w, 0.0, 0.0, 0.0, w, 0.0, 0.0, 0.0]);
         // 3: inverse bind (MAT4) at 120: translate -1 on X
         f(
             &mut bin,
@@ -678,6 +693,17 @@ mod tests {
         assert_eq!(p.bounds_center, Vec3::new(2.5, 0.5, 0.0));
         // Scene order [2, 0]: the mesh node is created first.
         assert_eq!(p.creation_order, 0);
+    }
+
+    #[test]
+    fn weights_short_of_one_place_the_vertex_as_babylon_does() {
+        // Babylon's skinned position keeps the weighted w, which the
+        // perspective divide takes out: 1/255 draws where 1 does.
+        let whole = GltfModel::from_glb(&glb()).unwrap();
+        let faint = GltfModel::from_glb(&glb_weighted(1.0 / 255.0)).unwrap();
+        for (a, b) in whole.primitives[0].positions.iter().zip(&faint.primitives[0].positions) {
+            assert!((Vec3::from(*a) - Vec3::from(*b)).length() < 1e-4, "{a:?} {b:?}");
+        }
     }
 
     #[test]

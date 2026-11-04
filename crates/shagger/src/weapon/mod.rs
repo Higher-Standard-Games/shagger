@@ -16,6 +16,7 @@ pub mod tracer;
 pub mod voltaic;
 pub mod weapon_barrels;
 pub mod weapon_bob;
+pub mod weapon_charge;
 pub mod weapon_recoil;
 pub mod weapon_reload_anim;
 pub mod weapon_slash;
