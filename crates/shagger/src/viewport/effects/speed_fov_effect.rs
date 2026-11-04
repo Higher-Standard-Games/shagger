@@ -4,6 +4,7 @@
 
 use crate::viewport::ViewCvars;
 use crate::viewport::player_state::{PlayerState, WallJumpState};
+use crate::viewport::speed_constants::BASE_SPEED;
 use crate::viewport::viewport_delta::ViewportDelta;
 
 /// `SpeedFOVEffect`.
@@ -50,11 +51,10 @@ impl SpeedFovEffect {
             delta.fov_multiplier = self.current_fov;
             return delta;
         }
-        const BASE: f64 = 280.0;
         const MAX: f64 = 800.0;
         let speed = state.horizontal_speed;
-        let speed_ratio = if speed > BASE {
-            ((speed - BASE) / (MAX - BASE)).min(1.0)
+        let speed_ratio = if speed > BASE_SPEED {
+            ((speed - BASE_SPEED) / (MAX - BASE_SPEED)).min(1.0)
         } else {
             0.0
         };

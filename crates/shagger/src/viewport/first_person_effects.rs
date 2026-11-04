@@ -87,11 +87,11 @@ mod tests {
         let mut lowest: f64 = 0.0;
         let mut highest: f64 = 0.0;
         for _ in 0..120 {
-            let d = stack.update(&cvars, 1.0 / 60.0, &running(320.0));
+            let d = stack.update(&cvars, 1.0 / 60.0, &running(400.0));
             lowest = lowest.min(d.position_offset.y);
             highest = highest.max(d.position_offset.y);
         }
-        // About the amplitude times the speed factor (320 / 280).
+        // About the amplitude times the speed factor (400 / 320).
         assert!(highest > 1.0 && lowest < -1.0, "{lowest} {highest}");
         let mut still = FirstPersonEffectStack::default();
         let d = still.update(&cvars, 1.0, &running(0.0));

@@ -40,6 +40,9 @@ pub fn compute_bob(cvars: &ViewCvars, bob_cycle: f64, horizontal_speed: f64, del
 pub struct WalkBobEffect {
     bob_cycle: f64,
     current_lean: f64,
+    /// `state.bobCycle`: the cycle the weapon bob follows, written only on
+    /// frames that bob, so it holds while airborne or standing.
+    pub shared_cycle: f64,
 }
 
 impl WalkBobEffect {
@@ -63,6 +66,7 @@ impl WalkBobEffect {
         self.bob_cycle = bob.new_bob_cycle;
         let lean_speed = 5.0;
         self.current_lean += (bob.target_lean - self.current_lean) * (delta_time * lean_speed).min(1.0);
+        self.shared_cycle = self.bob_cycle;
         delta.position_offset = DVec3::new(bob.bob_right, bob.bob_up, 0.0);
         delta.rotation_offset = DVec3::new(self.current_lean, 0.0, bob.roll_degrees);
         delta

@@ -28,6 +28,10 @@ pub struct ExplosionLook {
     pub smoke_color: Vec3,
     /// Rays per explosion, drawn evenly from `[min, max]`.
     pub rays: (u32, u32),
+    /// `shakeIntensity`: the camera shake's multiplier, 0 for none.
+    pub shake_intensity: f64,
+    /// `shakeMaxRange`: how far the shake reaches, game units.
+    pub shake_max_range: f64,
 }
 
 /// Explosions alive at once before the oldest is recycled.
@@ -352,6 +356,7 @@ impl ExplosionBatchRenderer {
             outer_color: outer,
             smoke_color: smoke,
             rays,
+            ..
         } = *look;
         let fire_end = now + EXPLOSION_FIRE_TIME / speed;
         let mut v: Instance = [0.0; 20];
