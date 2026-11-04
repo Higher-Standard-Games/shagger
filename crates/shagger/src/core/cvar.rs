@@ -70,7 +70,9 @@ impl std::fmt::Display for CvarValue {
 }
 
 impl CvarValue {
-    fn to_json(&self) -> Value {
+    /// As `JSON.stringify` writes it.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
         match self {
             Self::Bool(b) => Value::Bool(*b),
             // JSON.stringify writes whole numbers without a fraction.
@@ -483,6 +485,44 @@ impl Cvars {
         out
     }
 
+    /// Every registered cvar's declaration as JSON (`name`, `type`,
+    /// `default`, `min`, `max`, `description` and the flags), by name: what a
+    /// page needs to `Cvar.register` the same cvars (WEBVIEW_LOBBY.md 8).
+    #[must_use]
+    pub fn declarations(&self) -> Vec<Value> {
+        let mut out: Vec<&CvarInstance> = self.cvars.iter().filter(|c| c.registered).collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.into_iter()
+            .map(|c| {
+                let kind = match c.kind {
+                    CvarType::Bool => "bool",
+                    CvarType::Int => "int",
+                    CvarType::Float => "float",
+                    CvarType::String => "string",
+                };
+                let mut d = serde_json::json!({
+                    "name": c.name,
+                    "type": kind,
+                    "default": c.default_value.to_json(),
+                    "persist": c.flags.persist,
+                    "readonly": c.flags.readonly,
+                    "cheat": c.flags.cheat,
+                    "hidden": c.flags.hidden,
+                });
+                if let Some(min) = c.min {
+                    d["min"] = Value::from(min);
+                }
+                if let Some(max) = c.max {
+                    d["max"] = Value::from(max);
+                }
+                if !c.description.is_empty() {
+                    d["description"] = Value::String(c.description.clone());
+                }
+                d
+            })
+            .collect()
+    }
+
     /// `Cvar.getNames`, for autocomplete.
     #[must_use]
     pub fn get_names(&self) -> Vec<String> {
@@ -786,6 +826,30 @@ mod tests {
             ]
         );
         assert_eq!(d.get_string("name"), "Ramen \"the\" Cat");
+    }
+
+    #[test]
+    fn declarations_describe_registered_cvars_only() {
+        let mut c = Cvars::new(None, false);
+        c.register(
+            "r_bloom",
+            0.0,
+            CvarOptions::describe("Bloom").range(0.0, 3.0).kind(CvarType::Float),
+        );
+        c.register("cl_hints", true, CvarOptions::default());
+        c.preload("r_unowned", CvarValue::Number(1.0));
+        let d = c.declarations();
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0]["name"], "cl_hints");
+        assert_eq!(d[0]["type"], "bool");
+        assert_eq!(d[0]["default"], true);
+        assert!(d[0].get("min").is_none());
+        assert_eq!(d[1]["name"], "r_bloom");
+        assert_eq!(d[1]["type"], "float");
+        assert_eq!(d[1]["default"], 0);
+        assert_eq!(d[1]["max"], 3.0);
+        assert_eq!(d[1]["description"], "Bloom");
+        assert_eq!(d[1]["persist"], true);
     }
 
     #[test]

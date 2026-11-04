@@ -3,4 +3,5 @@
 
 pub mod lobby_client;
 pub mod settings_sync;
+pub mod storage_mirror;
 pub mod types;
