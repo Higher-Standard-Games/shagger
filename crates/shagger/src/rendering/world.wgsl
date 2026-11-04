@@ -68,11 +68,17 @@ struct Material {
     // x: 1 for a soft particle (Q3SoftParticlePlugin), y: 1 to fade its
     // colour instead of its alpha
     soft: vec4f,
+    // x: the authored cube (Q3EnvironmentPlugin): 0 none, 1 its reflection
+    // (cubemap), 2 along the view ray (surroundmap); y: 1 to turn the normal
+    // to the side seen (TWOSIDEDLIGHTING)
+    environment: vec4f,
 };
 @group(1) @binding(2) var<uniform> material: Material;
 @group(1) @binding(3) var normal_texture: texture_2d<f32>;
 @group(1) @binding(4) var gloss_texture: texture_2d<f32>;
 @group(1) @binding(5) var glow_texture: texture_2d<f32>;
+@group(1) @binding(6) var environment_texture: texture_cube<f32>;
+@group(1) @binding(7) var environment_sampler: sampler;
 
 struct VertexIn {
     @location(0) position: vec3f,
@@ -253,8 +259,25 @@ fn dynamic_specular(position: vec3f, n: vec3f, v: vec3f, glossiness: f32) -> vec
 // World fog over the shaded surface (AtmosphericFogPlugin).
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
-    let color = soft_particle(in, shade(in, front));
+    let color = soft_particle(in, environment(in, front, shade(in, front)));
     return vec4f(atm_fog_apply(globals.fog, color.rgb, in.world_position, globals.eye.xyz, material.fog.x, false), color.a);
+}
+
+// Q3EnvironmentPlugin (SHAG, MIT): an authored cube replaces the colour
+// before fog, sampled along -viewDirectionW for surroundmap or its
+// reflection about normalW for cubemap. The cube holds display colours;
+// the HDR target takes linear ones.
+fn environment(in: VertexOut, front: bool, color: vec4f) -> vec4f {
+    if (material.environment.x < 0.5) { return color; }
+    let ray = normalize(in.world_position - globals.eye.xyz);
+    var direction = ray;
+    if (material.environment.x < 1.5) {
+        var n = normalize(in.normal);
+        if (!front && material.environment.y > 0.5) { n = -n; }
+        direction = reflect(ray, n);
+    }
+    let sample = textureSampleLevel(environment_texture, environment_sampler, direction, 0.0).rgb;
+    return vec4f(pow(max(sample, vec3f(0.0)), vec3f(2.2)), color.a);
 }
 
 // Q3SoftParticlePlugin: fade a soft surface where it nears the opaque scene

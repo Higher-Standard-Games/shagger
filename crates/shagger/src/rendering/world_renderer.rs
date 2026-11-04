@@ -19,8 +19,12 @@
 //! A glow image adds as the emissive, or, with an animated glow stage,
 //! draws as an additive shine pass after it (`registerGlowAnimation`).
 //!
-//! Not yet drawn as SHAG draws them: environment and `$cubemap` reflections
-//! (a reflection pass is left out, an environment material draws its base
+//! A pass whose stage names an authored cubemap (`surroundmap` or
+//! `cubemap`) draws it as `Q3EnvironmentPlugin` does: unlit, its colour the
+//! cube sampled along the view ray (surround) or its reflection (cubemap).
+//!
+//! Not yet drawn as SHAG draws them: `$cubemap` reflections (a reflection
+//! pass is left out), `tcGen environment` sphere maps (drawn as their base
 //! image), and the sky.
 
 use std::collections::HashMap;
@@ -42,11 +46,14 @@ use crate::babylon::materials::texture::get_texture_matrix;
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
 use crate::loader::bsp::bsp_loader::BspFile;
 use crate::loader::bsp::mesh::lightmaps::bsp_lightmap_array_rgba;
+use crate::loader::shader::q3_shader_types::TcGenMode;
 use crate::loader::shader::q3_shader_types::{
     AlphaGenType, BlendFactor, DistanceRamp, Q3ShaderStage, RgbGen, RgbGenType, TcMod, WaveFunc,
 };
 use crate::loader::shader::q3_stage_evaluation::{TcState, create_tc_state, evaluate_wave_func, step_tc_mods_into};
+use crate::loader::texture::skybox_loader::SkyboxFaces;
 use crate::loader::texture::texture_extensions::strip_texture_extension;
+use crate::rendering::sky_renderer::upload_cube;
 
 /// The depth buffer format.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -101,6 +108,11 @@ struct MaterialUniform {
     /// x: 1 for a soft particle, y: 1 to fade its colour (an additive
     /// `GL_ONE` source) rather than its alpha.
     soft: [f32; 4],
+    /// `Q3EnvironmentPlugin`: x 0 without a cube, 1 to sample its
+    /// reflection (`cubemap`), 2 to sample along the view ray
+    /// (`surroundmap`); y 1 to turn the normal to the side seen
+    /// (`TWOSIDEDLIGHTING`).
+    environment: [f32; 4],
 }
 
 impl MaterialUniform {
@@ -221,6 +233,8 @@ struct Layer<'a> {
     ramps: ([f32; 4], [f32; 4]),
     surface: [f32; 4],
     gloss: [f32; 4],
+    /// The authored cube it draws and how (`MaterialUniform::environment`).
+    environment: Option<(String, f32)>,
     key: PipelineKey,
 }
 
@@ -400,6 +414,7 @@ impl WorldRenderer {
         bsp: &BspFile,
         geometry: &WorldGeometry,
         mut textures: impl FnMut(&str) -> Option<Rgba8Image>,
+        environments: &HashMap<String, SkyboxFaces>,
         color_format: wgpu::TextureFormat,
     ) -> Self {
         let device = &gpu.device;
@@ -479,6 +494,8 @@ impl WorldRenderer {
                 texture_entry(3, wgpu::TextureViewDimension::D2),
                 texture_entry(4, wgpu::TextureViewDimension::D2),
                 texture_entry(5, wgpu::TextureViewDimension::D2),
+                texture_entry(6, wgpu::TextureViewDimension::Cube),
+                sampler_entry(7),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -542,10 +559,35 @@ impl WorldRenderer {
         let mut found: HashMap<String, String> = HashMap::new();
         const FLAT_NORMAL: &str = "@flat_normal";
         const NO_GLOSS: &str = "@no_gloss";
-        for (key, rgba) in [(FLAT_NORMAL, [128, 128, 255, 255]), (NO_GLOSS, [0, 0, 0, 255])] {
+        const WHITE: &str = "@white";
+        for (key, rgba) in [
+            (FLAT_NORMAL, [128, 128, 255, 255]),
+            (NO_GLOSS, [0, 0, 0, 255]),
+            (WHITE, [255, 255, 255, 255]),
+        ] {
             let view =
                 upload_texture(gpu, key, &Rgba8Image::solid(rgba)).create_view(&wgpu::TextureViewDescriptor::default());
             views.insert(key.to_owned(), view);
+        }
+        // Authored cubes (`loadEnvironmentCubemap`'s RawCubeTexture:
+        // bilinear, no mip maps), and a black one for passes without.
+        const NO_ENVIRONMENT: &str = "@no_environment";
+        let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("environment"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let mut cubes: HashMap<String, wgpu::TextureView> = HashMap::new();
+        let black = vec![0u8, 0, 0, 255];
+        let black_cube = SkyboxFaces {
+            size: 1,
+            faces: std::array::from_fn(|_| black.clone()),
+            loaded_faces: Vec::new(),
+        };
+        cubes.insert(NO_ENVIRONMENT.to_owned(), upload_cube(gpu, &black_cube, NO_ENVIRONMENT));
+        for (name, faces) in environments {
+            cubes.insert(name.clone(), upload_cube(gpu, faces, name));
         }
         let mut texture_bind_groups = Vec::new();
         let mut keys: Vec<PipelineKey> = Vec::new();
@@ -568,6 +610,17 @@ impl WorldRenderer {
                     continue;
                 }
                 let state = PassState::of(props);
+                // An environment material (`Q3EnvironmentPlugin`) whose cube
+                // loaded reads no image of its own; otherwise it draws as a
+                // plain material, as `loadTextures` falls through.
+                let environment = props
+                    .environment_map
+                    .as_ref()
+                    .filter(|m| cubes.contains_key(m.as_str()))
+                    .map(|m| {
+                        let surround = props.tc_gen.is_some_and(|g| g.mode == TcGenMode::Surround);
+                        (m.clone(), if surround { 2.0 } else { 1.0 })
+                    });
                 let candidates = build_diffuse_candidates(&batch.texture_name, props);
                 let fallback = missing_image(props);
                 // The view's key and the base path of the image found (none for a fallback).
@@ -598,8 +651,11 @@ impl WorldRenderer {
                         let path = found.get(&key).cloned();
                         Some((key, path))
                     };
-                let (base_view, base_path) =
-                    view_for(&candidates, Some(fallback)).expect("a fallback always gives an image");
+                let (base_view, base_path) = if environment.is_some() {
+                    (WHITE.to_owned(), None)
+                } else {
+                    view_for(&candidates, Some(fallback)).expect("a fallback always gives an image")
+                };
                 // Companion images (`loadOptionalTexture`): the normal and
                 // gloss maps of a lit surface, beside its found base image.
                 let stage = props.primary_stage.as_ref();
@@ -717,6 +773,7 @@ impl WorldRenderer {
                     ),
                     surface,
                     gloss,
+                    environment: environment.clone(),
                     key: PipelineKey {
                         two_sided: batch.two_sided,
                         blend: state.blend,
@@ -738,6 +795,7 @@ impl WorldRenderer {
                         ramps: (ramp(None), ramp(None)),
                         surface: [0.0; 4],
                         gloss: [0.0; 4],
+                        environment: None,
                         key: PipelineKey {
                             two_sided: batch.two_sided,
                             blend: Blend::OneOne,
@@ -770,7 +828,17 @@ impl WorldRenderer {
                         } else {
                             [0.0; 4]
                         },
+                        environment: [
+                            layer.environment.as_ref().map_or(0.0, |(_, mode)| *mode),
+                            f32::from(u8::from(props.two_sided_lighting)),
+                            0.0,
+                            0.0,
+                        ],
                     };
+                    let cube = layer
+                        .environment
+                        .as_ref()
+                        .map_or(NO_ENVIRONMENT, |(name, _)| name.as_str());
                     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("world material"),
                         size: std::mem::size_of::<MaterialUniform>() as u64,
@@ -805,6 +873,14 @@ impl WorldRenderer {
                                 wgpu::BindGroupEntry {
                                     binding: 5,
                                     resource: wgpu::BindingResource::TextureView(&views[&glow_view]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 6,
+                                    resource: wgpu::BindingResource::TextureView(&cubes[cube]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 7,
+                                    resource: wgpu::BindingResource::Sampler(&environment_sampler),
                                 },
                             ],
                         }));
@@ -856,7 +932,7 @@ impl WorldRenderer {
                 }
             }
         }
-        let texture_count = views.len() - 2;
+        let texture_count = views.len() - 3;
         let opaque_count = opaque.len();
         let mut passes = Vec::new();
         let mut animations = Vec::new();

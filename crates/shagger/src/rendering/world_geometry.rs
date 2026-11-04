@@ -114,6 +114,25 @@ pub struct WorldGeometry {
     pub sprite_faces: usize,
 }
 
+impl WorldGeometry {
+    /// The authored cubemaps (`surroundmap`/`cubemap` stages) the passes
+    /// draw, each once, in the order first met: what `loadTextures` hands
+    /// `SkyboxLoader.loadEnvironmentCubemap`.
+    #[must_use]
+    pub fn environment_maps(&self) -> Vec<String> {
+        let mut maps: Vec<String> = Vec::new();
+        for props in self.batches.iter().flat_map(|b| &b.passes) {
+            if let Some(map) = props.environment_map.as_ref().filter(|m| !m.is_empty())
+                && props.generated_cubemap != Some(true)
+                && !maps.contains(map)
+            {
+                maps.push(map.clone());
+            }
+        }
+        maps
+    }
+}
+
 /// `shouldRenderTexture` with `filterTextures` on.
 #[must_use]
 pub fn should_render_texture(bsp: &BspFile, texture_index: i32) -> bool {
