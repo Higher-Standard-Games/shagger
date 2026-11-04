@@ -12,6 +12,11 @@
 //! face, without lightmaps, with the billboard attributes
 //! (`autospriteVertexData`) the vertex shader turns them with.
 //!
+//! The `func_explosive` brush models (`BspEntityHandlers.handleExplosive`,
+//! which builds each with `buildBrushModel` and places it at the entity's
+//! origin) get batches of their own, tagged with their model index, so the
+//! renderer can drop the ones the bomb destroyed (`BrushModelState`).
+//!
 //! Not yet followed from `buildAll`: liquids, cubemap objects, fog and
 //! spatial cells. Billboards are skipped, as SHAG skips them.
 
@@ -24,6 +29,8 @@ use crate::loader::bsp::mesh::face_builders::{build_mesh_face, build_patch_face,
 use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
 use crate::loader::bsp::mesh::pvs::build_face_clusters;
 use crate::loader::bsp::mesh::tangents::build_bsp_tangents;
+use shagger_shared::bsp::brush_model_state::extract_brush_models;
+
 use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
@@ -89,6 +96,8 @@ pub struct WorldBatch {
     /// Babylon-space bounds of everything it can draw, for frustum culling
     /// (autosprites grown by the reach of their turn).
     pub bounds: [[f32; 3]; 2],
+    /// The `func_explosive` brush model it belongs to; `None` for the world.
+    pub brush_model: Option<usize>,
 }
 
 /// A sky shader `BspMeshBuilder.applySkybox` can draw the sky from.
@@ -131,6 +140,14 @@ impl WorldGeometry {
         }
         maps
     }
+
+    /// Which batches belong to a `func_explosive` brush model, by batch
+    /// index: geometry that comes and goes, which static consumers (the
+    /// ragdolls' collision, the water's occluders) leave out.
+    #[must_use]
+    pub fn brush_model_batches(&self) -> Vec<bool> {
+        self.batches.iter().map(|b| b.brush_model.is_some()).collect()
+    }
 }
 
 /// `shouldRenderTexture` with `filterTextures` on.
@@ -156,6 +173,7 @@ struct Group {
     sprites: Option<SpriteGroup>,
     pvs_clusters: Vec<i32>,
     bounds: [[f32; 3]; 2],
+    brush_model: Option<usize>,
 }
 
 const EMPTY_BOUNDS: [[f32; 3]; 2] = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
@@ -203,7 +221,8 @@ struct SpriteGroup {
     faces: Vec<SpriteFace>,
 }
 
-/// Builds the world model's (model 0's) surfaces. `material_passes` resolves
+/// Builds the world model's (model 0's) surfaces, then the `func_explosive`
+/// brush models' (`extractBrushModels`), offset to their entities' origins. `material_passes` resolves
 /// a texture name to its passes (a `Q3ShaderRegistry::resolve_material_passes`);
 /// it is asked once per texture, with `worldSurface` set and the map's
 /// deluxe state.
@@ -231,10 +250,26 @@ pub fn build_world_geometry(
     let mut passes_by_texture: std::collections::HashMap<i32, Vec<ResolvedMaterialProps>> =
         std::collections::HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
-    let mut keys: std::collections::HashMap<(i32, i32, bool), usize> = std::collections::HashMap::new();
+    let mut keys: std::collections::HashMap<(i32, i32, bool, Option<usize>), usize> = std::collections::HashMap::new();
     let mut sprite_groups: Vec<Group> = Vec::new();
-    let mut sprite_keys: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
-    for i in record_range(world.first_face, world.num_faces, bsp.common.faces.len()) {
+    let mut sprite_keys: std::collections::HashMap<(i32, Option<usize>), usize> = std::collections::HashMap::new();
+    // Every face to build: the world's, then each explosive's with its
+    // model index and its Babylon-space origin.
+    let mut faces: Vec<(usize, Option<usize>, [f64; 3])> =
+        record_range(world.first_face, world.num_faces, bsp.common.faces.len())
+            .map(|i| (i, None, [0.0; 3]))
+            .collect();
+    for definition in extract_brush_models(&bsp.entities, &bsp.models) {
+        let Some(model) = bsp.common.models.get(definition.model_index) else {
+            continue;
+        };
+        let origin = [definition.origin.x, definition.origin.y, definition.origin.z];
+        faces.extend(
+            record_range(model.first_face, model.num_faces, bsp.common.faces.len())
+                .map(|i| (i, Some(definition.model_index), origin)),
+        );
+    }
+    for (i, brush_model, origin) in faces {
         let Some(face) = bsp.common.faces.get(i) else { continue };
         if !should_render_texture(bsp, face.texture_index) {
             continue;
@@ -250,6 +285,10 @@ pub fn build_world_geometry(
         // Every pass shares the shader-level flags (sky, cull).
         let two_sided_shader = !passes[0].back_face_culling;
         if passes[0].is_sky || texture.surface_flags & SURF_SKY != 0 {
+            // A brush model's sky would hang in the world's sky box.
+            if brush_model.is_some() {
+                continue;
+            }
             if !out.sky_shaders.iter().any(|s| s.texture_name == texture.name) {
                 out.sky_shaders.push(SkyShader {
                     texture_name: texture.name.clone(),
@@ -265,7 +304,14 @@ pub fn build_world_geometry(
             3 => build_mesh_face(bsp, face),
             _ => None,
         };
-        let Some(g) = built else { continue };
+        let Some(mut g) = built else { continue };
+        if brush_model.is_some() {
+            for p in g.positions.as_chunks_mut::<3>().0.iter_mut() {
+                for k in 0..3 {
+                    p[k] += origin[k];
+                }
+            }
+        }
         if passes[0].autosprite || passes[0].autosprite2 {
             if g.positions.is_empty() {
                 continue;
@@ -280,9 +326,10 @@ pub fn build_world_geometry(
                 sprites: Some(SpriteGroup::default()),
                 pvs_clusters: Vec::new(),
                 bounds: EMPTY_BOUNDS,
+                brush_model,
             };
             let at = if additive {
-                *sprite_keys.entry(face.texture_index).or_insert_with(|| {
+                *sprite_keys.entry((face.texture_index, brush_model)).or_insert_with(|| {
                     sprite_groups.push(new_group());
                     sprite_groups.len() - 1
                 })
@@ -342,7 +389,12 @@ pub fn build_world_geometry(
         let lightmap = face.lightmap_index;
         let layered = lightmap >= 0;
         let is_patch = face.face_type == 2;
-        let key = (face.texture_index, if layered { -2 } else { lightmap }, is_patch);
+        let key = (
+            face.texture_index,
+            if layered { -2 } else { lightmap },
+            is_patch,
+            brush_model,
+        );
         let at = *keys.entry(key).or_insert_with(|| {
             groups.push(Group {
                 texture_index: face.texture_index,
@@ -352,6 +404,7 @@ pub fn build_world_geometry(
                 sprites: None,
                 pvs_clusters: Vec::new(),
                 bounds: EMPTY_BOUNDS,
+                brush_model,
             });
             groups.len() - 1
         });
@@ -414,6 +467,7 @@ pub fn build_world_geometry(
             index_count: group.indices.len() as u32,
             pvs_clusters: group.pvs_clusters,
             bounds: group.bounds,
+            brush_model: group.brush_model,
         });
         out.vertices.extend(group.vertices);
         out.indices.extend(group.indices.iter().map(|i| i + base));

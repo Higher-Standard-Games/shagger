@@ -273,6 +273,10 @@ pub struct WorldRenderer {
     fog: FogUniforms,
     /// Batches another renderer draws (`set_hidden_batches`).
     hidden: Vec<bool>,
+    /// Each batch's `func_explosive` brush model, if any.
+    brush_models: Vec<Option<usize>>,
+    /// Batches whose brush model is disabled (`set_disabled_brush_models`).
+    disabled: Vec<bool>,
     /// The scene depth soft particles read: its layout, a copy of the main
     /// depth taken between the opaque and blended passes, its size, and
     /// whether this frame reads it.
@@ -1047,6 +1051,8 @@ impl WorldRenderer {
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
             hidden: Vec::new(),
+            brush_models: geometry.batches.iter().map(|b| b.brush_model).collect(),
+            disabled: vec![false; geometry.batches.len()],
             soft_batches,
             soft_layout,
             soft_depth: None,
@@ -1060,9 +1066,10 @@ impl WorldRenderer {
     /// all).
     #[must_use]
     pub fn has_visible_soft_particles(&self, visible: &[bool]) -> bool {
-        self.soft_batches.iter().enumerate().any(|(i, &soft)| {
-            soft && visible.get(i).copied().unwrap_or(true) && !self.hidden.get(i).copied().unwrap_or(false)
-        })
+        self.soft_batches
+            .iter()
+            .enumerate()
+            .any(|(i, &soft)| soft && visible.get(i).copied().unwrap_or(true) && !self.is_hidden(i))
     }
 
     /// The next frame's soft particle state (`Q3SoftParticleDepth.prepare`):
@@ -1176,6 +1183,19 @@ impl WorldRenderer {
         self.hidden = hidden.to_vec();
     }
 
+    /// The `func_explosive` brush models that are gone
+    /// (`BrushModelState.isEnabled` false): their batches are not drawn,
+    /// as `handleExplosive` disables their mesh.
+    pub fn set_disabled_brush_models(&mut self, disabled: &[usize]) {
+        for (flag, model) in self.disabled.iter_mut().zip(&self.brush_models) {
+            *flag = model.is_some_and(|m| disabled.contains(&m));
+        }
+    }
+
+    fn is_hidden(&self, batch: usize) -> bool {
+        self.hidden.get(batch).copied().unwrap_or(false) || self.disabled.get(batch).copied().unwrap_or(false)
+    }
+
     /// The world's vertices ([`WorldVertex`]), for what draws its batches
     /// with another material.
     #[must_use]
@@ -1241,9 +1261,7 @@ impl WorldRenderer {
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         let mut current = None;
         for pass_ in &self.passes[range] {
-            if !visible.get(pass_.batch).copied().unwrap_or(true)
-                || self.hidden.get(pass_.batch).copied().unwrap_or(false)
-            {
+            if !visible.get(pass_.batch).copied().unwrap_or(true) || self.is_hidden(pass_.batch) {
                 continue;
             }
             if current != Some(pass_.pipeline) {
