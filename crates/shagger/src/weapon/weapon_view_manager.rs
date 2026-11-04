@@ -10,6 +10,10 @@
 //! `presentFire`, and the reload and switch animations (the switch runs
 //! in the holder, which swaps models, and hands its offsets in).
 //!
+//! The muzzle (`getMuzzleWorldPosition`): the model's `tag_flash` seen
+//! through the weapon camera, then put on the main camera's matching
+//! screen ray, or the camera fallback for a model without one.
+//!
 //! Not yet: MD3 view models, the holster and blade charge animations, the
 //! slash trail, the muzzle flash light and model, the on-weapon ammo
 //! counter, spinning barrels, the quad outline, the underwater drift and the light
@@ -424,6 +428,71 @@ impl WeaponView {
     pub fn fov_radians(&self) -> f32 {
         (self.fov * std::f64::consts::PI / 180.0) as f32
     }
+
+    /// `getMuzzleWorldPosition(distance)`: `distance` units from the eye
+    /// along the main camera's screen ray through the muzzle. `socket` is
+    /// the model's muzzle tag in glTF scene space; `camera_world` the main
+    /// camera's world matrix, `main_fov` its vertical FOV in radians.
+    #[must_use]
+    pub fn muzzle_world_position(
+        &self,
+        camera_world: Mat4,
+        main_fov: f32,
+        socket: Option<Vec3>,
+        distance: f64,
+    ) -> DVec3 {
+        let eye = camera_world.w_axis.truncate().as_dvec3();
+        if let Some(socket) = socket {
+            let local = (self.root_matrix() * glb_root_matrix(&self.weapon)).transform_point3(socket);
+            if let Some(ray) = muzzle_screen_ray(local, self.fov_radians(), main_fov) {
+                let direction = camera_world.transform_vector3(ray).as_dvec3().normalize();
+                if direction.is_finite() {
+                    return eye + direction * distance;
+                }
+            }
+        }
+        self.fallback_muzzle(camera_world, distance)
+    }
+
+    /// `getMuzzleWorldPosition`'s fallback for a model without a muzzle
+    /// tag: between the hip (right 1.5, down 1.2, forward 5) and the
+    /// sights (down 0.8, forward 4), moved with the bob and the recoil.
+    /// Not yet: the beam charge's steadying and the underwater drift.
+    fn fallback_muzzle(&self, camera_world: Mat4, distance: f64) -> DVec3 {
+        let eye = camera_world.w_axis.truncate().as_dvec3();
+        let forward = camera_world.transform_vector3(Vec3::Z).as_dvec3().normalize();
+        let right = camera_world.transform_vector3(Vec3::X).as_dvec3().normalize();
+        let up = camera_world.transform_vector3(Vec3::Y).as_dvec3().normalize();
+        let ads = self.ads_progress;
+        let right_off = 1.5 * (1.0 - ads);
+        let down_off = 1.2 - 0.4 * ads;
+        let fwd_off = 5.0 - ads;
+        let scale = 0.05;
+        let bob = self.bob.state();
+        let bob_x = bob.bob_x * scale;
+        let bob_y = (bob.bob_y + bob.jump_land_bob) * scale;
+        let recoil_z = -self.recoil.offset * scale;
+        let origin = eye + forward * (fwd_off + recoil_z) + right * (right_off + bob_x) + up * (-down_off + bob_y);
+        if distance == 5.0 {
+            return origin;
+        }
+        eye + (origin - eye).normalize() * distance
+    }
+}
+
+/// The main camera's ray, in camera space, through the pixel where the
+/// weapon camera (same view, its own FOV) shows `socket` (a camera-space
+/// point): `None` behind the eye.
+#[must_use]
+pub fn muzzle_screen_ray(socket: Vec3, weapon_fov: f32, main_fov: f32) -> Option<Vec3> {
+    if socket.z <= 0.0 {
+        return None;
+    }
+    // Both cameras share the aspect, so it cancels: the screen point is the
+    // socket's x/z and y/z over the weapon camera's tangent.
+    let ratio = (main_fov * 0.5).tan() / (weapon_fov * 0.5).tan();
+    let ray = Vec3::new(socket.x * ratio, socket.y * ratio, socket.z);
+    ray.is_finite().then_some(ray)
 }
 
 #[cfg(test)]
@@ -514,6 +583,39 @@ mod tests {
         }
         assert!(gun.rotation.z > 0.7, "{}", gun.rotation.z);
         assert_eq!(gun.ads_progress, 0.0);
+    }
+
+    #[test]
+    fn the_muzzle_ray_lands_on_the_same_pixel() {
+        // A socket on the weapon camera's axis stays on the main camera's.
+        let on_axis = muzzle_screen_ray(Vec3::new(0.0, 0.0, 30.0), 1.0, 1.4).unwrap();
+        assert_eq!(on_axis, Vec3::new(0.0, 0.0, 30.0));
+        // Off axis: the same screen point through both projections.
+        let socket = Vec3::new(6.0, -4.0, 20.0);
+        let (weapon_fov, main_fov) = (60f32.to_radians(), 100f32.to_radians());
+        let ray = muzzle_screen_ray(socket, weapon_fov, main_fov).unwrap();
+        let aspect = 16.0 / 9.0;
+        let ndc = |p: Vec3, fov: f32| {
+            let t = (fov * 0.5).tan();
+            (p.x / (p.z * t * aspect), p.y / (p.z * t))
+        };
+        let (a, b) = (ndc(socket, weapon_fov), ndc(ray, main_fov));
+        assert!((a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5, "{a:?} {b:?}");
+        assert_eq!(muzzle_screen_ray(Vec3::new(1.0, 0.0, -1.0), 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn the_muzzle_sits_out_along_the_view() {
+        let view = WeaponView::new("plasmagun", Some(plasmagun()));
+        let camera_world = Mat4::from_translation(Vec3::new(100.0, 50.0, -20.0));
+        let eye = DVec3::new(100.0, 50.0, -20.0);
+        // Without a tag: the hip fallback, right, down and ahead.
+        let hip = view.muzzle_world_position(camera_world, 1.5, None, 5.0) - eye;
+        assert!((hip - DVec3::new(1.5, -1.2, 5.0)).length() < 1e-6, "{hip}");
+        // With one, `distance` from the eye, in front of the camera.
+        let tagged = view.muzzle_world_position(camera_world, 1.5, Some(Vec3::new(10.0, 0.0, 0.0)), 5.0) - eye;
+        assert!((tagged.length() - 5.0).abs() < 1e-6, "{tagged}");
+        assert!(tagged.z > 0.0, "{tagged}");
     }
 
     #[test]
