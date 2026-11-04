@@ -97,6 +97,49 @@ pub fn receive_script(global: &str, message: &serde_json::Value) -> String {
     format!("window[{global:?}]&&window[{global:?}].receive({message});")
 }
 
+/// `name` made safe as a file name: no folders, no control or reserved
+/// characters, at most 100 characters; `fallback` when nothing is left.
+#[must_use]
+pub fn safe_file_name(name: &str, fallback: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        .take(100)
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').trim().to_owned();
+    if cleaned.is_empty() {
+        fallback.to_owned()
+    } else {
+        cleaned
+    }
+}
+
+/// A file the page offered for download (`file:save`), written to the
+/// Downloads folder under a name not yet taken (`key.txt`, `key (1).txt`).
+///
+/// # Errors
+/// No Downloads or home folder, or the write failed.
+pub fn save_download(name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| std::io::Error::other("no Downloads folder"))?;
+    std::fs::create_dir_all(&dir)?;
+    let name = safe_file_name(name, "washoi-file.txt");
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name.as_str(), ""),
+    };
+    let mut path = dir.join(&name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    crate::core::atomic_file::write_atomic(&path, bytes)?;
+    Ok(path)
+}
+
 /// Opens an `https` URL in the system browser. Anything else is refused.
 pub fn open_external(url: &str) -> bool {
     if !url.starts_with("https://") || url.chars().any(|c| c.is_control() || c == '"') {
@@ -322,6 +365,16 @@ impl WebviewHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_names_stay_in_their_folder() {
+        assert_eq!(safe_file_name("washoi-key-Ramen.txt", "x"), "washoi-key-Ramen.txt");
+        assert_eq!(safe_file_name("../../etc/passwd", "x"), "passwd");
+        assert_eq!(safe_file_name("C:\\a\\b.txt", "x"), "b.txt");
+        assert_eq!(safe_file_name("a<b>:c?.txt", "x"), "abc.txt");
+        assert_eq!(safe_file_name("..", "x"), "x");
+        assert_eq!(safe_file_name("", "x"), "x");
+    }
 
     #[test]
     fn origins_are_scheme_and_host() {

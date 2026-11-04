@@ -62,12 +62,14 @@ sha2 = "0.10"
 # or WebKitGTK through wry. Off by default: on Linux it needs WebKitGTK 4.1's
 # development files to build.
 wry = { version = "0.57.1", optional = true }
+# The Downloads folder a page's file lands in (webview/), as wry finds it.
+dirs = { version = "7", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
 
 [features]
-webview = ["dep:wry", "dep:gtk"]
+webview = ["dep:wry", "dep:gtk", "dep:dirs"]
 
 [lints]
 workspace = true
