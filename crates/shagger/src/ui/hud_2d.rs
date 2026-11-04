@@ -200,10 +200,15 @@ impl Hud2d {
             .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
 
-    /// A convex polygon in CSS pixels, a colour per point, filled as a fan
-    /// from the first (a `clip-path: polygon(...)` with its background
-    /// sampled at the points).
+    /// A convex polygon in CSS pixels, a colour per point, its edges
+    /// anti-aliased as the browser draws a `clip-path` or a canvas fill.
     pub fn polygon(&mut self, points: &[[f32; 2]], colors: &[[f32; 4]]) {
+        self.shape(None, points, colors, &|_| true);
+    }
+
+    /// A convex polygon filled as a fan from the first point, with hard
+    /// edges: for pieces that tile, where soft edges would show seams.
+    pub fn polygon_hard(&mut self, points: &[[f32; 2]], colors: &[[f32; 4]]) {
         if points.len() < 3 || colors.len() != points.len() {
             return;
         }
@@ -219,6 +224,140 @@ impl Hud2d {
         }
         for i in 1..points.len() as u32 - 1 {
             self.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+        }
+    }
+
+    /// A convex shape in CSS pixels: its `outline` (a colour per point),
+    /// filled as a fan from `centre` when given (else from the first
+    /// point). Edge `i` runs from point `i` to the next; where `soft(i)`,
+    /// it fades out over one target pixel straddling the edge, as the
+    /// browser anti-aliases; elsewhere it stays hard, for a cut between
+    /// pieces that meet.
+    pub fn shape(
+        &mut self,
+        centre: Option<([f32; 2], [f32; 4])>,
+        outline: &[[f32; 2]],
+        colors: &[[f32; 4]],
+        soft: &dyn Fn(usize) -> bool,
+    ) {
+        if colors.len() != outline.len() {
+            return;
+        }
+        let s = self.scale;
+        // Target pixels, without points repeated (their edges have no
+        // direction); an edge keeps the softness of the one it continues.
+        let mut points: Vec<([f32; 2], [f32; 4], bool)> = Vec::with_capacity(outline.len());
+        for (i, (p, &c)) in outline.iter().zip(colors).enumerate() {
+            let p = [p[0] * s, p[1] * s];
+            let edge = soft(i);
+            if let Some(last) = points.last_mut()
+                && (last.0[0] - p[0]).abs() < 1e-3
+                && (last.0[1] - p[1]).abs() < 1e-3
+            {
+                last.2 = edge;
+                continue;
+            }
+            points.push((p, c, edge));
+        }
+        while points.len() > 1 {
+            let (first, last) = (points[0].0, points[points.len() - 1].0);
+            if (first[0] - last[0]).abs() < 1e-3 && (first[1] - last[1]).abs() < 1e-3 {
+                points.pop();
+            } else {
+                break;
+            }
+        }
+        let n = points.len();
+        if n < 3 {
+            return;
+        }
+        let area: f32 = (0..n)
+            .map(|i| {
+                let (a, b) = (points[i].0, points[(i + 1) % n].0);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum();
+        if area.abs() < 1e-6 {
+            return;
+        }
+        // Outward unit normals, whichever way the outline winds.
+        let turn = area.signum();
+        let normals: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let (a, b) = (points[i].0, points[(i + 1) % n].0);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = dx.hypot(dy);
+                [dy / len * turn, -dx / len * turn]
+            })
+            .collect();
+        // How far each point moves so that each soft edge moves half a
+        // pixel: in for the solid fill, out for where the fade ends.
+        const HALF: f32 = 0.5;
+        let offsets: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let j = (i + n - 1) % n;
+                let (n1, n2) = (normals[j], normals[i]);
+                let d1 = if points[j].2 { HALF } else { 0.0 };
+                let d2 = if points[i].2 { HALF } else { 0.0 };
+                let det = n1[0] * n2[1] - n1[1] * n2[0];
+                let o = if det.abs() < 1e-4 {
+                    let d = d1.max(d2);
+                    [(n1[0] + n2[0]) / 2.0 * d, (n1[1] + n2[1]) / 2.0 * d]
+                } else {
+                    [(d1 * n2[1] - d2 * n1[1]) / det, (n1[0] * d2 - n2[0] * d1) / det]
+                };
+                // A sharp corner's miter would spike: cap it.
+                let len = o[0].hypot(o[1]);
+                if len > 4.0 * HALF {
+                    [o[0] / len * 4.0 * HALF, o[1] / len * 4.0 * HALF]
+                } else {
+                    o
+                }
+            })
+            .collect();
+        let uv = self.atlas.white_uv();
+        let base = self.vertices.len() as u32;
+        for (i, &(p, color, _)) in points.iter().enumerate() {
+            let o = offsets[i];
+            self.vertices.push(HudVertex {
+                position: [p[0] - o[0], p[1] - o[1]],
+                uv,
+                color,
+            });
+        }
+        for (i, &(p, color, _)) in points.iter().enumerate() {
+            let o = offsets[i];
+            self.vertices.push(HudVertex {
+                position: [p[0] + o[0], p[1] + o[1]],
+                uv,
+                color: [color[0], color[1], color[2], 0.0],
+            });
+        }
+        let n32 = n as u32;
+        if let Some((c, color)) = centre {
+            let middle = base + 2 * n32;
+            self.vertices.push(HudVertex {
+                position: [c[0] * s, c[1] * s],
+                uv,
+                color,
+            });
+            for i in 0..n32 {
+                self.indices
+                    .extend_from_slice(&[middle, base + i, base + (i + 1) % n32]);
+            }
+        } else {
+            for i in 1..n32 - 1 {
+                self.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+            }
+        }
+        for i in 0..n32 {
+            if !points[i as usize].2 {
+                continue;
+            }
+            let k = (i + 1) % n32;
+            let (inner_a, inner_b, outer_a, outer_b) = (base + i, base + k, base + n32 + i, base + n32 + k);
+            self.indices
+                .extend_from_slice(&[inner_a, outer_a, inner_b, inner_b, outer_a, outer_b]);
         }
     }
 
@@ -238,7 +377,7 @@ impl Hud2d {
             let mut points = Vec::with_capacity(SEGMENTS + 1);
             points.push([cx, cy]);
             points.extend((0..=SEGMENTS).map(|i| at(r0, i)));
-            self.polygon(&points, &vec![c0; points.len()]);
+            self.polygon_hard(&points, &vec![c0; points.len()]);
         }
         for pair in stops.windows(2) {
             let ((ra, ca), (rb, cb)) = (pair[0], pair[1]);
@@ -246,7 +385,7 @@ impl Hud2d {
                 continue;
             }
             for i in 0..SEGMENTS {
-                self.polygon(&[at(ra, i), at(rb, i), at(rb, i + 1), at(ra, i + 1)], &[ca, cb, cb, ca]);
+                self.polygon_hard(&[at(ra, i), at(rb, i), at(rb, i + 1), at(ra, i + 1)], &[ca, cb, cb, ca]);
             }
         }
     }
@@ -377,11 +516,64 @@ mod tests {
         assert_eq!(hud.vertices[3].position, [60.0, 30.0]);
         assert_eq!(hud.indices.len(), 6 * 5);
         hud.polygon(&[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]], &[[1.0; 4]; 4]);
-        assert_eq!(hud.indices.len(), 6 * 6);
+        // Two triangles and a fading band of a quad along each edge.
+        assert_eq!(hud.indices.len(), 6 * 5 + 6 + 4 * 6);
+        assert_eq!(hud.vertices.last().unwrap().position, [-0.5, 8.5]);
+        assert_eq!(hud.vertices.last().unwrap().color[3], 0.0);
+        hud.polygon_hard(&[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]], &[[1.0; 4]; 4]);
         assert_eq!(hud.vertices.last().unwrap().position, [0.0, 8.0]);
         // Text without a font draws nothing and measures nothing.
         let style = TextStyle::new(FontId(0), 16.0, [1.0; 4]);
         assert_eq!(hud.text(0.0, 0.0, "x", &style), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod soft_edges {
+    use super::*;
+
+    fn positions(hud: &Hud2d) -> Vec<[f32; 2]> {
+        hud.vertices.iter().map(|v| v.position).collect()
+    }
+
+    #[test]
+    fn soft_edges_straddle_the_outline_by_half_a_pixel() {
+        let mut hud = Hud2d::new();
+        hud.begin(100.0, 100.0, 1.0);
+        // Either winding grows outward; a repeated closing point is dropped.
+        let square = [[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0], [10.0, 10.0]];
+        hud.polygon(&square, &[[1.0; 4]; 5]);
+        let forward = positions(&hud);
+        assert_eq!(forward.len(), 8);
+        assert_eq!(forward[0], [10.5, 10.5]);
+        assert_eq!(forward[4], [9.5, 9.5]);
+        hud.begin(100.0, 100.0, 1.0);
+        let mut reversed = square;
+        reversed.reverse();
+        hud.polygon(&reversed, &[[1.0; 4]; 5]);
+        assert_eq!(positions(&hud)[0], [10.5, 10.5]);
+        assert_eq!(positions(&hud)[4], [9.5, 9.5]);
+    }
+
+    #[test]
+    fn hard_edges_stay_on_the_outline() {
+        let mut hud = Hud2d::new();
+        hud.begin(100.0, 100.0, 2.0);
+        // The right edge (1, from the second point) is a cut between pieces.
+        let square = [[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]];
+        hud.shape(Some(([15.0, 15.0], [1.0; 4])), &square, &[[1.0; 4]; 4], &|i| i != 1);
+        let p = positions(&hud);
+        // Target pixels: the corners on the cut slide along it.
+        assert_eq!(p[1], [40.0, 20.5]);
+        assert_eq!(p[2], [40.0, 39.5]);
+        assert_eq!(p[0], [20.5, 20.5]);
+        assert_eq!(p[8], [30.0, 30.0]);
+        // Four fan triangles and three bands.
+        assert_eq!(hud.indices.len(), 4 * 3 + 3 * 6);
+        // Nothing for a shape with no area.
+        hud.begin(100.0, 100.0, 1.0);
+        hud.polygon(&[[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]], &[[1.0; 4]; 3]);
+        assert!(hud.indices.is_empty());
     }
 }
 
