@@ -26,6 +26,8 @@ pub mod rendering;
 pub mod ui;
 pub mod viewport;
 pub mod weapon;
+#[cfg(feature = "webview")]
+pub mod webview;
 pub mod world;
 
 pub use shagger_shared as shared;

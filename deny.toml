@@ -6,6 +6,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # proc-macro-error, unmaintained, a build-time macro helper of gtk-rs 0.18,
+  # which wry 0.57 needs on Linux (the webview feature). No newer gtk-rs
+  # for GTK 3 exists; it goes when wry moves on.
+  { id = "RUSTSEC-2024-0370", reason = "gtk-rs 0.18 through wry; no fixed version for GTK 3" },
+]
 
 [licenses]
 version = 2
@@ -27,6 +33,16 @@ allow = [
 ]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# wry (the webview feature, WEBVIEW_LOBBY.md) brings in a few Servo crates
+# under MPL-2.0: file-level copyleft, used unmodified, so allowed for these
+# crates only rather than for every dependency.
+exceptions = [
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

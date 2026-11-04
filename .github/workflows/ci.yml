@@ -18,11 +18,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # cpal's ALSA backend (RUST.md 22.7) links libasound.
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # cpal's ALSA backend (RUST.md 22.7) links libasound; the webview
+      # feature (WebKitGTK through wry) needs WebKitGTK 4.1.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libwebkit2gtk-4.1-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy -p shagger --features webview --all-targets
       - run: cargo test --workspace
+      - run: cargo test -p shagger --features webview --lib webview
 
   msrv:
     runs-on: ubuntu-latest
