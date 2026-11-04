@@ -104,8 +104,8 @@ pub fn render_hdr_to_rgba(
 }
 
 /// [`render_hdr_to_rgba`] with a second pass after the scene: `overlay`
-/// draws over its colour with the depth cleared, as the first-person
-/// weapon's rendering group does.
+/// draws over the processed output with the depth cleared, as the
+/// first-person weapon's camera does (see [`begin_overlay_pass`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_hdr_with_overlay_to_rgba(
     gpu: &Gpu,
@@ -127,11 +127,11 @@ pub fn render_hdr_with_overlay_to_rgba(
         let mut pass = begin_main_pass(&mut encoder, &hdr.color, &hdr.depth, clear);
         record(&mut pass);
     }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     {
-        let mut pass = begin_overlay_pass(&mut encoder, &hdr.color, &hdr.depth);
+        let mut pass = begin_overlay_pass(&mut encoder, &color_view, &hdr.depth);
         overlay(&mut pass);
     }
-    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     read_back(gpu, encoder, &color, width, height)
 }
 
@@ -159,11 +159,11 @@ pub fn render_hdr_with_ui_to_rgba(
         let mut pass = begin_main_pass(&mut encoder, &hdr.color, &hdr.depth, clear);
         record(&mut pass);
     }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     {
-        let mut pass = begin_overlay_pass(&mut encoder, &hdr.color, &hdr.depth);
+        let mut pass = begin_overlay_pass(&mut encoder, &color_view, &hdr.depth);
         overlay(&mut pass);
     }
-    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     {
         let mut pass = begin_ui_pass(&mut encoder, &color_view);
         ui(&mut pass);
@@ -203,11 +203,11 @@ pub fn render_hdr_scene_with_ui_to_rgba(
         let mut pass = begin_continue_pass(&mut encoder, &hdr.color, &hdr.depth);
         rest(&mut pass);
     }
+    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     {
-        let mut pass = begin_overlay_pass(&mut encoder, &hdr.color, &hdr.depth);
+        let mut pass = begin_overlay_pass(&mut encoder, &color_view, &hdr.depth);
         overlay(&mut pass);
     }
-    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
     {
         let mut pass = begin_ui_pass(&mut encoder, &color_view);
         ui(&mut pass);
@@ -335,8 +335,13 @@ pub fn begin_continue_pass<'e>(
     })
 }
 
-/// Begins a pass over what the main pass drew: colour kept, depth cleared
-/// to 1 (`setRenderingAutoClearDepthStencil(1, true, true, false)`).
+/// Begins the first-person weapon's pass: colour kept, depth cleared to 1
+/// (`setRenderingAutoClearDepthStencil(1, true, true, false)`). `color` is
+/// the image-processed output, not the HDR target: Babylon's pipeline runs
+/// on the world camera only, so the weapon camera draws after it, straight
+/// to the canvas, and its materials (built for image processing as a post
+/// process) write their linear colour there without tone mapping, gamma,
+/// bloom or vignette. Models drawn here take the output's format.
 pub fn begin_overlay_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     color: &wgpu::TextureView,
