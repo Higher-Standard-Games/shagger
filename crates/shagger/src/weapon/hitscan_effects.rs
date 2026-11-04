@@ -5,8 +5,7 @@
 //! TypeScript reaches the scene, the collision manager and the light pool
 //! through singletons; here the caller passes the world to trace against
 //! and the light pool. Not yet: wall marks, the rendered-mesh pick for a
-//! shot that starts inside a brush, `fireBolt`, `fireSlash`, and the local
-//! Voltaic hero beam's truth bookkeeping. A traveling pellet, a Babylon cone
+//! shot that starts inside a brush, `fireBolt` and `fireSlash`. A traveling pellet, a Babylon cone
 //! mesh in TypeScript, is drawn as a short streak that crosses its ray in
 //! the same time.
 
@@ -25,6 +24,7 @@ use crate::weapon::rail::rail_effect_renderer::RailEffectRenderer;
 use crate::weapon::rail::rail_profiles::{RailEffectSample, RailImpactKind};
 use crate::weapon::tracer::streak_tracer_renderer::{StreakTracerRenderer, StreakTracerShot};
 use crate::weapon::voltaic::voltaic_effect_renderer::VoltaicEffectRenderer;
+use crate::weapon::voltaic::voltaic_profiles::{VoltaicEffectSample, VoltaicImpactKind};
 
 const TRACER_IMPACT_LIGHT_INTENSITY: f32 = 0.25;
 /// Embers per contact, per weapon class.
@@ -32,6 +32,59 @@ const TRACER_SPARKS: f64 = 6.0;
 /// Per pellet: a full riot gun blast is this times the pellet count.
 const PELLET_SPARKS: f64 = 3.0;
 const RAIL_SPARKS: f64 = 16.0;
+/// `VOLTAIC_TRUTH_MAX_ANGLE_DEG`: how far the view may turn from the
+/// server's last beam before the local beam traces its own contact.
+pub const VOLTAIC_TRUTH_MAX_ANGLE_DEG: f64 = 8.0;
+/// `LOCAL_TRUTH_TIMEOUT`: seconds the server's beam contact stays fresh.
+const LOCAL_TRUTH_TIMEOUT: f64 = 0.1;
+
+/// `isVoltaicTruthAligned`: the current aim within
+/// [`VOLTAIC_TRUTH_MAX_ANGLE_DEG`] of the server's.
+#[must_use]
+pub fn is_voltaic_truth_aligned(current: DVec3, truth: DVec3) -> bool {
+    let current_length_squared = current.length_squared();
+    let truth_length_squared = truth.length_squared();
+    if current_length_squared < 0.000_001 || truth_length_squared < 0.000_001 {
+        return false;
+    }
+    let dot = current.dot(truth) / (current_length_squared * truth_length_squared).sqrt();
+    dot >= (VOLTAIC_TRUTH_MAX_ANGLE_DEG * std::f64::consts::PI / 180.0).cos()
+}
+
+/// `BeamConfig`: the local Voltaic beam this frame.
+#[derive(Debug, Clone, Copy)]
+pub struct BeamConfig {
+    /// Where the beam is drawn from (the muzzle).
+    pub origin: DVec3,
+    /// Where the damage is traced from (the eye); `origin` by default.
+    pub trace_origin: Option<DVec3>,
+    pub direction: DVec3,
+    /// 850 by default.
+    pub max_range: Option<f64>,
+    pub color: Option<Vec3>,
+}
+
+/// The server's last contact for the local beam (`updateLocalLightningTruth`).
+#[derive(Debug, Clone, Copy)]
+struct LocalVoltaicTruth {
+    at: f64,
+    endpoint: DVec3,
+    direction: Option<DVec3>,
+    impact_kind: VoltaicImpactKind,
+    normal: Option<DVec3>,
+}
+
+impl Default for LocalVoltaicTruth {
+    fn default() -> Self {
+        Self {
+            at: f64::NEG_INFINITY,
+            endpoint: DVec3::ZERO,
+            direction: None,
+            impact_kind: VoltaicImpactKind::None,
+            normal: None,
+        }
+    }
+}
 
 /// Where a shot stopped: `marks` is false on surfaces that take no marks.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,6 +213,7 @@ pub struct HitscanEffects {
     pending_impacts: Vec<PendingImpact>,
     /// Random pellets when a blast has no seed (`Math.random`).
     random_seed: u32,
+    local_voltaic: LocalVoltaicTruth,
 }
 
 impl HitscanEffects {
@@ -175,6 +229,7 @@ impl HitscanEffects {
             effects: Vec::new(),
             pending_impacts: Vec::new(),
             random_seed: 0x5EED,
+            local_voltaic: LocalVoltaicTruth::default(),
         }
     }
 
@@ -357,6 +412,84 @@ impl HitscanEffects {
         self.voltaic.update_remote(now, entity_id, &sample, direction);
     }
 
+    /// `updateLightningBeam`: the local player's beam, every frame while
+    /// it fires: from the muzzle to the server's last contact while that
+    /// is fresh and along the aim, else to what a trace from the eye hits.
+    /// Returns the contact, `None` when the beam hits nothing.
+    pub fn update_lightning_beam(&mut self, now: f64, world: &mut dyn ShotWorld, cfg: &BeamConfig) -> Option<DVec3> {
+        let range = cfg.max_range.unwrap_or(850.0);
+        let color = cfg.color.unwrap_or(Vec3::new(1.0, 0.7, 0.1));
+        let truth = self.local_voltaic;
+        let fresh = now - truth.at <= LOCAL_TRUTH_TIMEOUT
+            && truth
+                .direction
+                .is_some_and(|d| is_voltaic_truth_aligned(cfg.direction, d));
+        let trace_origin = cfg.trace_origin.unwrap_or(cfg.origin);
+        let (end, impact_kind, impact_normal) = if fresh {
+            (truth.endpoint, truth.impact_kind, truth.normal)
+        } else {
+            match world.trace_shot(trace_origin, cfg.direction, range) {
+                Some(hit) => (hit.point, VoltaicImpactKind::World, Some(hit.normal)),
+                None => (trace_origin + cfg.direction * range, VoltaicImpactKind::None, None),
+            }
+        };
+        self.voltaic.update_hero(&VoltaicEffectSample {
+            start: cfg.origin,
+            end,
+            color,
+            impact_kind,
+            impact_normal,
+            intensity: None,
+        });
+        (impact_kind != VoltaicImpactKind::None).then_some(end)
+    }
+
+    /// `beginLightning`: a new activation, without a late contact from
+    /// the last one.
+    pub fn begin_lightning(&mut self) {
+        self.local_voltaic = LocalVoltaicTruth::default();
+    }
+
+    /// `updateLocalLightningTruth`: the server's contact for our beam.
+    pub fn update_local_lightning_truth(&mut self, now: f64, sample: &VoltaicEffectSample, direction: DVec3) {
+        let length_squared = direction.length_squared();
+        self.local_voltaic = LocalVoltaicTruth {
+            at: now,
+            endpoint: sample.end,
+            direction: (length_squared > 0.000_001).then(|| direction / length_squared.sqrt()),
+            impact_kind: sample.impact_kind,
+            normal: sample.impact_normal,
+        };
+    }
+
+    /// `stopLightning`: the local beam lets go and fades.
+    pub fn stop_lightning(&mut self, now: f64) {
+        self.voltaic.stop_hero(now);
+        self.local_voltaic = LocalVoltaicTruth::default();
+    }
+
+    /// `fireLightningArc`: one chain-lightning arc between two players.
+    pub fn fire_lightning_arc(&mut self, now: f64, from: DVec3, to: DVec3, color: Option<Vec3>) {
+        self.voltaic.fire_chain_arc(
+            now,
+            &VoltaicEffectSample {
+                start: from,
+                end: to,
+                color: color.unwrap_or(Vec3::new(1.0, 0.7, 0.1)),
+                impact_kind: VoltaicImpactKind::Player,
+                impact_normal: None,
+                intensity: Some(1.12),
+            },
+            0.14,
+        );
+    }
+
+    /// `setRemoteLightningMuzzleResolver`, once a frame before drawing:
+    /// remote beams leave their shooters' muzzles as they are now.
+    pub fn refresh_remote_lightning_starts(&mut self, resolver: &mut dyn FnMut(&str, DVec3) -> Option<DVec3>) {
+        self.voltaic.refresh_remote_starts(resolver);
+    }
+
     /// `fireMuzzleFlash`.
     pub fn fire_muzzle_flash(&mut self, now: f64, spawn: &MuzzleFlashSpawn) {
         self.muzzle_flashes.spawn(now, spawn);
@@ -499,6 +632,16 @@ mod tests {
                 marks: true,
             })
         }
+    }
+
+    #[test]
+    fn the_beam_truth_holds_within_eight_degrees() {
+        let truth = DVec3::new(0.0, 0.0, 2.0);
+        assert!(is_voltaic_truth_aligned(DVec3::Z, truth));
+        let turned = |deg: f64| DVec3::new(deg.to_radians().sin(), 0.0, deg.to_radians().cos());
+        assert!(is_voltaic_truth_aligned(turned(7.9), truth));
+        assert!(!is_voltaic_truth_aligned(turned(8.1), truth));
+        assert!(!is_voltaic_truth_aligned(DVec3::ZERO, truth));
     }
 
     #[test]

@@ -165,7 +165,7 @@ impl VoltaicInstanceBatch {
         self.dirty = true;
     }
 
-    fn refresh_starts(&mut self, resolver: &mut VoltaicRemoteStartResolver) {
+    fn refresh_starts(&mut self, resolver: &mut dyn FnMut(&str, DVec3) -> Option<DVec3>) {
         for (slot, data) in self.slots.iter().zip(self.data.iter_mut()) {
             if !slot.dynamic_start {
                 continue;
@@ -303,6 +303,13 @@ impl VoltaicEffectRenderer {
 
     pub fn remove_remote(&mut self, key: &str) {
         self.remote.remove(key);
+    }
+
+    /// Moves each remote beam's start to `resolver`'s muzzle for its
+    /// shooter (keyed by entity) and aim, as the stored resolver does in
+    /// [`Self::prepare`], for a caller that cannot lend one for good.
+    pub fn refresh_remote_starts(&mut self, resolver: &mut dyn FnMut(&str, DVec3) -> Option<DVec3>) {
+        self.remote.refresh_starts(resolver);
     }
 
     pub fn set_remote_start_resolver(&mut self, resolver: Option<Box<VoltaicRemoteStartResolver>>) {

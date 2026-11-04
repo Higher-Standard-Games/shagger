@@ -56,6 +56,9 @@ pub struct MuzzleFlashSpawn {
     pub intensity: Option<f64>,
     /// Lifetime in seconds (0.06 by default).
     pub duration: Option<f64>,
+    /// `anchorResolver`: a flash that rides its own point (the blade's
+    /// tip) instead of the shared muzzle, named for [`MuzzleFlashRenderer::track_anchors`].
+    pub anchor: Option<u32>,
 }
 
 pub struct MuzzleFlashRenderer {
@@ -95,7 +98,8 @@ impl MuzzleFlashRenderer {
                 [p.x, p.y, p.z, seed],
                 [c.x, c.y, c.z, now],
                 [size, flash.intensity.unwrap_or(20.0), duration, flash.style.as_float()],
-                [0.0; 4],
+                // i3.x, unused by the shader: the flash's own anchor plus one.
+                [flash.anchor.map_or(0.0, |a| f64::from(a) + 1.0), 0.0, 0.0, 0.0],
             ]),
         );
     }
@@ -104,13 +108,27 @@ impl MuzzleFlashRenderer {
     /// live muzzle, so it rides the barrel instead of hanging where the gun
     /// was when it fired.
     pub fn track_anchor(&mut self, anchor: DVec3) {
+        self.track_anchors(|_| Some(anchor));
+    }
+
+    /// `trackAnchors`: every live flash moves to its anchor, `resolve(None)`
+    /// for the shared muzzle or `resolve(Some(id))` for a flash spawned with
+    /// its own; one that resolves to nothing stays where it is.
+    pub fn track_anchors(&mut self, resolve: impl Fn(Option<u32>) -> Option<DVec3>) {
+        let shared = resolve(None);
         for data in &mut self.slots.data {
-            data[0] = anchor.x as f32;
-            data[1] = anchor.y as f32;
-            data[2] = anchor.z as f32;
-        }
-        if !self.slots.data.is_empty() {
-            self.slots.dirty = true;
+            let own = data[12];
+            let anchor = if own > 0.5 {
+                resolve(Some((own - 1.0).round() as u32))
+            } else {
+                shared
+            };
+            if let Some(anchor) = anchor {
+                data[0] = anchor.x as f32;
+                data[1] = anchor.y as f32;
+                data[2] = anchor.z as f32;
+                self.slots.dirty = true;
+            }
         }
     }
 

@@ -30,8 +30,12 @@
 //! the aim, the recoil and the swing carry over a switch; a holder of one
 //! [`WeaponView`] per weapon hands them on with [`WeaponView::carry_from`].
 //!
-//! Not yet: MD3 view models, the muzzle flash light, the blade's
-//! reflection fill (`BladeEnvironment`).
+//! The muzzle flash's light on the gun (`muzzleFlashLight`): lit at a
+//! shot, fading at `MUZZLE_FLASH_DECAY`; the caller puts it at the socket.
+//! A socket's screen ray, jittered (`getBladeTipWorldPosition`).
+//!
+//! Not yet: MD3 view models and the blade's reflection fill
+//! (`BladeEnvironment`).
 
 use glam::{DVec3, Mat4, Vec3};
 
@@ -313,6 +317,8 @@ pub struct ShotStyle {
     pub refire_seconds: Option<f64>,
     /// `meleeRadius` is set: the shot is a swing.
     pub melee: bool,
+    /// `muzzleFlash`'s light on the gun: colour, intensity and range.
+    pub flash: Option<FlashLight>,
 }
 
 impl Default for ShotStyle {
@@ -322,8 +328,37 @@ impl Default for ShotStyle {
             ads_recoil_scale: 0.2,
             refire_seconds: None,
             melee: false,
+            flash: None,
         }
     }
+}
+
+/// A weapon definition's `muzzleFlash`, as its light on the gun reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlashLight {
+    pub color: Vec3,
+    /// `MUZZLE_FLASH_MAX_INTENSITY` when unset.
+    pub intensity: Option<f64>,
+    /// `MUZZLE_FLASH_RANGE` when unset.
+    pub range: Option<f64>,
+}
+
+/// `MUZZLE_FLASH_MAX_INTENSITY`: the flash light's peak, and what its
+/// intensity is measured against.
+pub const MUZZLE_FLASH_MAX_INTENSITY: f64 = 15.0;
+/// `MUZZLE_FLASH_DECAY`: intensity lost a second (half for the blade).
+pub const MUZZLE_FLASH_DECAY: f64 = 150.0;
+/// `MUZZLE_FLASH_RANGE`, units.
+pub const MUZZLE_FLASH_RANGE: f64 = 30.0;
+
+/// The muzzle flash's point light on the view model this frame
+/// (`muzzleFlashLight`, which lights only the weapon layer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuzzleFlashLight {
+    pub diffuse: Vec3,
+    pub specular: Vec3,
+    pub intensity: f64,
+    pub range: f64,
 }
 
 /// What the view model reads about the player each frame
@@ -376,6 +411,11 @@ pub struct WeaponView {
     pub lighting: WeaponLighting,
     /// `submersionAmount`: how deep the camera is under liquid, 0 to 1.
     pub submersion_amount: f64,
+    /// `muzzleFlashIntensity`: from the flash's intensity at a shot down to
+    /// 0 at `MUZZLE_FLASH_DECAY` a second.
+    pub muzzle_flash_intensity: f64,
+    /// The last shot's flash light: colour and range.
+    flash_light: Option<(Vec3, f64)>,
 }
 
 impl WeaponView {
@@ -417,6 +457,8 @@ impl WeaponView {
             holster: WeaponHolsterAnim::default(),
             lighting: WeaponLighting::default(),
             submersion_amount: 0.0,
+            muzzle_flash_intensity: 0.0,
+            flash_light: None,
         };
         view.apply_position();
         view
@@ -487,6 +529,14 @@ impl WeaponView {
     /// `presentFire`'s motion: the recoil, timed to the fire rate, and a
     /// melee weapon's swing (not for a charged throw).
     pub fn present_fire(&mut self, shot: &ShotStyle, projectile_fire: bool) {
+        // The light: lit at the flash's intensity, its colour and range.
+        self.muzzle_flash_intensity = shot
+            .flash
+            .and_then(|f| f.intensity)
+            .unwrap_or(MUZZLE_FLASH_MAX_INTENSITY);
+        let color = shot.flash.map_or(Vec3::new(1.0, 0.8, 0.3), |f| f.color);
+        let range = shot.flash.and_then(|f| f.range).unwrap_or(MUZZLE_FLASH_RANGE);
+        self.flash_light = Some((color, range));
         self.recoil.fire(
             shot.recoil_scale,
             self.ads_progress,
@@ -521,6 +571,11 @@ impl WeaponView {
         let dt = input.delta_time;
         self.clock += dt;
         self.holster.update(dt);
+        // `updateMuzzleFlash`: the light fades, the blade's at half the rate.
+        if self.muzzle_flash_intensity > 0.0 {
+            let decay = MUZZLE_FLASH_DECAY * if self.weapon == "blade" { 0.5 } else { 1.0 };
+            self.muzzle_flash_intensity = (self.muzzle_flash_intensity - decay * dt).max(0.0);
+        }
         let reloading = input.reloading || self.reload_anim.is_reloading();
         let base = self.effective_base_position;
         self.bob.update(
@@ -667,6 +722,50 @@ impl WeaponView {
             }
         }
         self.fallback_muzzle(camera_world, distance)
+    }
+
+    /// `muzzleFlashLight` this frame: the last shot's colour at the faded
+    /// intensity (over `MUZZLE_FLASH_MAX_INTENSITY`), its specular half
+    /// the colour; `None` once it is out.
+    #[must_use]
+    pub fn muzzle_flash_light(&self) -> Option<MuzzleFlashLight> {
+        let (color, range) = self.flash_light?;
+        (self.muzzle_flash_intensity > 0.0).then(|| MuzzleFlashLight {
+            diffuse: color,
+            specular: color * 0.5,
+            intensity: self.muzzle_flash_intensity / MUZZLE_FLASH_MAX_INTENSITY,
+            range,
+        })
+    }
+
+    /// `getBladeTipWorldPosition(jitterX, jitterY)`'s projection, for any
+    /// socket: `distance` units from the eye along the main camera's ray
+    /// through the pixel where the weapon camera shows `socket` (glTF scene
+    /// space), moved `jitter` pixels across a screen `viewport_height`
+    /// pixels tall. `None` for a socket behind the eye.
+    #[must_use]
+    pub fn socket_world_position(
+        &self,
+        camera_world: Mat4,
+        main_fov: f32,
+        socket: Vec3,
+        distance: f64,
+        jitter: (f64, f64),
+        viewport_height: f64,
+    ) -> Option<DVec3> {
+        let eye = camera_world.w_axis.truncate().as_dvec3();
+        let local = (self.root_matrix() * glb_root_matrix(&self.weapon)).transform_point3(socket);
+        let ray = muzzle_screen_ray(local, self.fov_radians(), main_fov)?.as_dvec3();
+        // A pixel is 2 tan(fov / 2) / height of the screen ray's x/z and
+        // y/z, across as up (the aspect cancels); screen y runs down.
+        let per_pixel = 2.0 * f64::from(main_fov * 0.5).tan() / viewport_height.max(1.0);
+        let ray = DVec3::new(
+            ray.x / ray.z + jitter.0 * per_pixel,
+            ray.y / ray.z - jitter.1 * per_pixel,
+            1.0,
+        );
+        let direction = camera_world.transform_vector3(ray.as_vec3()).as_dvec3().normalize();
+        direction.is_finite().then(|| eye + direction * distance)
     }
 
     /// `getMuzzleWorldPosition`'s fallback for a model without a muzzle
@@ -960,6 +1059,59 @@ mod tests {
             (still - DVec3::new(1.5, -1.2 - WEAPON_FLOAT_SAG, 5.0)).length() < 1e-9,
             "{still}"
         );
+    }
+
+    #[test]
+    fn a_socket_without_jitter_is_the_muzzle_and_a_jitter_moves_it_across() {
+        let view = WeaponView::new("plasmagun", Some(plasmagun()));
+        let camera_world = Mat4::from_translation(Vec3::new(100.0, 50.0, -20.0));
+        let socket = Vec3::new(10.0, 0.0, 0.0);
+        let muzzle = view.muzzle_world_position(camera_world, 1.5, Some(socket), 5.0);
+        let still = view
+            .socket_world_position(camera_world, 1.5, socket, 5.0, (0.0, 0.0), 720.0)
+            .unwrap();
+        assert!((still - muzzle).length() < 1e-5, "{still} {muzzle}");
+        // Four pixels right and down: the ray turns right (+X) and down (-Y)
+        // by four pixels' worth of the screen's tangent.
+        let eye = DVec3::new(100.0, 50.0, -20.0);
+        let moved = view
+            .socket_world_position(camera_world, 1.5, socket, 5.0, (4.0, 4.0), 720.0)
+            .unwrap();
+        let (a, b) = (still - eye, moved - eye);
+        let per_pixel = 2.0 * 0.75f64.tan() / 720.0;
+        assert!((b.x / b.z - a.x / a.z - 4.0 * per_pixel).abs() < 1e-5, "{a} {b}");
+        assert!((b.y / b.z - a.y / a.z + 4.0 * per_pixel).abs() < 1e-5, "{a} {b}");
+        assert!((b.length() - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_flash_light_fades_from_the_shot() {
+        let mut view = WeaponView::new("machinegun", Some(plasmagun()));
+        assert_eq!(view.muzzle_flash_light(), None);
+        let shot = ShotStyle {
+            flash: Some(FlashLight {
+                color: Vec3::new(1.0, 0.9, 0.3),
+                intensity: Some(18.0),
+                range: Some(30.0),
+            }),
+            ..ShotStyle::default()
+        };
+        view.present_fire(&shot, false);
+        let lit = view.muzzle_flash_light().unwrap();
+        assert!((lit.intensity - 1.2).abs() < 1e-12);
+        assert_eq!(lit.range, 30.0);
+        assert_eq!(lit.specular, Vec3::new(0.5, 0.45, 0.15));
+        // 150 a second: out after 0.12 s.
+        view.update(&ViewModelInput {
+            delta_time: 0.06,
+            ..ViewModelInput::default()
+        });
+        assert!((view.muzzle_flash_light().unwrap().intensity - 0.6).abs() < 1e-9);
+        view.update(&ViewModelInput {
+            delta_time: 0.07,
+            ..ViewModelInput::default()
+        });
+        assert_eq!(view.muzzle_flash_light(), None);
     }
 
     #[test]
