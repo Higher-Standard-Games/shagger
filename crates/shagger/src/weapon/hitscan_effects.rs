@@ -4,7 +4,7 @@
 //!
 //! TypeScript reaches the scene, the collision manager and the light pool
 //! through singletons; here the caller passes the world to trace against
-//! and the light pool. Not yet: wall marks, the rendered-mesh pick for a
+//! and the light pool. Not yet: the rendered-mesh pick for a
 //! shot that starts inside a brush, `fireBolt` and `fireSlash`. A traveling pellet, a Babylon cone
 //! mesh in TypeScript, is drawn as a short streak that crosses its ray in
 //! the same time.
@@ -18,6 +18,7 @@ use crate::physics::content_flags::{content, surface};
 use crate::physics::sweep_collision_backend::SweepCollisionBackend;
 use crate::rendering::gpu::Gpu;
 use crate::weapon::impact::impact_spark_renderer::{ImpactSparkBurst, ImpactSparkRenderer};
+use crate::weapon::marks::wall_marks::WallMarks;
 use crate::weapon::muzzle::muzzle_flash_renderer::{MuzzleFlashRenderer, MuzzleFlashSpawn};
 use crate::weapon::point_light_pool::{PointLightPool, PooledLight};
 use crate::weapon::rail::rail_effect_renderer::RailEffectRenderer;
@@ -209,6 +210,7 @@ pub struct HitscanEffects {
     pub muzzle_flashes: MuzzleFlashRenderer,
     pub impact_sparks: ImpactSparkRenderer,
     pub streaks: StreakTracerRenderer,
+    pub wall_marks: WallMarks,
     effects: Vec<ActiveFlash>,
     pending_impacts: Vec<PendingImpact>,
     /// Random pellets when a blast has no seed (`Math.random`).
@@ -226,6 +228,7 @@ impl HitscanEffects {
             muzzle_flashes: MuzzleFlashRenderer::new(gpu, color_format),
             impact_sparks: ImpactSparkRenderer::new(gpu, color_format),
             streaks: StreakTracerRenderer::new(gpu, color_format),
+            wall_marks: WallMarks::new(gpu, color_format),
             effects: Vec::new(),
             pending_impacts: Vec::new(),
             random_seed: 0x5EED,
@@ -285,7 +288,18 @@ impl HitscanEffects {
             60.0,
             0.16,
         );
+        if impact.trace.marks {
+            self.spawn_wall_mark(now, point, normal, impact.color, 0.3);
+        }
         self.spawn_impact_sparks(now, point, normal, impact.direction, impact.color, TRACER_SPARKS, false);
+    }
+
+    /// `spawnWallMark`, unless `r_marks` is off.
+    fn spawn_wall_mark(&mut self, now: f64, position: DVec3, normal: DVec3, color: Vec3, size: f64) {
+        let on = crate::core::cvar::with_cvars(|c| c.get("r_marks").is_none() || c.get_number("r_marks") != 0.0);
+        if on {
+            self.wall_marks.spawn(now, position, normal, color, size);
+        }
     }
 
     /// `firePellets` at `now`: every pellet traced and sparking, a few drawn
@@ -320,6 +334,10 @@ impl HitscanEffects {
             let endpoint = hit.map_or(cfg.origin + dir * range, |h| h.point);
             if let Some(h) = hit {
                 hits.push(h.point);
+                // Every pellet marks and sparks.
+                if h.marks {
+                    self.spawn_wall_mark(now, h.point, h.normal, color, 2.0);
+                }
                 self.spawn_impact_sparks(now, h.point, h.normal, dir, color, PELLET_SPARKS, false);
             }
             if i % stride == 0 && i / stride < visible {
@@ -522,6 +540,7 @@ impl HitscanEffects {
         self.muzzle_flashes.update(now);
         self.impact_sparks.update(now);
         self.streaks.update(now);
+        self.wall_marks.update(now);
     }
 
     /// `clear`: every effect gone and its light given back.
@@ -535,6 +554,7 @@ impl HitscanEffects {
         self.muzzle_flashes.clear();
         self.impact_sparks.clear();
         self.streaks.clear();
+        self.wall_marks.clear();
     }
 
     #[allow(clippy::too_many_arguments)]
