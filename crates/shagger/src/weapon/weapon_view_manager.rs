@@ -20,20 +20,33 @@
 //! The blade's charge (`WeaponCharge`): aiming a melee weapon shakes it
 //! and puts the charge's outline on it.
 //!
-//! Not yet: MD3 view models, the holster animation, the muzzle flash
-//! light, the underwater drift and the light grid tint (`WeaponLighting`, which only reaches StandardMaterial layers
-//! and the blade's light).
+//! The cvars it reads each frame ([`ViewModelCvars`]: `cg_handedness`,
+//! `cg_weaponfov`, `cl_gunbob*`, `cl_ads_time`, `cl_ads_offset_y` and the
+//! `cl_wep_*` overrides), the ladder's holster (`WeaponHolsterAnim`,
+//! `setMovementHidden`), the light grid tint (`WeaponLighting`, which shows
+//! on the blade's light) and the underwater drift of the tagless muzzle.
+//!
+//! One `WeaponViewManager` holds every weapon in the TypeScript, so the bob,
+//! the aim, the recoil and the swing carry over a switch; a holder of one
+//! [`WeaponView`] per weapon hands them on with [`WeaponView::carry_from`].
+//!
+//! Not yet: MD3 view models, the muzzle flash light, the blade's
+//! reflection fill (`BladeEnvironment`).
 
 use glam::{DVec3, Mat4, Vec3};
 
 use super::weapon_barrels::{BarrelSpin, babylon_euler};
 use super::weapon_bob::{BobInput, GunBobVars, WeaponBob};
 use super::weapon_charge::WeaponCharge;
+use super::weapon_holster_anim::WeaponHolsterAnim;
+use super::weapon_lighting::WeaponLighting;
 use super::weapon_recoil::WeaponRecoil;
 use super::weapon_reload_anim::WeaponReloadAnim;
 use super::weapon_slash::WeaponSlash;
 use super::weapon_switch_anim::SwitchAnimOffsets;
 use crate::babylon::materials::standard_material::{StandardMaterialParams, TextureUse};
+use crate::core::cvar::Cvars;
+use crate::loader::bsp::light_grid_sampling::LightSample;
 use crate::loader::model::gltf_model::ModelMaterial;
 use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline};
 
@@ -47,6 +60,89 @@ pub const DEFAULT_WEAPON_FOV: f64 = 60.0;
 pub const DEFAULT_ADS_TIME: f64 = 0.08;
 /// `cl_ads_offset_y`'s default.
 pub const DEFAULT_ADS_OFFSET_Y: f64 = 2.0;
+/// Underwater drift: slow enough to read as buoyancy, not as sway.
+const WEAPON_FLOAT_HZ: f64 = 0.35;
+/// Peak drift in world units.
+const WEAPON_FLOAT_AMPLITUDE: f64 = 0.55;
+/// Constant droop: the weapon hangs a little heavier in the water.
+const WEAPON_FLOAT_SAG: f64 = 0.35;
+
+/// The `MovementVars` the view model reads. A `cl_wep_*` override of 0
+/// leaves the weapon's own value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewModelCvars {
+    pub handedness: Handedness,
+    /// `cg_weaponfov`, degrees.
+    pub fov: f64,
+    pub bob: GunBobVars,
+    /// `cl_ads_time`.
+    pub ads_time: f64,
+    /// `cl_ads_offset_y`.
+    pub ads_offset_y: f64,
+    /// `cl_wep_hip_x`, `_y`, `_z`.
+    pub hip: DVec3,
+    /// `cl_wep_ads_x`, `_y`, `_z`.
+    pub ads: DVec3,
+    /// `cl_wep_scale`.
+    pub scale: f64,
+}
+
+impl Default for ViewModelCvars {
+    fn default() -> Self {
+        Self {
+            handedness: Handedness::Right,
+            fov: DEFAULT_WEAPON_FOV,
+            bob: GunBobVars::default(),
+            ads_time: DEFAULT_ADS_TIME,
+            ads_offset_y: DEFAULT_ADS_OFFSET_Y,
+            hip: DVec3::ZERO,
+            ads: DVec3::ZERO,
+            scale: 0.0,
+        }
+    }
+}
+
+impl ViewModelCvars {
+    /// Reads them, each at its `MovementVars` default when unset.
+    #[must_use]
+    pub fn read(cvars: &Cvars) -> Self {
+        let d = Self::default();
+        let num = |name: &str, fallback: f64| {
+            if cvars.exists(name) {
+                cvars.get_number(name)
+            } else {
+                fallback
+            }
+        };
+        let vec = |prefix: &str| {
+            DVec3::new(
+                num(&format!("{prefix}_x"), 0.0),
+                num(&format!("{prefix}_y"), 0.0),
+                num(&format!("{prefix}_z"), 0.0),
+            )
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let hand = num("cg_handedness", 1.0) as i32;
+        Self {
+            handedness: Handedness::from_cvar(hand),
+            fov: num("cg_weaponfov", d.fov),
+            bob: GunBobVars {
+                enabled: num("cl_gunbob", 1.0) > 0.0,
+                amplitude: num("cl_gunbob_amplitude", d.bob.amplitude),
+                speed: num("cl_gunbob_speed", d.bob.speed),
+                sprint_tilt: num("cl_gunbob_sprint_tilt", d.bob.sprint_tilt),
+                sprint_inward: num("cl_gunbob_sprint_inward", d.bob.sprint_inward),
+                jump: num("cl_gunbob_jump", d.bob.jump),
+                land: num("cl_gunbob_land", d.bob.land),
+            },
+            ads_time: num("cl_ads_time", d.ads_time),
+            ads_offset_y: num("cl_ads_offset_y", d.ads_offset_y),
+            hip: vec("cl_wep_hip"),
+            ads: vec("cl_wep_ads"),
+            scale: num("cl_wep_scale", 0.0),
+        }
+    }
+}
 
 /// `HAND_OFFSETS` (`cg_handedness` style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -120,12 +216,13 @@ pub fn weapon_light() -> ModelLight {
 
 /// `bladeLight`: the blade's specular source, a directional light parented
 /// to the weapon camera; `camera_rotation` turns its direction to world.
+/// `color` is `WeaponLighting`'s, its diffuse and specular.
 #[must_use]
-pub fn blade_light(camera_rotation: glam::Quat) -> ModelLight {
+pub fn blade_light(camera_rotation: glam::Quat, color: Vec3) -> ModelLight {
     ModelLight::Directional {
         direction: camera_rotation * Vec3::new(0.3, -0.4, 1.0),
-        diffuse: Vec3::ONE,
-        specular: Vec3::ONE,
+        diffuse: color,
+        specular: color,
         intensity: 3.0,
     }
 }
@@ -255,10 +352,7 @@ pub struct WeaponView {
     pub ads_progress: f64,
     pub bob: WeaponBob,
     pub recoil: WeaponRecoil,
-    pub bob_vars: GunBobVars,
-    pub handedness: Handedness,
-    /// `cg_weaponfov`, degrees.
-    pub fov: f64,
+    pub cvars: ViewModelCvars,
     /// The root's position, Euler rotation and scaling this frame.
     pub position: DVec3,
     pub rotation: DVec3,
@@ -276,6 +370,12 @@ pub struct WeaponView {
     pub reload_anim: WeaponReloadAnim,
     /// The holder's switch slide this frame.
     pub switch_offsets: SwitchAnimOffsets,
+    /// `WeaponHolsterAnim`: stowed while climbing.
+    pub holster: WeaponHolsterAnim,
+    /// `WeaponLighting`: the light grid's colour at the camera, eased.
+    pub lighting: WeaponLighting,
+    /// `submersionAmount`: how deep the camera is under liquid, 0 to 1.
+    pub submersion_amount: f64,
 }
 
 impl WeaponView {
@@ -303,9 +403,7 @@ impl WeaponView {
             ads_progress: 0.0,
             bob: WeaponBob::default(),
             recoil: WeaponRecoil::default(),
-            bob_vars: GunBobVars::default(),
-            handedness: Handedness::Right,
-            fov: DEFAULT_WEAPON_FOV,
+            cvars: ViewModelCvars::default(),
             position: DVec3::ZERO,
             rotation: DVec3::ZERO,
             scale: 1.0,
@@ -316,19 +414,74 @@ impl WeaponView {
             charge_outline: None,
             reload_anim: WeaponReloadAnim::default(),
             switch_offsets: SwitchAnimOffsets::default(),
+            holster: WeaponHolsterAnim::default(),
+            lighting: WeaponLighting::default(),
+            submersion_amount: 0.0,
         };
         view.apply_position();
         view
     }
 
-    /// `applyPosition`: X is the hand's offset, Y and Z the position's.
+    /// `applyPosition`: X is the hand's offset, Y and Z the position's,
+    /// each unless its `cl_wep_*` override is set.
     pub fn apply_position(&mut self) {
         let pos = self.current_position;
-        let base = DVec3::new(self.handedness.offset(), pos.offset.y, pos.offset.z);
+        let c = &self.cvars;
+        let over = |value: f64, fallback: f64| if value != 0.0 { value } else { fallback };
+        let base = DVec3::new(
+            over(c.hip.x, c.handedness.offset()),
+            over(c.hip.y, pos.offset.y),
+            over(c.hip.z, pos.offset.z),
+        );
         self.position = base;
         self.rotation = pos.rotation;
-        self.scale = pos.scale;
+        self.scale = over(c.scale, pos.scale);
         self.effective_base_position = base;
+    }
+
+    /// `checkCVarChanges` and the cvars `updateWeaponBob` reads: a new
+    /// hand or hip override places the weapon again.
+    pub fn apply_cvars(&mut self, cvars: &ViewModelCvars) {
+        let placed = (self.cvars.handedness, self.cvars.hip, self.cvars.scale);
+        self.cvars = *cvars;
+        if placed != (cvars.handedness, cvars.hip, cvars.scale) {
+            self.apply_position();
+        }
+    }
+
+    /// `setMovementHidden`: stow the weapon for a climb, or bring it back.
+    pub fn set_movement_hidden(&mut self, hidden: bool) {
+        self.holster.set_holstered(hidden);
+    }
+
+    /// The mesh draws until the holster has fully stowed it.
+    #[must_use]
+    pub fn is_drawn(&self) -> bool {
+        !self.holster.is_fully_holstered()
+    }
+
+    /// `updateLightingFromBsp`: the light grid's sample at the camera.
+    pub fn update_lighting(&mut self, delta_time: f64, sample: Option<&LightSample>) {
+        self.lighting.update(delta_time, sample);
+    }
+
+    /// The one `WeaponViewManager`'s state a weapon put in hand takes from
+    /// the one put away: bob, aim, recoil, swing and charge, the holster,
+    /// the light, the cvars and the clock. Its barrels and its reload
+    /// (cancelled by the switch) stay its own.
+    pub fn carry_from(&mut self, old: &WeaponView) {
+        self.bob = old.bob.clone();
+        self.recoil = old.recoil.clone();
+        self.ads_progress = old.ads_progress;
+        self.slash = old.slash.clone();
+        self.charge = old.charge;
+        self.charge_outline = old.charge_outline;
+        self.holster = old.holster;
+        self.lighting = old.lighting;
+        self.submersion_amount = old.submersion_amount;
+        self.clock = old.clock;
+        self.reload_anim.cancel();
+        self.apply_cvars(&old.cvars);
     }
 
     /// `presentFire`'s motion: the recoil, timed to the fire rate, and a
@@ -367,14 +520,8 @@ impl WeaponView {
     pub fn update(&mut self, input: &ViewModelInput) {
         let dt = input.delta_time;
         self.clock += dt;
-        self.recoil.update(dt);
-        for barrel in &mut self.barrels {
-            barrel.update(dt);
-        }
-        let reload = self.reload_anim.offsets(self.clock);
+        self.holster.update(dt);
         let reloading = input.reloading || self.reload_anim.is_reloading();
-        let switch = self.switch_offsets;
-        let slash = self.slash.offsets(self.clock * 1000.0);
         let base = self.effective_base_position;
         self.bob.update(
             &BobInput {
@@ -388,7 +535,7 @@ impl WeaponView {
                 ads_progress: self.ads_progress,
                 hand_offset_x: base.x,
             },
-            &self.bob_vars,
+            &self.cvars.bob,
         );
         let bob = self.bob.state();
 
@@ -397,7 +544,7 @@ impl WeaponView {
             .def
             .and_then(|d| d.ads_time)
             .filter(|t| *t != 0.0)
-            .unwrap_or(DEFAULT_ADS_TIME);
+            .unwrap_or(self.cvars.ads_time);
         let ads_speed = 1.0 / ads_time.max(0.05);
         let target_ads = if input.aiming && !reloading { 1.0 } else { 0.0 };
         if self.def.is_some_and(|d| d.ads_require_ready) {
@@ -411,8 +558,15 @@ impl WeaponView {
             let ads_lerp = (dt * ads_speed).min(1.0);
             self.ads_progress += (target_ads - self.ads_progress) * ads_lerp;
         }
+        // The `cl_wep_ads_*` overrides, else the definition's sights.
         let ads_offset = self.def.and_then(|d| d.ads_offset);
-        let ads_target = ads_offset.unwrap_or(DVec3::new(0.0, base.y + DEFAULT_ADS_OFFSET_Y, base.z));
+        let over = self.cvars.ads;
+        let pick = |o: f64, def: Option<f64>, fallback: f64| if o != 0.0 { o } else { def.unwrap_or(fallback) };
+        let ads_target = DVec3::new(
+            pick(over.x, ads_offset.map(|a| a.x), 0.0),
+            pick(over.y, ads_offset.map(|a| a.y), base.y + self.cvars.ads_offset_y),
+            pick(over.z, ads_offset.map(|a| a.z), base.z),
+        );
         let ads_x = base.x + (ads_target.x - base.x) * self.ads_progress;
         let ads_y = (ads_target.y - base.y) * self.ads_progress;
         let ads_z = (ads_target.z - base.z) * self.ads_progress;
@@ -427,8 +581,12 @@ impl WeaponView {
         let charge = self.charge.update(charging, charge_time, self.clock * 1000.0);
         self.charge_outline = charge.outline;
 
+        let reload = self.reload_anim.offsets(self.clock);
+        let switch = self.switch_offsets;
+        let slash = self.slash.offsets(self.clock * 1000.0);
+        let holster = self.holster.offsets();
         self.position = DVec3::new(
-            ads_x + bob.bob_x + reload.x_offset + switch.x_offset + charge.shake.x + slash.x_offset,
+            ads_x + bob.bob_x + reload.x_offset + switch.x_offset + charge.shake.x + slash.x_offset + holster.x_offset,
             base.y
                 + bob.bob_y
                 + bob.jump_land_bob
@@ -436,8 +594,9 @@ impl WeaponView {
                 + reload.y_offset
                 + switch.y_offset
                 + charge.shake.y
-                + slash.y_offset,
-            base.z + ads_z + reload.z_offset - self.recoil.offset + switch.z_offset + slash.z_offset,
+                + slash.y_offset
+                + holster.y_offset,
+            base.z + ads_z + reload.z_offset - self.recoil.offset + switch.z_offset + slash.z_offset + holster.z_offset,
         );
         // Aimed, the sprint tilt drops by 80%.
         let sprint_factor = 1.0 - self.ads_progress * 0.8;
@@ -447,8 +606,19 @@ impl WeaponView {
             base_rot.x + bob.sprint_tilt * sprint_factor * degrees + reload.pitch + slash.pitch
                 - self.recoil.pitch_offset,
             base_rot.y + bob.sprint_yaw * sprint_factor * degrees + slash.yaw,
-            base_rot.z + bob.sprint_roll * sprint_factor * degrees + reload.roll + switch.roll + slash.roll,
+            base_rot.z
+                + bob.sprint_roll * sprint_factor * degrees
+                + reload.roll
+                + switch.roll
+                + slash.roll
+                + holster.roll,
         );
+        // `updateMuzzleFlash` steps the recoil and the barrels after the
+        // weapon is placed, so the kick shows from the next frame.
+        self.recoil.update(dt);
+        for barrel in &mut self.barrels {
+            barrel.update(dt);
+        }
     }
 
     /// The weapon root's matrix in the camera's space.
@@ -471,7 +641,7 @@ impl WeaponView {
     /// The weapon camera's vertical field of view, radians.
     #[must_use]
     pub fn fov_radians(&self) -> f32 {
-        (self.fov * std::f64::consts::PI / 180.0) as f32
+        (self.cvars.fov * std::f64::consts::PI / 180.0) as f32
     }
 
     /// `getMuzzleWorldPosition(distance)`: `distance` units from the eye
@@ -502,7 +672,8 @@ impl WeaponView {
     /// `getMuzzleWorldPosition`'s fallback for a model without a muzzle
     /// tag: between the hip (right 1.5, down 1.2, forward 5) and the
     /// sights (down 0.8, forward 4), moved with the bob and the recoil.
-    /// Not yet: the beam charge's steadying and the underwater drift.
+    /// Under liquid it floats in a slow figure of eight and sags. Not yet:
+    /// the beam charge's steadying.
     fn fallback_muzzle(&self, camera_world: Mat4, distance: f64) -> DVec3 {
         let eye = camera_world.w_axis.truncate().as_dvec3();
         let forward = camera_world.transform_vector3(Vec3::Z).as_dvec3().normalize();
@@ -517,7 +688,20 @@ impl WeaponView {
         let bob_x = bob.bob_x * scale;
         let bob_y = (bob.bob_y + bob.jump_land_bob) * scale;
         let recoil_z = -self.recoil.offset * scale;
-        let origin = eye + forward * (fwd_off + recoil_z) + right * (right_off + bob_x) + up * (-down_off + bob_y);
+        let (mut float_right, mut float_up) = (0.0, 0.0);
+        let submersion = self.submersion_amount;
+        if submersion > 0.0 {
+            let t = self.clock;
+            let tau = std::f64::consts::PI * 2.0;
+            float_right = (t * WEAPON_FLOAT_HZ * tau).sin() * WEAPON_FLOAT_AMPLITUDE * submersion;
+            // Twice the rate upright: a lazy figure of eight, not a circle.
+            let vertical = (t * WEAPON_FLOAT_HZ * tau * 2.0).sin() * WEAPON_FLOAT_AMPLITUDE;
+            float_up = (vertical - WEAPON_FLOAT_SAG) * submersion;
+        }
+        let origin = eye
+            + forward * (fwd_off + recoil_z)
+            + right * (right_off + bob_x + float_right)
+            + up * (-down_off + bob_y + float_up);
         if distance == 5.0 {
             return origin;
         }
@@ -621,6 +805,9 @@ mod tests {
         gun.update(&still);
         let rest = gun.position;
         gun.present_fire(&ShotStyle::default(), false);
+        // The kick is placed a frame after it is stepped, as in the browser.
+        gun.update(&still);
+        assert_eq!(gun.position, rest);
         for _ in 0..3 {
             gun.update(&still);
         }
@@ -695,6 +882,84 @@ mod tests {
         let tagged = view.muzzle_world_position(camera_world, 1.5, Some(Vec3::new(10.0, 0.0, 0.0)), 5.0) - eye;
         assert!((tagged.length() - 5.0).abs() < 1e-6, "{tagged}");
         assert!(tagged.z > 0.0, "{tagged}");
+    }
+
+    #[test]
+    fn a_climb_stows_the_gun_and_hides_it_once_down() {
+        let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
+        let still = ViewModelInput {
+            delta_time: 0.06,
+            grounded: true,
+            ..ViewModelInput::default()
+        };
+        gun.update(&still);
+        let rest = gun.position;
+        gun.set_movement_hidden(true);
+        gun.update(&still);
+        assert!(gun.is_drawn());
+        assert!(gun.position.y < rest.y - 30.0, "{}", gun.position.y);
+        for _ in 0..3 {
+            gun.update(&still);
+        }
+        assert!(!gun.is_drawn());
+        assert!((gun.position.y - (rest.y - 90.0)).abs() < 1e-9);
+        gun.set_movement_hidden(false);
+        gun.update(&still);
+        assert!(gun.is_drawn());
+    }
+
+    #[test]
+    fn the_cvars_move_the_hand_and_override_the_hip() {
+        let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
+        let mut cvars = ViewModelCvars {
+            handedness: Handedness::Left,
+            ..ViewModelCvars::default()
+        };
+        gun.apply_cvars(&cvars);
+        assert_eq!(gun.position, DVec3::new(-12.0, -25.0, -1.0));
+        cvars.hip = DVec3::new(3.0, 0.0, 7.0);
+        cvars.scale = 1.5;
+        gun.apply_cvars(&cvars);
+        assert_eq!(gun.position, DVec3::new(3.0, -25.0, 7.0));
+        assert_eq!(gun.scale, 1.5);
+        cvars.fov = 90.0;
+        gun.apply_cvars(&cvars);
+        assert!((gun.fov_radians() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_switch_carries_the_aim_and_the_kick() {
+        let aim = ViewModelInput {
+            delta_time: 1.0 / 60.0,
+            grounded: true,
+            aiming: true,
+            ..ViewModelInput::default()
+        };
+        let mut old = WeaponView::new("plasmagun", Some(plasmagun()));
+        for _ in 0..60 {
+            old.update(&aim);
+        }
+        old.present_fire(&ShotStyle::default(), false);
+        old.update(&aim);
+        let mut new = WeaponView::new("riotgun", Some(plasmagun()));
+        new.carry_from(&old);
+        assert_eq!(new.ads_progress, old.ads_progress);
+        assert_eq!(new.recoil, old.recoil);
+        assert_eq!(new.clock, old.clock);
+    }
+
+    #[test]
+    fn a_tagless_muzzle_floats_under_water() {
+        let mut view = WeaponView::new("plasmagun", Some(plasmagun()));
+        let camera_world = Mat4::IDENTITY;
+        view.submersion_amount = 1.0;
+        view.clock = 0.0;
+        let still = view.muzzle_world_position(camera_world, 1.5, None, 5.0);
+        // At time 0 the drift is all sag.
+        assert!(
+            (still - DVec3::new(1.5, -1.2 - WEAPON_FLOAT_SAG, 5.0)).length() < 1e-9,
+            "{still}"
+        );
     }
 
     #[test]
