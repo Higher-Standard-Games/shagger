@@ -467,6 +467,12 @@ impl<C: EventCodec> NetworkGameHost<C> {
             .then(|| Outgoing::reliable(codec::encode_request_spawn()))
     }
 
+    /// `Game.sendReady`: ready for the match to start (warmup).
+    #[must_use]
+    pub fn send_ready(&self) -> Option<Outgoing> {
+        self.is_connected.then(|| Outgoing::reliable(codec::encode_ready()))
+    }
+
     /// `sendLoadout`.
     #[must_use]
     pub fn send_loadout(&self, primary: &str, secondary: &str) -> Option<Outgoing> {
@@ -662,9 +668,12 @@ mod tests {
     fn requests_need_a_connection_and_chat_is_cut_like_the_browser() {
         let mut host = Host::new(NoEvents, 0.0);
         assert!(host.send_spectate().is_none());
+        assert!(host.send_ready().is_none());
         assert!(host.set_client_prefs(ClientPrefs { auto_switch: false }).is_none());
         let mut host = joined_host();
         assert!(host.send_chat("   ", false).is_none());
+        let ready = host.send_ready().unwrap();
+        assert_eq!(ready.data, codec::encode_ready());
         let long = "é".repeat(200);
         let chat = host.send_chat(&format!("  {long} "), true).unwrap();
         let text = codec::decode_chat(&chat.data).unwrap();

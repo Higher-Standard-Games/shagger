@@ -45,6 +45,8 @@ pub enum SessionRequest {
     Spectate,
     /// Back into play after a death (`RequestSpawn`).
     RequestSpawn,
+    /// Ready for the match to start, in warmup (`Ready`).
+    Ready,
     Chat {
         text: String,
         team_only: bool,
@@ -225,6 +227,7 @@ fn message_for<C: EventCodec>(host: &mut NetworkGameHost<C>, request: SessionReq
         } => host.send_join_game(team_id.as_deref(), manual_pick, admission_ticket.as_deref()),
         SessionRequest::Spectate => host.send_spectate(),
         SessionRequest::RequestSpawn => host.send_request_spawn(),
+        SessionRequest::Ready => host.send_ready(),
         SessionRequest::Chat { text, team_only } => host.send_chat(&text, team_only),
         SessionRequest::ClientPrefs(p) => host.set_client_prefs(p),
         SessionRequest::Loadout { primary, secondary } => host.send_loadout(&primary, &secondary),
