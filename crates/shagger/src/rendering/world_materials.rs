@@ -2,9 +2,15 @@
 //! `src/engine/loader/bsp/BspMeshBuilder.ts`, `buildDiffuseCandidates` in
 //! `loadTextures`) and its blend, alpha test and depth state
 //! (`src/engine/loader/shader/Q3Blend.ts`, `configureQ3Alpha` and
-//! `q3AlphaMode`, with `createMaterialFromProps`).
+//! `q3AlphaMode`, with `createMaterialFromProps`), and which of
+//! `loadTextures`' special materials it takes instead of the
+//! StandardMaterial: the glow overlay (`Q3ShaderMaterialFactory.ts`,
+//! `analyzeShaderPattern`), the filter blend (`FilterBlendShaderMaterial.ts`)
+//! and the vertex lighting plugin (`BspVertexLightingPlugin.ts`).
 
-use crate::loader::shader::q3_shader_types::{AlphaMode, BlendFactor, ResolvedMaterialProps};
+use crate::loader::shader::q3_shader_types::{
+    AlphaMode, BlendFactor, Q3Shader, Q3ShaderStage, ResolvedBranch, ResolvedMaterialProps,
+};
 
 /// `normalizeTexturePath`.
 fn normalize_texture_path(path: &str) -> String {
@@ -294,9 +300,200 @@ pub fn pbr_micro_surface(exponent: f64) -> f64 {
     1.0 - (2.0 / (exponent + 2.0)).sqrt()
 }
 
+/// `isAdditiveBlend` (Q3ShaderMaterialFactory.ts).
+fn is_additive_blend(stage: &Q3ShaderStage) -> bool {
+    matches!(
+        stage.blend_func,
+        Some([BlendFactor::One, BlendFactor::One] | [BlendFactor::SrcAlpha, BlendFactor::One])
+    )
+}
+
+/// `isAlphaBlend` (Q3ShaderMaterialFactory.ts).
+fn is_alpha_blend(stage: &Q3ShaderStage) -> bool {
+    stage.blend_func == Some([BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha])
+}
+
+/// `isGlowTextureName`.
+fn is_glow_texture_name(map: &str) -> bool {
+    let lower = map.to_lowercase();
+    lower.contains("_glow") || lower.contains("_add") || lower.contains("_bloom") || lower.ends_with("glow")
+}
+
+/// The glow overlay pattern's stages (`analyzeShaderPattern`'s
+/// `glow_overlay`): base × lightmap + glow, the glow added or, under
+/// `blendFunc blend`, mixed in by its alpha.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlowOverlay {
+    /// The glow stage's image, as the shader names it.
+    pub glow_map: String,
+    /// `glowIsAlphaBlend`.
+    pub alpha_blend: bool,
+}
+
+/// `analyzeShaderPattern`, as far as `loadTextures` asks it: the glow stage
+/// of a shader whose pattern is `glow_overlay`.
+#[must_use]
+pub fn analyze_glow_overlay(shader: &Q3Shader) -> Option<GlowOverlay> {
+    let stages = &shader.stages;
+    let mut base = None;
+    let mut lightmap = false;
+    let mut glow = None;
+    for (i, stage) in stages.iter().enumerate() {
+        if stage.map == "$lightmap" {
+            lightmap = true;
+            continue;
+        }
+        if stage.map == "$whiteimage" {
+            continue;
+        }
+        if base.is_none() {
+            base = Some(i);
+        } else if is_additive_blend(stage) || is_glow_texture_name(&stage.map) {
+            glow = Some((i, is_alpha_blend(stage)));
+        }
+    }
+    let texture_stages = stages
+        .iter()
+        .filter(|s| !s.map.is_empty() && s.map != "$lightmap" && s.map != "$whiteimage")
+        .count();
+    base?;
+    // `nolightmap_emissive` comes first.
+    if shader.has_surface_parm("nolightmap") && texture_stages == 1 {
+        return None;
+    }
+    let (index, alpha_blend) = glow?;
+    (lightmap && texture_stages <= 3).then(|| GlowOverlay {
+        glow_map: stages[index].map.clone(),
+        alpha_blend,
+    })
+}
+
+/// Whether `loadTextures` gives the pass the glow overlay ShaderMaterial
+/// (when its base and glow images are found): a shader's only pass, without
+/// material metadata or conditional blocks.
+#[must_use]
+pub fn glow_overlay(shader: Option<&Q3Shader>, props: &ResolvedMaterialProps, layered: bool) -> Option<GlowOverlay> {
+    let shader = shader?;
+    if layered
+        || props.has_material_metadata
+        || props.resolved_branch != ResolvedBranch::Default
+        || shader.conditional_blocks.as_ref().is_some_and(|b| !b.is_empty())
+    {
+        return None;
+    }
+    analyze_glow_overlay(shader)
+}
+
+/// `loadTextures`' filter blend branch: a multiply pass without an alpha
+/// test draws with `createFilterBlendMaterial` (its image unlit and
+/// unanimated, both sides, no depth writes, `zOffset` -4).
+#[must_use]
+pub fn uses_filter_blend_material(props: &ResolvedMaterialProps) -> bool {
+    props.alpha_mode == AlphaMode::Multiply && !props.alpha_cutoff.is_some_and(|c| c > 0.0)
+}
+
+/// `loadTextures`' `BspVertexLightingPlugin` branch: an opaque fullbright
+/// material-metadata surface lit by its vertex colour keeps lighting on,
+/// so game lights add to it.
+#[must_use]
+pub fn uses_vertex_lighting_plugin(props: &ResolvedMaterialProps) -> bool {
+    props.has_material_metadata
+        && props.uses_vertex_rgb == Some(true)
+        && props.is_fullbright
+        && props.alpha_mode == AlphaMode::Opaque
+}
+
+/// Whether the StandardMaterial takes `useEmissiveAsIllumination` (an
+/// additive pass, or a fullbright one without vertex colour that is opaque,
+/// additive or tinted grey), which a `tcGen environment` pass's colour
+/// follows.
+#[must_use]
+pub fn emissive_as_illumination(props: &ResolvedMaterialProps) -> bool {
+    if props.alpha_mode == AlphaMode::Add {
+        return true;
+    }
+    if !props.is_fullbright || props.uses_vertex_rgb == Some(true) {
+        return false;
+    }
+    let grey = props
+        .rgb_gen
+        .filter(|g| g.kind == crate::loader::shader::q3_shader_types::RgbGenType::Const)
+        .and_then(|g| g.color)
+        .is_some_and(|c| c[0] == c[1] && c[1] == c[2]);
+    props.alpha_mode == AlphaMode::Opaque || grey
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::shader::q3_shader_parser::Q3ShaderParser;
+
+    fn shader(script: &str) -> Q3Shader {
+        Q3ShaderParser::new().parse_shader_file(script).unwrap().remove(0)
+    }
+
+    #[test]
+    fn glow_overlay_pattern() {
+        // textures/lights/neonlamp_2500 (washoi_dm7).
+        let lamp = shader(
+            "textures/lights/neonlamp_2500 {\n{ map $lightmap\nrgbGen identity }\n{ map textures/lights/neonlamp.png\nblendFunc filter }\n{ map textures/lights/neonlamp.blend.png\nblendfunc add }\n}",
+        );
+        assert_eq!(
+            analyze_glow_overlay(&lamp),
+            Some(GlowOverlay {
+                glow_map: "textures/lights/neonlamp.blend.png".into(),
+                alpha_blend: false
+            })
+        );
+        let props = ResolvedMaterialProps::default();
+        assert!(glow_overlay(Some(&lamp), &props, false).is_some());
+        assert!(glow_overlay(Some(&lamp), &props, true).is_none());
+        let material = ResolvedMaterialProps {
+            has_material_metadata: true,
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(glow_overlay(Some(&lamp), &material, false).is_none());
+        // Without a lightmap stage, or with one image and nolightmap, it is not.
+        let unlit = shader("x/a {\n{ map x/a.png }\n{ map x/a_glow.png\nblendFunc add }\n}");
+        assert!(analyze_glow_overlay(&unlit).is_none());
+        let emissive = shader("x/b {\nsurfaceparm nolightmap\n{ map $lightmap }\n{ map x/b.png }\n}");
+        assert!(analyze_glow_overlay(&emissive).is_none());
+        let blended = shader("x/c {\n{ map $lightmap }\n{ map x/c.png }\n{ map x/c_glow.png\nblendFunc blend }\n}");
+        assert!(analyze_glow_overlay(&blended).is_some_and(|g| g.alpha_blend));
+    }
+
+    #[test]
+    fn special_materials() {
+        let filter = ResolvedMaterialProps {
+            alpha_mode: AlphaMode::Multiply,
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(uses_filter_blend_material(&filter));
+        let cutout = ResolvedMaterialProps {
+            alpha_cutoff: Some(0.5),
+            ..filter.clone()
+        };
+        assert!(!uses_filter_blend_material(&cutout));
+        let vertex = ResolvedMaterialProps {
+            has_material_metadata: true,
+            uses_vertex_rgb: Some(true),
+            is_fullbright: true,
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(uses_vertex_lighting_plugin(&vertex));
+        assert!(!emissive_as_illumination(&vertex));
+        let glass = ResolvedMaterialProps {
+            alpha_mode: AlphaMode::Add,
+            is_fullbright: true,
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(emissive_as_illumination(&glass));
+        let lamp = ResolvedMaterialProps {
+            is_fullbright: true,
+            ..ResolvedMaterialProps::default()
+        };
+        assert!(emissive_as_illumination(&lamp));
+    }
 
     #[test]
     fn companion_candidates() {

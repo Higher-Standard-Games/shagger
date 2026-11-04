@@ -31,7 +31,10 @@ use crate::loader::bsp::mesh::pvs::build_face_clusters;
 use crate::loader::bsp::mesh::tangents::build_bsp_tangents;
 use shagger_shared::bsp::brush_model_state::extract_brush_models;
 
-use crate::loader::shader::q3_shader_types::{AlphaMode, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms};
+use crate::loader::shader::q3_shader_types::{
+    AlphaMode, Q3Shader, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms,
+};
+use crate::rendering::world_materials::{GlowOverlay, glow_overlay};
 
 /// `NON_DRAWABLE_TEXTURES`: tool textures, matched anywhere in the lower-cased name.
 pub const NON_DRAWABLE_TEXTURES: [&str; 14] = [
@@ -98,6 +101,10 @@ pub struct WorldBatch {
     pub bounds: [[f32; 3]; 2],
     /// The `func_explosive` brush model it belongs to; `None` for the world.
     pub brush_model: Option<usize>,
+    /// Its shader's glow overlay stages, when `loadTextures` would draw its
+    /// pass with the glow overlay ShaderMaterial
+    /// ([`WorldGeometry::find_glow_overlays`]).
+    pub glow_overlay: Option<GlowOverlay>,
 }
 
 /// A sky shader `BspMeshBuilder.applySkybox` can draw the sky from.
@@ -124,6 +131,18 @@ pub struct WorldGeometry {
 }
 
 impl WorldGeometry {
+    /// Marks the batches whose shader (`shader` looks one up by texture
+    /// name) takes the glow overlay ShaderMaterial in `loadTextures`
+    /// ([`glow_overlay`]).
+    pub fn find_glow_overlays<'a>(&mut self, shader: impl Fn(&str) -> Option<&'a Q3Shader>) {
+        for batch in &mut self.batches {
+            batch.glow_overlay = match batch.passes.as_slice() {
+                [props] => glow_overlay(shader(&batch.texture_name), props, false),
+                _ => None,
+            };
+        }
+    }
+
     /// The authored cubemaps (`surroundmap`/`cubemap` stages) the passes
     /// draw, each once, in the order first met: what `loadTextures` hands
     /// `SkyboxLoader.loadEnvironmentCubemap`.
@@ -468,6 +487,7 @@ pub fn build_world_geometry(
             pvs_clusters: group.pvs_clusters,
             bounds: group.bounds,
             brush_model: group.brush_model,
+            glow_overlay: None,
         });
         out.vertices.extend(group.vertices);
         out.indices.extend(group.indices.iter().map(|i| i + base));

@@ -23,9 +23,16 @@
 //! `cubemap`) draws it as `Q3EnvironmentPlugin` does: unlit, its colour the
 //! cube sampled along the view ray (surround) or its reflection (cubemap).
 //!
+//! A `tcGen environment` pass draws its image as Babylon's spherical
+//! reflection map as well (`reflectionTexture` in `SPHERICAL_MODE`, no
+//! diffuse image). `loadTextures`' other materials draw as it builds them:
+//! the glow overlay ShaderMaterial for a base × lightmap + glow shader, the
+//! filter blend ShaderMaterial for a multiply pass (both writing display
+//! colour, as ShaderMaterials do), and the vertex lighting plugin, which
+//! adds game lights to a vertex-lit material surface.
+//!
 //! Not yet drawn as SHAG draws them: `$cubemap` reflections (a reflection
-//! pass is left out), `tcGen environment` sphere maps (drawn as their base
-//! image), and the sky.
+//! pass is left out), and the sky.
 
 use std::collections::HashMap;
 
@@ -39,8 +46,8 @@ use super::world_fog_controller::FogUniforms;
 use super::world_geometry::{WorldGeometry, WorldVertex};
 use super::world_materials::{
     Blend, GLOSS_SUFFIXES, MissingImage, NORMAL_SUFFIXES, PassState, add_texture_prefixes, build_diffuse_candidates,
-    gloss_exponent, gloss_intensity, missing_image, optional_texture_candidates, pbr_micro_surface,
-    should_use_generated_pbr,
+    emissive_as_illumination, gloss_exponent, gloss_intensity, missing_image, optional_texture_candidates,
+    pbr_micro_surface, should_use_generated_pbr, uses_filter_blend_material, uses_vertex_lighting_plugin,
 };
 use crate::babylon::materials::texture::get_texture_matrix;
 use crate::loader::bsp::bsp_lighting_profile::bsp_lighting_profile;
@@ -217,7 +224,9 @@ struct PipelineKey {
     two_sided: bool,
     blend: Blend,
     depth_write: bool,
-    polygon_offset: bool,
+    /// Babylon's `zOffset` (`glPolygonOffset(zOffset, 0)`): -2 for a
+    /// `polygonOffset` decal, -1 for a shine overlay, -4 for a filter blend.
+    z_offset: i8,
 }
 
 /// One draw a material pass makes: the surface itself, then any shine
@@ -675,9 +684,27 @@ impl WorldRenderer {
                     })
                     .unwrap_or_default();
 
-                let lighting = if state.unlit {
+                // `loadTextures`' own ShaderMaterials, taken before the
+                // StandardMaterial: the glow overlay (base × lightmap + glow,
+                // when its glow image is found) and the filter blend.
+                let overlay = batch
+                    .glow_overlay
+                    .as_ref()
+                    .filter(|_| environment.is_none() && batch.passes.len() == 1)
+                    .and_then(|o| {
+                        view_for(&add_texture_prefixes(&o.glow_map), None)
+                            .and_then(|(key, path)| path.map(|_| (key, o.alpha_blend)))
+                    });
+                let filter = overlay.is_none() && environment.is_none() && uses_filter_blend_material(props);
+                let lighting = if overlay.is_some() {
+                    4.0
+                } else if filter {
+                    1.0
+                } else if state.unlit {
                     // Q3StageColorPlugin's vertex variant, for additive vertex-coloured stages.
                     if props.uses_vertex_rgb == Some(true) { 2.0 } else { 1.0 }
+                } else if uses_vertex_lighting_plugin(props) {
+                    3.0
                 } else if props.uses_vertex_rgb == Some(true) {
                     2.0
                 } else if props.use_lightmap {
@@ -688,7 +715,8 @@ impl WorldRenderer {
                 // Only the baked lighting path reads them.
                 let base_path = base_path.unwrap_or_default();
                 let mut companion = |explicit: Option<&str>, blank: bool, suffixes: &[&str]| {
-                    if lighting != 0.0 {
+                    // The baked path and the vertex lighting plugin light them.
+                    if lighting != 0.0 && lighting != 3.0 {
                         return None;
                     }
                     let candidates = optional_texture_candidates(explicit, blank, &base_path, suffixes);
@@ -726,7 +754,11 @@ impl WorldRenderer {
                 // The glow image (`loadOptionalTexture` with no suffixes):
                 // the emissive of a lit or fullbright surface, or, with a glow
                 // stage, the image of its additive shine overlay.
-                let glow_view = if lighting == 0.0 || props.is_fullbright {
+                let glow_view = if let Some((key, _)) = &overlay {
+                    Some(key.clone())
+                } else if filter {
+                    None
+                } else if lighting == 0.0 || props.is_fullbright {
                     let candidates = optional_texture_candidates(
                         props.glow_texture.as_deref(),
                         props.glow_texture_explicitly_blank,
@@ -737,7 +769,10 @@ impl WorldRenderer {
                 } else {
                     None
                 };
-                let shine_stage = props.glow_stage.as_ref().filter(|_| glow_view.is_some());
+                let shine_stage = props
+                    .glow_stage
+                    .as_ref()
+                    .filter(|_| glow_view.is_some() && overlay.is_none());
                 let shine_frames: Vec<String> = shine_stage
                     .and_then(|s| s.anim_map.as_ref())
                     .map(|a| {
@@ -755,36 +790,93 @@ impl WorldRenderer {
                     .and_then(|s| s.alpha_gen)
                     .filter(|g| g.kind == AlphaGenType::Const)
                     .map_or(1.0, |g| g.value.unwrap_or(1.0) as f32);
-                let mut layers = vec![Layer {
-                    base_view,
-                    frame_views,
-                    stage: stage.filter(|_| props.needs_animation),
-                    params: [
-                        state.alpha_cutoff.unwrap_or(-1.0),
-                        if state.texture_alpha { 1.0 } else { 0.0 },
-                        lighting,
-                        if props.uses_vertex_alpha == Some(true) {
-                            1.0
-                        } else {
-                            0.0
+                // `tcGen environment`: the StandardMaterial's base image
+                // moves to its spherical reflection.
+                let sphere = environment.is_none()
+                    && overlay.is_none()
+                    && !filter
+                    && !pbr
+                    && props.tc_gen.is_some_and(|g| g.mode == TcGenMode::Environment);
+                let environment = if sphere {
+                    Some((NO_ENVIRONMENT.to_owned(), 3.0))
+                } else {
+                    environment
+                };
+                let layer = if let Some((_, alpha_blend)) = overlay {
+                    // GlowOverlayShaderMaterial: static UVs, opaque, no tint.
+                    Layer {
+                        base_view,
+                        frame_views: Vec::new(),
+                        stage: None,
+                        params: [-1.0, 0.0, lighting, 0.0],
+                        rgb_gen: None,
+                        alpha: 1.0,
+                        ramps: (ramp(None), ramp(None)),
+                        surface: [0.0, 0.0, 0.0, 1.0],
+                        gloss: [f32::from(u8::from(alpha_blend)), 0.0, 0.0, 0.0],
+                        environment: None,
+                        key: PipelineKey {
+                            two_sided: batch.two_sided,
+                            blend: Blend::Opaque,
+                            depth_write: true,
+                            z_offset: 0,
                         },
-                    ],
-                    rgb_gen: props.rgb_gen,
-                    alpha: alpha_const,
-                    ramps: (
-                        ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
-                        ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
-                    ),
-                    surface,
-                    gloss,
-                    environment: environment.clone(),
-                    key: PipelineKey {
-                        two_sided: batch.two_sided,
-                        blend: state.blend,
-                        depth_write: state.depth_write,
-                        polygon_offset: state.polygon_offset,
-                    },
-                }];
+                    }
+                } else if filter {
+                    // FilterBlendShaderMaterial: the image alone, multiplied in.
+                    Layer {
+                        base_view,
+                        frame_views: Vec::new(),
+                        stage: None,
+                        params: [-1.0, 0.0, lighting, 0.0],
+                        rgb_gen: None,
+                        alpha: 1.0,
+                        ramps: (ramp(None), ramp(None)),
+                        surface: [0.0; 4],
+                        gloss: [0.0; 4],
+                        environment: None,
+                        key: PipelineKey {
+                            two_sided: true,
+                            blend: Blend::Multiply,
+                            depth_write: false,
+                            z_offset: -4,
+                        },
+                    }
+                } else {
+                    Layer {
+                        base_view,
+                        frame_views,
+                        stage: stage.filter(|_| props.needs_animation),
+                        params: [
+                            state.alpha_cutoff.unwrap_or(-1.0),
+                            if state.texture_alpha { 1.0 } else { 0.0 },
+                            lighting,
+                            if props.uses_vertex_alpha == Some(true) {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        ],
+                        rgb_gen: props.rgb_gen,
+                        alpha: alpha_const,
+                        ramps: (
+                            ramp(stage.and_then(|s| s.rgb_gen).and_then(|g| g.distance_ramp)),
+                            ramp(stage.and_then(|s| s.alpha_gen).and_then(|g| g.distance_ramp)),
+                        ),
+                        surface,
+                        gloss,
+                        environment: environment.clone(),
+                        key: PipelineKey {
+                            two_sided: batch.two_sided,
+                            blend: state.blend,
+                            depth_write: state.depth_write,
+                            z_offset: if state.polygon_offset { -2 } else { 0 },
+                        },
+                    }
+                };
+                // ShaderMaterials write display colour (no image processing).
+                let raw_output = overlay.is_some() || filter;
+                let mut layers = vec![layer];
                 // registerGlowAnimation's shine: the glow image unlit and
                 // added (ALPHA_ONEONE) over the surface, without depth
                 // writes, stepped by the glow stage.
@@ -804,7 +896,8 @@ impl WorldRenderer {
                             two_sided: batch.two_sided,
                             blend: Blend::OneOne,
                             depth_write: false,
-                            polygon_offset: true,
+                            // `shine.zOffset = -1`.
+                            z_offset: -1,
                         },
                     });
                 }
@@ -824,7 +917,12 @@ impl WorldRenderer {
                         ramp_alpha: layer.ramps.1,
                         surface: layer.surface,
                         gloss: layer.gloss,
-                        fog: [fog_pass_kind(layer.key.blend), 0.0, 0.0, 0.0],
+                        fog: [
+                            fog_pass_kind(layer.key.blend),
+                            f32::from(u8::from(raw_output && layer.key.z_offset != -1)),
+                            0.0,
+                            0.0,
+                        ],
                         // `configureQ3SoftParticle`: transparent soft passes.
                         soft: if props.soft_particle == Some(true) && props.is_transparent {
                             let fade_rgb = props.blend_func.is_some_and(|b| b[0] == BlendFactor::One);
@@ -835,7 +933,7 @@ impl WorldRenderer {
                         environment: [
                             layer.environment.as_ref().map_or(0.0, |(_, mode)| *mode),
                             f32::from(u8::from(props.two_sided_lighting)),
-                            0.0,
+                            f32::from(u8::from(emissive_as_illumination(props))),
                             0.0,
                         ],
                     };
@@ -990,10 +1088,10 @@ impl WorldRenderer {
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     // Babylon's zOffset -2: glPolygonOffset(-2, 0).
-                    bias: if key.polygon_offset {
+                    bias: if key.z_offset != 0 {
                         wgpu::DepthBiasState {
                             constant: 0,
-                            slope_scale: -2.0,
+                            slope_scale: f32::from(key.z_offset),
                             clamp: 0.0,
                         }
                     } else {
