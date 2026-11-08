@@ -120,6 +120,19 @@ pub struct ModelDraw {
     /// primitive must have one; it is not drawn without).
     pub skin: Option<u32>,
     pub outline: Option<Outline>,
+    /// A lit material's reflection fill (the blade's `BladeEnvironment`).
+    pub reflection: Option<ReflectionFill>,
+}
+
+/// SHAG `BladeEnvironment`: a small grey cube, brighter toward the sky, as
+/// a PBR material's `reflectionTexture`, so a metal surface has something to
+/// reflect besides the lights. Lit materials only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReflectionFill {
+    /// `reflectionColor`.
+    pub color: Vec3,
+    /// `environmentIntensity`.
+    pub intensity: f32,
 }
 
 impl ModelDraw {
@@ -137,6 +150,7 @@ impl ModelDraw {
             texture_level: None,
             skin: None,
             outline: None,
+            reflection: None,
         }
     }
 }
@@ -166,6 +180,7 @@ struct DrawUniform {
     emissive: [f32; 4],
     uv_rows: [f32; 4],
     uv_origin: [f32; 4],
+    reflection: [f32; 4],
 }
 
 #[repr(C)]
@@ -1107,6 +1122,9 @@ impl ModelRenderer {
                     // The alpha override plus one; 0 keeps the material's.
                     draw.alpha.map_or(0.0, |a| a.clamp(0.0, 1.0) + 1.0),
                 ],
+                reflection: draw
+                    .reflection
+                    .map_or([0.0; 4], |r| r.color.extend(r.intensity.max(0.0)).into()),
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }

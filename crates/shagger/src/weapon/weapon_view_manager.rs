@@ -34,8 +34,9 @@
 //! shot, fading at `MUZZLE_FLASH_DECAY`; the caller puts it at the socket.
 //! A socket's screen ray, jittered (`getBladeTipWorldPosition`).
 //!
-//! Not yet: MD3 view models and the blade's reflection fill
-//! (`BladeEnvironment`).
+//! The blade reflects `BladeEnvironment`'s fill ([`blade_reflection`]).
+//!
+//! Not yet: MD3 view models.
 
 use glam::{DVec3, Mat4, Vec3};
 
@@ -52,7 +53,7 @@ use crate::babylon::materials::standard_material::{StandardMaterialParams, Textu
 use crate::core::cvar::Cvars;
 use crate::loader::bsp::light_grid_sampling::LightSample;
 use crate::loader::model::gltf_model::ModelMaterial;
-use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline};
+use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline, ReflectionFill};
 
 /// The weapon camera's near plane.
 pub const WEAPON_CAMERA_MIN_Z: f32 = 0.1;
@@ -229,6 +230,14 @@ pub fn blade_light(camera_rotation: glam::Quat, color: Vec3) -> ModelLight {
         specular: color,
         intensity: 3.0,
     }
+}
+
+/// `loadGlbSource`'s blade materials: `BladeEnvironment` as the reflection
+/// texture at `environmentIntensity` 1.5; `WeaponLighting` sets its
+/// `reflectionColor` to `color`. `None` for the guns.
+#[must_use]
+pub fn blade_reflection(weapon: &str, color: Vec3) -> Option<ReflectionFill> {
+    (weapon == "blade").then_some(ReflectionFill { color, intensity: 1.5 })
 }
 
 /// `loadGlbSource`'s orientation of the glTF `__root__` (Euler angles; its

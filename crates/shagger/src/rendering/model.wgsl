@@ -66,6 +66,8 @@ struct Draw {
     emissive: vec4f,
     uv_rows: vec4f,
     uv_origin: vec4f,
+    // The reflection fill: rgb its colour, w environmentIntensity (0 none).
+    reflection: vec4f,
 };
 
 struct Material {
@@ -209,6 +211,27 @@ fn specular_brdf(n: vec3f, v: vec3f, l: vec3f, n_dot_l: f32, n_dot_v: f32, rough
     return fresnel * distribution * visibility * n_dot_l;
 }
 
+// SHAG BladeEnvironment's 16-pixel cube: a grey brighter toward up,
+// round(255 * (0.2 + 0.4 * (up * 0.5 + 0.5))), read as linear (gammaSpace
+// false). Its mips blur it: with linearSpecularLOD the level is
+// log2(16) * roughness, so a rough surface sees the faces' averages, about
+// 0.4 plus a little toward up; mixing by roughness stands in for them.
+fn reflection_fill(r: vec3f, roughness: f32) -> f32 {
+    let up = r.y / max(length(r), 1e-6);
+    let sharp = round(255.0 * (0.2 + 0.4 * (up * 0.5 + 0.5))) / 255.0;
+    return mix(sharp, 0.4 + 0.1 * up, clamp(roughness, 0.0, 1.0));
+}
+
+// The split-sum environment BRDF (Karis's analytic fit), standing in for
+// Babylon's BRDF lookup texture: scale and bias on F0.
+fn environment_brdf(n_dot_v: f32, roughness: f32) -> vec2f {
+    let c0 = vec4f(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4f(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    return vec2f(-1.04, 1.04) * a004 + r.zw;
+}
+
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let texel = textureSample(base_texture, base_sampler, in.uv);
@@ -275,6 +298,15 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light_color;
         }
         color = diffuse * albedo * (1.0 - metallic) + specular;
+        // A reflection texture with no irradiance (its spherical polynomial
+        // is empty): specular only, the fill along the reflected view ray,
+        // times reflectionColor and environmentIntensity.
+        if draw.reflection.w > 0.0 {
+            let r = reflect(-v, n);
+            let brdf = environment_brdf(n_dot_v, roughness);
+            let reflectance = f0 * brdf.x + vec3f(brdf.y);
+            color += reflection_fill(r, roughness) * draw.reflection.rgb * reflectance * draw.reflection.w;
+        }
     }
     // A draw's emissive (a powerup glow), added as PBR adds its own.
     if draw.emissive.w > 0.5 {
