@@ -386,6 +386,7 @@ function writeEvent(e, code) {
     case 23: str(); str(); u16(); str(); f32(3); e.writeUint8(int(5)); break;
     case 25: str(); str(); u16(); str(); f32(3); e.writeUint8(int(5)); e.writeUint8(int(8)); break;
     case 11: str(); str(); str(); str(); u16(); f32(9); break;
+    case 26: str(); str(); str(); str(); u16(); f32(9); e.writeUint8(int(5)); e.writeString(pick(["", "riotgun", "machinegun", "blade", ...strings])); break;
     case 12: str(); str(); str(); str(); u16(); break;
     case 13: { const n = int(5); str(); e.writeUint8(n); f32(3 * n); break; }
     case 14: str(); str(); str(); str(); break;
@@ -424,7 +425,7 @@ function eventVectors() {
     const count = 1 + int(3);
     e.writeUint16(count);
     for (let k = 0; k < count; k++) {
-      const code = i < 26 * 4 ? i % 26 : chance(0.05) ? 26 + int(230) : int(26);
+      const code = i < 27 * 4 ? i % 27 : chance(0.05) ? 27 + int(229) : int(27);
       e.writeUint8(code);
       writeEvent(e, code);
     }

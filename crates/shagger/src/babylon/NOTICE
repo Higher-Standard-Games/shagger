@@ -7,6 +7,18 @@ licensed under the Apache License, Version 2.0 (see LICENSE in this folder).
 
 Ported files, with the Babylon.js source each came from and its version:
 
+  animations/animator_avatar.rs
+    from packages/dev/core/src/Animations/animatorAvatar.ts
+    (AnimatorAvatar.retargetAnimationGroup, _retargetAnimationKeys),
+    Babylon.js 9.31.2: carrying a clip's keys from one rig's rest onto
+    another's, as SHAG retargets the shared player clips to each body.
+
+  maths/math_glam.rs
+    from packages/dev/core/src/Maths/math.vector.ts (Matrix.decompose,
+    Quaternion.FromRotationMatrixToRef, FromUnitVectorsToRef,
+    RotationQuaternionFromAxisToRef, RotationAxisToRef), Babylon.js 9.31.2:
+    the helpers SHAG's player model fitting and held weapons call.
+
   maths/math_vector.rs
     from packages/dev/core/src/Maths/math.vector.ts (Vector3), Babylon.js 9.31.2:
     the arithmetic of add, subtract, scale, dot, cross, length, normalize and

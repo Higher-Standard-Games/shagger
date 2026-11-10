@@ -17,6 +17,7 @@
 //! milestone adds StandardMaterial's lighting terms, EXP fog and image
 //! processing (RUST.md 21.9).
 
+pub mod animations;
 pub mod materials;
 pub mod maths;
 pub mod meshes;

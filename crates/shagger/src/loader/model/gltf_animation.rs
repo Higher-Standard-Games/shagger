@@ -40,6 +40,18 @@ impl ClipChannel {
         }
     }
 
+    /// Each key's value, to rewrite in place (a cubic spline's tangents are
+    /// left as they are, as Babylon's retargeting leaves them).
+    pub fn key_values_mut(&mut self) -> Vec<&mut [f32]> {
+        let c = self.components();
+        let cubic = self.cubic;
+        let stride = if cubic { 3 * c } else { c };
+        self.values
+            .chunks_exact_mut(stride)
+            .map(|key| if cubic { &mut key[c..2 * c] } else { key })
+            .collect()
+    }
+
     fn key(&self, index: usize, part: usize) -> [f32; 4] {
         let c = self.components();
         let stride = if self.cubic { 3 * c } else { c };

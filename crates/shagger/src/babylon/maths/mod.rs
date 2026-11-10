@@ -3,4 +3,5 @@
 
 //! Babylon's `Maths` folder, the parts SHAGGER needs.
 
+pub mod math_glam;
 pub mod math_vector;

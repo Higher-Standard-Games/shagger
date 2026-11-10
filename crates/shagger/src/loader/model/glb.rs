@@ -431,8 +431,30 @@ impl Glb {
                     .attribute_by_unique_id(id)
                     .ok_or_else(|| err(format!("draco attribute {name} missing")))?;
                 let components = attribute.num_components() as usize;
-                out.attributes
-                    .insert(name.clone(), (components, attribute.read_f32s(points, components)));
+                let mut values = attribute.read_f32s(points, components);
+                // Draco keeps a normalized integer attribute (weights as
+                // bytes) as its integers; the glTF accessor says how they
+                // map to floats, as `read_floats` maps them.
+                if let Some(a) = primitive
+                    .attributes
+                    .get(name)
+                    .and_then(|&a| self.document.accessors.get(a))
+                    && a.normalized
+                {
+                    let scale = match a.component_type {
+                        5121 => Some((255.0, 0.0)),
+                        5120 => Some((127.0, -1.0)),
+                        5123 => Some((65535.0, 0.0)),
+                        5122 => Some((32767.0, -1.0)),
+                        _ => None,
+                    };
+                    if let Some((max, floor)) = scale {
+                        for v in &mut values {
+                            *v = (*v / max).max(floor);
+                        }
+                    }
+                }
+                out.attributes.insert(name.clone(), (components, values));
             }
         }
         out.indices = (0..mesh.num_faces())

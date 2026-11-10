@@ -211,6 +211,34 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
+    /// A file's node hierarchy at rest, without its skins: an animation
+    /// clip's own rig, which retargeting measures.
+    pub fn nodes_of(glb: &Glb) -> Result<Self, GlbError> {
+        let doc = &glb.document;
+        let rest = node_transforms(glb, false)?;
+        let mut parents = vec![None; doc.nodes.len()];
+        for (i, n) in doc.nodes.iter().enumerate() {
+            for &c in &n.children {
+                if let Some(p) = parents.get_mut(c) {
+                    *p = Some(i);
+                }
+            }
+        }
+        Ok(Self {
+            nodes: doc
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| SkeletonNode {
+                    name: n.name.clone().unwrap_or_else(|| format!("node{i}")),
+                    parent: parents[i],
+                    rest: rest[i],
+                })
+                .collect(),
+            skins: Vec::new(),
+        })
+    }
+
     /// The rest transforms of every node.
     #[must_use]
     pub fn rest(&self) -> Vec<NodeTransform> {
