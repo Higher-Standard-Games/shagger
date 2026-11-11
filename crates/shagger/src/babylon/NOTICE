@@ -69,6 +69,11 @@ Ported files, with the Babylon.js source each came from and its version:
     and helperFunctions.fx, Babylon.js 9.31.2: exposure, the vignette, gamma
     and contrast from an HDR target, rewritten in WGSL.
 
+  post_processes/fxaa_post_process.rs, post_processes/fxaa.wgsl
+    from packages/dev/core/src/PostProcesses/fxaaPostProcess.ts,
+    thinFXAAPostProcess.ts and the shaders ShadersWGSL/fxaa.vertex.fx and
+    fxaa.fragment.fx, Babylon.js 9.31.2: FXAA over the final image.
+
   meshes/trail_mesh.rs
     from packages/dev/core/src/Meshes/trailMesh.ts (TrailMesh), Babylon.js
     9.31.2: the tube of rings and its per-frame update, as SHAG's ragdolls

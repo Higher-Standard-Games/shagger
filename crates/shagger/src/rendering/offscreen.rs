@@ -4,6 +4,7 @@
 use super::gpu::Gpu;
 use super::hdr_target::HdrTarget;
 use super::world_renderer::DEPTH_FORMAT;
+use crate::babylon::post_processes::fxaa_post_process::FxaaPostProcess;
 use crate::babylon::post_processes::image_processing_post_process::{
     ImageProcessingConfiguration, ImageProcessingPostProcess,
 };
@@ -174,6 +175,7 @@ pub fn render_hdr_with_ui_to_rgba(
 /// [`render_hdr_with_ui_to_rgba`] with the main pass split in two:
 /// `opaque`, then `between` on the encoder (copies of the scene for what
 /// draws over it, such as water), then `rest` over the same colour and depth.
+/// With `fxaa`, the image and the overlay are smoothed before the UI.
 #[allow(clippy::too_many_arguments)]
 pub fn render_hdr_scene_with_ui_to_rgba(
     gpu: &Gpu,
@@ -182,6 +184,7 @@ pub fn render_hdr_scene_with_ui_to_rgba(
     clear: wgpu::Color,
     post: &ImageProcessingPostProcess,
     config: &ImageProcessingConfiguration,
+    fxaa: bool,
     opaque: impl FnOnce(&mut wgpu::RenderPass<'_>),
     between: impl FnOnce(&mut wgpu::CommandEncoder, &HdrTarget),
     rest: impl FnOnce(&mut wgpu::RenderPass<'_>),
@@ -203,10 +206,18 @@ pub fn render_hdr_scene_with_ui_to_rgba(
         let mut pass = begin_continue_pass(&mut encoder, &hdr.color, &hdr.depth);
         rest(&mut pass);
     }
-    hdr.resolve(gpu, &mut encoder, post, config, &color_view);
+    let mut smoothing = fxaa.then(|| FxaaPostProcess::new(gpu, OFFSCREEN_FORMAT));
+    let image = match &mut smoothing {
+        Some(fxaa) => fxaa.input(gpu, (width, height)),
+        None => &color_view,
+    };
+    hdr.resolve(gpu, &mut encoder, post, config, image);
     {
-        let mut pass = begin_overlay_pass(&mut encoder, &color_view, &hdr.depth);
+        let mut pass = begin_overlay_pass(&mut encoder, image, &hdr.depth);
         overlay(&mut pass);
+    }
+    if let Some(fxaa) = &smoothing {
+        fxaa.apply(&mut encoder, &color_view);
     }
     {
         let mut pass = begin_ui_pass(&mut encoder, &color_view);
