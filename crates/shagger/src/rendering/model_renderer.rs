@@ -436,6 +436,9 @@ pub struct ModelRenderer {
     /// Whether each of `frame` is in the main view (the second view draws
     /// them all).
     frame_visible: Vec<bool>,
+    /// Which of this frame's draws the second view can see
+    /// ([`Self::set_second_view`]'s frustum).
+    second_visible: Vec<bool>,
     /// `prepare`'s scratch: the draws sorted, and their uniforms' bytes.
     opaque_scratch: Vec<(ModelDraw, PipelineKey)>,
     blended_scratch: Vec<(ModelDraw, PipelineKey, f32, usize)>,
@@ -627,6 +630,7 @@ impl ModelRenderer {
             fog: FogUniforms::default(),
             frame: Vec::new(),
             frame_visible: Vec::new(),
+            second_visible: Vec::new(),
             opaque_scratch: Vec::new(),
             blended_scratch: Vec::new(),
             upload_scratch: Vec::new(),
@@ -1296,9 +1300,18 @@ impl ModelRenderer {
     }
 
     /// Sets the second view [`Self::draw_opaque_view`] draws from: this
-    /// frame's lights and fog seen through `view_proj` from `eye`. Call
+    /// frame's lights and fog seen through `view_proj` from `eye`, and the
+    /// draws inside its frustum (as the main view culls its own). Call
     /// after [`Self::prepare`].
-    pub fn set_second_view(&self, gpu: &Gpu, view_proj: Mat4, eye: Vec3) {
+    pub fn set_second_view(&mut self, gpu: &Gpu, view_proj: Mat4, eye: Vec3) {
+        let frustum = Frustum::from_view_projection(view_proj);
+        self.second_visible.clear();
+        for (draw, _) in &self.frame {
+            let primitive = &self.models[draw.model.0].primitives[draw.primitive];
+            let bounds = (primitive.bounds_min, primitive.bounds_max);
+            self.second_visible
+                .push(draw_visible(&frustum, draw, bounds, primitive.skin.is_some()));
+        }
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, 0.0],
@@ -1315,7 +1328,11 @@ impl ModelRenderer {
         pass.set_bind_group(0, &self.view_bind_group, &[]);
         let mut bound = Bound::default();
         for (i, (draw, key)) in self.frame.iter().enumerate() {
-            if key.blend != BlendKind::Opaque || key.pass != PassKind::Color || !keep(draw) {
+            if key.blend != BlendKind::Opaque
+                || key.pass != PassKind::Color
+                || !self.second_visible.get(i).copied().unwrap_or(true)
+                || !keep(draw)
+            {
                 continue;
             }
             self.record(pass, &mut bound, i, draw, key);
