@@ -5,7 +5,7 @@
 //! little-endian, the whole file optionally gzip:
 //!
 //! ```text
-//! "SHAG" version:u8 (1..=6)
+//! "SHAG" version:u8 (1..=7)
 //! map:str gametype:str tickRate:u8 snapshotRate:u8 startTimeHigh:u32 startTimeLow:u32
 //! v2+: matchId:str
 //! v4+: visibility:u8 (0 public, 1 private)
@@ -69,7 +69,7 @@ impl std::error::Error for DemoError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemoHeader {
-    /// Format version, 1 to 6.
+    /// Format version, 1 to 7.
     pub version: u8,
     pub map: String,
     /// Gametype (duel, ffa, tdm, and so on).
@@ -223,7 +223,9 @@ impl DemoReader {
         let mut offset = 4;
         let version = u8_at(data, offset)?;
         offset += 1;
-        if !(1..=6).contains(&version) {
+        // v6 retains v5's layout and adds optional bomb brush state in match
+        // JSON; v7 adds an optional look byte to each player's snapshot record.
+        if !(1..=7).contains(&version) {
             return Err(DemoError::UnsupportedVersion(version));
         }
         let (map, n) = read_string(data, offset)?;

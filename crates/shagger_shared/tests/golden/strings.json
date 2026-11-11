@@ -1,4 +1,4 @@
-{"generator":"tools/golden/protocol.mjs","shag":"4168ec323beb4b28516e78646e3ecf4a4a0e02ba","node":"v22.23.4","vectors":[{"bytes":"","units":[]},
+{"generator":"tools/golden/protocol.mjs","shag":"2a4817588485cb8d1d5112a7207fccdec5abcd22","node":"v22.23.4","vectors":[{"bytes":"","units":[]},
 {"bytes":"efbbbf","units":[]},
 {"bytes":"efbbbf41","units":[65]},
 {"bytes":"efbbbfefbbbf","units":[65279]},

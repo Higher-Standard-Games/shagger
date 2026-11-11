@@ -148,6 +148,10 @@ pub struct PlayerState {
     pub score: i32,
     pub deaths: u32,
     pub ping: u16,
+    /// A free-for-all player's body and colour, from the server (see the fps
+    /// game's `shared/players/PlayerLook.ts`); `None` in team modes and in
+    /// recordings made before the server assigned them.
+    pub look: Option<u8>,
 }
 
 /// A decoded snapshot. `E` is the game's event type: the event catalogue

@@ -16,7 +16,8 @@
 use shagger_shared::net::command::Command;
 use shagger_shared::net::game_state::GameState;
 use shagger_shared::net::message_codec::{
-    self as codec, ClientPrefs, Join, JoinGame, MessageType, ServerMessage, Welcome,
+    self as codec, ClientPrefs, Join, JoinGame, MatchPauseNotice, MatchPauseState, MessageType, PausedChat,
+    ServerMessage, Welcome,
 };
 use shagger_shared::net::snapshot::EventCodec;
 
@@ -71,6 +72,11 @@ pub enum HostEvent<E> {
     /// A decoded, acknowledged snapshot.
     Snapshot(GameState<E>),
     ServerMessage(ServerMessage),
+    /// The match's pause state (timeouts): paused, counting back in, or
+    /// running again. A paused server sends no snapshots.
+    Pause(MatchPauseNotice),
+    /// A chat line sent while the match is paused.
+    PausedChat(PausedChat),
     /// Snapshots stopped while the socket stays open.
     Stall {
         stage: StallStage,
@@ -117,6 +123,8 @@ pub struct NetworkGameHost<C: EventCodec> {
     pub clock_sync: ClockSync,
     watchdog: ConnectionWatchdog,
     watchdog_checked_at: f64,
+    /// The server holds the match still: no snapshots come, and none are missed.
+    paused: bool,
 }
 
 impl<C: EventCodec> NetworkGameHost<C> {
@@ -135,13 +143,14 @@ impl<C: EventCodec> NetworkGameHost<C> {
             handshake_deadline: 0.0,
             wait_for_initial_resume_token: false,
             resume_token: None,
-            resume_grace_ms: 20_000.0,
+            resume_grace_ms: 60_000.0,
             client_prefs: None,
             command_sequence: 1,
             snapshot_receiver: SnapshotReceiver::default(),
             clock_sync: ClockSync::new(date_to_perf),
             watchdog: ConnectionWatchdog::default(),
             watchdog_checked_at: 0.0,
+            paused: false,
         }
     }
 
@@ -237,6 +246,17 @@ impl<C: EventCodec> NetworkGameHost<C> {
         }
     }
 
+    /// Whether the server said the match is paused (a timeout or its count back in).
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    fn set_pause(&mut self, notice: MatchPauseNotice, events: &mut Vec<HostEvent<C::Event>>) {
+        self.paused = notice.state != MatchPauseState::Running;
+        events.push(HostEvent::Pause(notice));
+    }
+
     fn fail(&mut self, why: String, events: &mut Vec<HostEvent<C::Event>>) {
         self.disconnect();
         self.phase = HostPhase::Failed;
@@ -306,6 +326,10 @@ impl<C: EventCodec> NetworkGameHost<C> {
                 }
                 self.local_player_id.clone_from(&accept.player_id);
                 self.local_entity_id.clone_from(&accept.entity_id);
+                // A new connection starts unpaused; a paused server says so straight after.
+                if self.paused {
+                    self.set_pause(MatchPauseNotice::default(), events);
+                }
                 self.is_connected = true;
                 self.watchdog.start(mono);
                 self.watchdog_checked_at = mono;
@@ -362,6 +386,14 @@ impl<C: EventCodec> NetworkGameHost<C> {
                 let message = codec::decode_server_message(data).map_err(|e| e.to_string())?;
                 events.push(HostEvent::ServerMessage(message));
             }
+            Some(MessageType::Pause) => {
+                let notice = codec::decode_pause(data).map_err(|e| e.to_string())?;
+                self.set_pause(notice, events);
+            }
+            Some(MessageType::PausedChat) => {
+                let chat = codec::decode_paused_chat(data).map_err(|e| e.to_string())?;
+                events.push(HostEvent::PausedChat(chat));
+            }
             _ => return Err(format!("Unknown message type: 0x{kind:x}")),
         }
         Ok(())
@@ -384,8 +416,9 @@ impl<C: EventCodec> NetworkGameHost<C> {
         let since_last_check = mono - self.watchdog_checked_at;
         self.watchdog_checked_at = mono;
         // A blocked loop leaves snapshots queued unread: that gap says nothing
-        // about the connection.
-        if since_last_check > WATCHDOG_INTERVAL_MS * 3.0 {
+        // about the connection. A paused match sends no snapshots: silence
+        // then is not a stall.
+        if self.paused || since_last_check > WATCHDOG_INTERVAL_MS * 3.0 {
             self.watchdog.skip_gap(mono);
             return;
         }
@@ -413,6 +446,14 @@ impl<C: EventCodec> NetworkGameHost<C> {
             seq,
             command,
         )))
+    }
+
+    /// `sendCallPause`: call a timeout (`true`) or time in. The server
+    /// decides and answers everyone.
+    #[must_use]
+    pub fn send_call_pause(&self, timeout: bool) -> Option<Outgoing> {
+        self.is_connected
+            .then(|| Outgoing::reliable(codec::encode_call_pause(timeout)))
     }
 
     /// `sendJoinGame`: spectator to player.
@@ -638,6 +679,40 @@ mod tests {
         let next = host.send_command(&Command::default());
         assert!(next.is_none());
         assert_eq!(host.command_sequence, 4);
+    }
+
+    #[test]
+    fn a_paused_match_is_not_a_stall_and_carries_its_chat() {
+        use shagger_shared::net::message_codec::{encode_pause, encode_paused_chat};
+        let mut host = joined_host();
+        let notice = MatchPauseNotice {
+            state: MatchPauseState::Timeout,
+            ms_left: 120_000,
+            caller: "Alice".into(),
+            for_drop: false,
+        };
+        let (_, events) = feed(&mut host, &encode_pause(&notice), 3.0);
+        assert_eq!(events, vec![HostEvent::Pause(notice)]);
+        assert!(host.is_paused());
+        let chat = PausedChat {
+            sender_id: "p2".into(),
+            sender_name: "Bob".into(),
+            team: String::new(),
+            text: "brb".into(),
+        };
+        let (_, events) = feed(&mut host, &encode_paused_chat(&chat), 4.0);
+        assert_eq!(events, vec![HostEvent::PausedChat(chat)]);
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        let mut t = 4.0;
+        while t < 10_000.0 {
+            t += 500.0;
+            host.poll(1000.0 + t, t, &mut out, &mut events);
+        }
+        assert!(!events.iter().any(|e| matches!(e, HostEvent::Stall { .. })));
+        assert!(
+            host.send_call_pause(false)
+                .is_some_and(|o| o.reliable && o.data == [0x8d, 0])
+        );
     }
 
     #[test]

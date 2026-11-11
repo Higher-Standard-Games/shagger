@@ -234,6 +234,11 @@ fn decode_players<E>(
         } else if let Some(b) = base {
             player.team.clone_from(&b.team);
         }
+        if flags & 0x40 != 0 {
+            player.look = Some(decoder.read_uint8()?);
+        } else if let Some(b) = base {
+            player.look = b.look;
+        }
     }
     Ok(())
 }
