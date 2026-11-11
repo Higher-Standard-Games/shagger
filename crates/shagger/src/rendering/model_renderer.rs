@@ -218,8 +218,11 @@ struct Globals {
 struct MaterialUniform {
     base_color: [f32; 4],
     params: [f32; 4],
-    /// x: 1 with a normal map.
+    /// x: 1 with a normal map, y: 1 with two-sided lighting.
     maps: [f32; 4],
+    /// rgb: `emissiveColor` (glTF's factor times its strength), w: 1 with
+    /// an emissive texture.
+    emissive: [f32; 4],
 }
 
 /// Dynamic uniform offsets must be 256-byte aligned.
@@ -523,6 +526,8 @@ impl ModelRenderer {
                 // roughness (G) map; flat and white without.
                 texture_entry(3, wgpu::TextureViewDimension::D2),
                 texture_entry(4, wgpu::TextureViewDimension::D2),
+                // A PBR material's emissive map; white without.
+                texture_entry(5, wgpu::TextureViewDimension::D2),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -682,6 +687,7 @@ impl ModelRenderer {
                 Some(m.base_color_image),
                 lit.then_some(m.normal_image),
                 lit.then_some(m.metallic_roughness_image),
+                lit.then_some(m.emissive_image),
             ];
             for image in maps.into_iter().flatten().flatten() {
                 if views.contains_key(&image) {
@@ -711,6 +717,7 @@ impl ModelRenderer {
                 .filter(|_| lit)
                 .and_then(|i| views.get(&i))
                 .unwrap_or(&self.white);
+            let emissive_view = m.emissive_image.filter(|_| lit).and_then(|i| views.get(&i));
             if let ModelMaterialMode::Standard(params) = mode {
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("standard material"),
@@ -718,7 +725,11 @@ impl ModelRenderer {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
                 materials.push(GpuMaterial {
-                    bind_group: self.material_bind_group(gpu, [view, &self.flat_normal, &self.white], &buffer),
+                    bind_group: self.material_bind_group(
+                        gpu,
+                        [view, &self.flat_normal, &self.white, &self.white],
+                        &buffer,
+                    ),
                     blend: match (params.blends(), params.alpha_mode) {
                         (false, _) => BlendKind::Opaque,
                         (true, StandardAlphaMode::Combine) => BlendKind::Alpha,
@@ -763,7 +774,20 @@ impl ModelRenderer {
             let uniform = MaterialUniform {
                 base_color: m.base_color,
                 params: [m.metallic, m.roughness, unlit, alpha],
-                maps: [f32::from(u8::from(normal_view.is_some())), 0.0, 0.0, 0.0],
+                // The glTF loader turns twoSidedLighting on for a double-sided
+                // material only: a back face of any other keeps its normal.
+                maps: [
+                    f32::from(u8::from(normal_view.is_some())),
+                    f32::from(u8::from(m.double_sided)),
+                    0.0,
+                    0.0,
+                ],
+                emissive: [
+                    m.emissive[0],
+                    m.emissive[1],
+                    m.emissive[2],
+                    f32::from(u8::from(emissive_view.is_some())),
+                ],
             };
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("model material"),
@@ -773,7 +797,12 @@ impl ModelRenderer {
             materials.push(GpuMaterial {
                 bind_group: self.material_bind_group(
                     gpu,
-                    [view, normal_view.unwrap_or(&self.flat_normal), mr_view],
+                    [
+                        view,
+                        normal_view.unwrap_or(&self.flat_normal),
+                        mr_view,
+                        emissive_view.unwrap_or(&self.white),
+                    ],
                     &buffer,
                 ),
                 blend,
@@ -889,10 +918,10 @@ impl ModelRenderer {
         p.bounds_max = max;
     }
 
-    /// The base colour, normal and metallic-roughness textures and the
-    /// material's uniform.
-    fn material_bind_group(&self, gpu: &Gpu, views: [&wgpu::TextureView; 3], buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        let [view, normal, metallic_roughness] = views;
+    /// The base colour, normal, metallic-roughness and emissive textures
+    /// and the material's uniform.
+    fn material_bind_group(&self, gpu: &Gpu, views: [&wgpu::TextureView; 4], buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        let [view, normal, metallic_roughness, emissive] = views;
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("model material"),
             layout: &self.material_layout,
@@ -916,6 +945,10 @@ impl ModelRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(metallic_roughness),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(emissive),
                 },
             ],
         })

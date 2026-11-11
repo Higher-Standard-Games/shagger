@@ -74,8 +74,10 @@ struct Material {
     base_color: vec4f,
     // x: metallic, y: roughness, z: 1 unlit, w: alpha
     params: vec4f,
-    // x: 1 with a normal map.
+    // x: 1 with a normal map, y: 1 with two-sided lighting.
     maps: vec4f,
+    // rgb: emissiveColor, w: 1 with an emissive texture.
+    emissive: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -86,6 +88,7 @@ struct Material {
 @group(2) @binding(2) var<uniform> material: Material;
 @group(2) @binding(3) var normal_texture: texture_2d<f32>;
 @group(2) @binding(4) var metallic_roughness_texture: texture_2d<f32>;
+@group(2) @binding(5) var emissive_texture: texture_2d<f32>;
 
 // Babylon's cotangent_frame (bumpFragmentFunctions): the tangent frame from
 // the screen-space derivatives of the position and the texture coordinates.
@@ -238,6 +241,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     // Sampled before any branch: derivatives need uniform control flow.
     let bump = textureSample(normal_texture, base_sampler, in.uv).xyz * 2.0 - 1.0;
     let metal_rough = textureSample(metallic_roughness_texture, base_sampler, in.uv);
+    let emissive_texel = textureSample(emissive_texture, base_sampler, in.uv).rgb;
     let frame = cotangent_frame(normalize(in.normal), in.world_position, in.uv, NORMAL_MAP_SIGNS);
     let albedo_color = select(material.base_color.rgb, draw.tint.rgb, draw.tint.w > 0.5);
     let albedo = pow(texel.rgb, vec3f(2.2)) * albedo_color;
@@ -252,7 +256,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         if material.maps.x > 0.5 {
             n = normalize(frame * bump);
         }
-        if !front {
+        // TWOSIDEDLIGHTING: a back face turns its normal round.
+        if !front && material.maps.y > 0.5 {
             n = -n;
         }
         let v = normalize(globals.eye.xyz - in.world_position);
@@ -297,7 +302,13 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             diffuse += light_color * ndl * diffuse_brdf(ndl, n_dot_v, vdh, roughness);
             specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light_color;
         }
-        color = diffuse * albedo * (1.0 - metallic) + specular;
+        // MS_BRDF_ENERGY_CONSERVATION: the default BRDF lookup is always
+        // bound, so direct specular and radiance gain back the energy a
+        // single scattering loses (getEnergyConservationFactor; Babylon's
+        // lookup y is the fit's scale plus bias).
+        let lookup = environment_brdf(n_dot_v, roughness);
+        let energy = vec3f(1.0) + f0 * (1.0 / max(lookup.x + lookup.y, 1e-3) - 1.0);
+        color = diffuse * albedo * (1.0 - metallic) + specular * energy;
         // A reflection texture with no irradiance (its spherical polynomial
         // is empty): specular only, the fill along the reflected view ray,
         // times reflectionColor and environmentIntensity.
@@ -305,9 +316,16 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
             let r = reflect(-v, n);
             let brdf = environment_brdf(n_dot_v, roughness);
             let reflectance = f0 * brdf.x + vec3f(brdf.y);
-            color += reflection_fill(r, roughness) * draw.reflection.rgb * reflectance * draw.reflection.w;
+            color += reflection_fill(r, roughness) * draw.reflection.rgb * reflectance * draw.reflection.w * energy;
         }
     }
+    // The material's emissive: emissiveColor times its texture, which
+    // glTF stores in gamma space (GAMMAEMISSIVE).
+    var material_emissive = material.emissive.rgb;
+    if material.emissive.w > 0.5 {
+        material_emissive *= pow(emissive_texel, vec3f(2.2));
+    }
+    color += material_emissive;
     // A draw's emissive (a powerup glow), added as PBR adds its own.
     if draw.emissive.w > 0.5 {
         color += draw.emissive.rgb;

@@ -540,7 +540,18 @@ impl GltfModel {
                     roughness: pbr.roughness_factor.unwrap_or(1.0),
                     metallic_roughness_image: image_of(&pbr.metallic_roughness_texture),
                     normal_image: image_of(&m.normal_texture),
-                    emissive: m.emissive_factor.unwrap_or([0.0; 3]),
+                    // KHR_materials_emissive_strength scales the factor,
+                    // as Babylon's extension scales `emissiveColor`.
+                    emissive: {
+                        let strength = m
+                            .extensions
+                            .as_ref()
+                            .and_then(|e| e.get("KHR_materials_emissive_strength"))
+                            .and_then(|e| e.get("emissiveStrength"))
+                            .and_then(serde_json::Value::as_f64)
+                            .map_or(1.0, |v| v as f32);
+                        m.emissive_factor.unwrap_or([0.0; 3]).map(|c| c * strength)
+                    },
                     emissive_image: image_of(&m.emissive_texture),
                     alpha_mode: match m.alpha_mode.as_deref() {
                         Some("MASK") => AlphaMode::Mask,
