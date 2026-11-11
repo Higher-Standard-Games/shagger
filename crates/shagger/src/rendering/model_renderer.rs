@@ -33,6 +33,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
+use super::frustum::Frustum;
 use super::gpu::Gpu;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
 use crate::babylon::materials::STANDARD_WGSL;
@@ -122,6 +123,10 @@ pub struct ModelDraw {
     pub outline: Option<Outline>,
     /// A lit material's reflection fill (the blade's `BladeEnvironment`).
     pub reflection: Option<ReflectionFill>,
+    /// Left out when its box is outside the view (Babylon's frustum
+    /// culling of an active mesh). False for a draw its joints carry away
+    /// from `world` (a ragdoll's bones), whose box says nothing.
+    pub cull: bool,
 }
 
 /// SHAG `BladeEnvironment`: a small grey cube, brighter toward the sky, as
@@ -151,6 +156,7 @@ impl ModelDraw {
             skin: None,
             outline: None,
             reflection: None,
+            cull: true,
         }
     }
 }
@@ -311,7 +317,66 @@ struct GpuPrimitive {
     count: u32,
     material: usize,
     bounds_center: Vec3,
+    /// The vertices' box, for culling.
+    bounds_min: Vec3,
+    bounds_max: Vec3,
     creation_order: usize,
+}
+
+/// What a pass has bound, so a run of draws sets each once.
+#[derive(Default)]
+struct Bound {
+    pipeline: Option<PipelineKey>,
+    /// Model and material index.
+    material: Option<(usize, usize)>,
+    /// Model and primitive index.
+    buffers: Option<(usize, usize)>,
+}
+
+/// The box of `positions` (empty: a point at the origin).
+fn position_bounds(positions: &[[f32; 3]]) -> (Vec3, Vec3) {
+    let (min, max) = positions
+        .iter()
+        .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
+            (lo.min(Vec3::from(*v)), hi.max(Vec3::from(*v)))
+        });
+    if min.x <= max.x {
+        (min, max)
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    }
+}
+
+/// How much a rigged primitive's box grows for its poses: its joints move
+/// the vertices away from the bind pose the box was taken in (a crouch, a
+/// swing), so its largest half-extent, every way, and a quarter more.
+const SKINNED_BOUNDS_GROWTH: f32 = 1.25;
+
+/// Whether a draw can be seen through `frustum`: its primitive's box, grown
+/// by its outline (and its poses when rigged), carried into the world.
+fn draw_visible(frustum: &Frustum, draw: &ModelDraw, (min, max): (Vec3, Vec3), skinned: bool) -> bool {
+    if !draw.cull {
+        return true;
+    }
+    let center = (min + max) * 0.5;
+    let mut half = (max - min) * 0.5;
+    if skinned {
+        half = Vec3::splat(half.max_element() * SKINNED_BOUNDS_GROWTH);
+    }
+    half += Vec3::splat(draw.outline.map_or(0.0, |o| o.width.max(0.0)));
+    // The world box of a transformed box: the centre moved, each axis'
+    // half the sum of the absolute matrix entries' reach.
+    let world_center = draw.world.transform_point3(center);
+    let m = draw.world;
+    let world_half = Vec3::new(
+        m.x_axis.x.abs() * half.x + m.y_axis.x.abs() * half.y + m.z_axis.x.abs() * half.z,
+        m.x_axis.y.abs() * half.x + m.y_axis.y.abs() * half.y + m.z_axis.y.abs() * half.z,
+        m.x_axis.z.abs() * half.x + m.y_axis.z.abs() * half.y + m.z_axis.z.abs() * half.z,
+    );
+    if !world_center.is_finite() || !world_half.is_finite() {
+        return true;
+    }
+    frustum.intersects_box(world_center - world_half, world_center + world_half)
 }
 
 struct GpuMaterial {
@@ -361,6 +426,13 @@ pub struct ModelRenderer {
     fog: FogUniforms,
     /// This frame's draws, in drawing order, with their pipeline.
     frame: Vec<(ModelDraw, PipelineKey)>,
+    /// Whether each of `frame` is in the main view (the second view draws
+    /// them all).
+    frame_visible: Vec<bool>,
+    /// `prepare`'s scratch: the draws sorted, and their uniforms' bytes.
+    opaque_scratch: Vec<(ModelDraw, PipelineKey)>,
+    blended_scratch: Vec<(ModelDraw, PipelineKey, f32, usize)>,
+    upload_scratch: Vec<u8>,
     /// Diffuse BRDF: false Lambert, true Burley.
     burley: bool,
 }
@@ -545,6 +617,10 @@ impl ModelRenderer {
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
             frame: Vec::new(),
+            frame_visible: Vec::new(),
+            opaque_scratch: Vec::new(),
+            blended_scratch: Vec::new(),
+            upload_scratch: Vec::new(),
             burley: false,
         }
     }
@@ -740,6 +816,8 @@ impl ModelRenderer {
                     count: p.indices.len() as u32,
                     material: p.material.unwrap_or(0).min(count - 1),
                     bounds_center: p.bounds_center,
+                    bounds_min: position_bounds(&p.positions).0,
+                    bounds_max: position_bounds(&p.positions).1,
                     creation_order: p.creation_order,
                 }
             })
@@ -780,12 +858,10 @@ impl ModelRenderer {
         if bytes.len() as u64 <= p.vertex.size() {
             gpu.queue.write_buffer(&p.vertex, 0, bytes);
         }
-        let (min, max) = positions
-            .iter()
-            .fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| {
-                (lo.min(Vec3::from(*v)), hi.max(Vec3::from(*v)))
-            });
+        let (min, max) = position_bounds(positions);
         p.bounds_center = (min + max) * 0.5;
+        p.bounds_min = min;
+        p.bounds_max = max;
     }
 
     /// The base colour, normal and metallic-roughness textures and the
@@ -1034,8 +1110,11 @@ impl ModelRenderer {
         self.globals = globals;
 
         // Opaque first, then blended back to front.
-        let mut opaque = Vec::new();
-        let mut blended = Vec::new();
+        let mut opaque = std::mem::take(&mut self.opaque_scratch);
+        let mut blended = std::mem::take(&mut self.blended_scratch);
+        opaque.clear();
+        blended.clear();
+        let frustum = Frustum::from_view_projection(view_proj);
         for draw in draws {
             let Some(model) = self.models.get(draw.model.0) else {
                 continue;
@@ -1062,12 +1141,19 @@ impl ModelRenderer {
             }
         }
         blended.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.3.cmp(&b.3)));
-        self.frame = opaque
-            .into_iter()
-            .chain(blended.into_iter().map(|(d, k, _, _)| (d, k)))
-            .collect();
-        for &(_, key) in &self.frame.clone() {
+        self.frame.clear();
+        self.frame.extend_from_slice(&opaque);
+        self.frame.extend(blended.iter().map(|&(d, k, _, _)| (d, k)));
+        self.opaque_scratch = opaque;
+        self.blended_scratch = blended;
+        self.frame_visible.clear();
+        for i in 0..self.frame.len() {
+            let (draw, key) = self.frame[i];
             self.pipeline(gpu, key);
+            let primitive = &self.models[draw.model.0].primitives[draw.primitive];
+            let bounds = (primitive.bounds_min, primitive.bounds_max);
+            self.frame_visible
+                .push(draw_visible(&frustum, &draw, bounds, primitive.skin.is_some()));
         }
         let mut rebind = false;
         if self.frame.len() > self.draw_capacity {
@@ -1094,7 +1180,9 @@ impl ModelRenderer {
             self.draw_bind_group =
                 create_draw_bind_group(gpu, &self.draw_layout, &self.draw_buffer, &self.joint_buffer);
         }
-        let mut bytes = vec![0u8; DRAW_STRIDE as usize * self.frame.len()];
+        let mut bytes = std::mem::take(&mut self.upload_scratch);
+        bytes.clear();
+        bytes.resize(DRAW_STRIDE as usize * self.frame.len(), 0);
         let size = std::mem::size_of::<DrawUniform>();
         for (i, (draw, _)) in self.frame.iter().enumerate() {
             let at = i * DRAW_STRIDE as usize;
@@ -1131,6 +1219,7 @@ impl ModelRenderer {
         if !bytes.is_empty() {
             gpu.queue.write_buffer(&self.draw_buffer, 0, &bytes);
         }
+        self.upload_scratch = bytes;
         if !joints.is_empty() {
             let flat: Vec<[f32; 16]> = joints.iter().map(Mat4::to_cols_array).collect();
             gpu.queue
@@ -1166,35 +1255,57 @@ impl ModelRenderer {
     /// formats. `view_proj` must not mirror: front faces stay front.
     pub fn draw_opaque_view(&self, pass: &mut wgpu::RenderPass<'_>, keep: &dyn Fn(&ModelDraw) -> bool) {
         pass.set_bind_group(0, &self.view_bind_group, &[]);
+        let mut bound = Bound::default();
         for (i, (draw, key)) in self.frame.iter().enumerate() {
             if key.blend != BlendKind::Opaque || key.pass != PassKind::Color || !keep(draw) {
                 continue;
             }
-            self.record(pass, i, draw, key);
+            self.record(pass, &mut bound, i, draw, key);
         }
     }
 
-    fn record(&self, pass: &mut wgpu::RenderPass<'_>, i: usize, draw: &ModelDraw, key: &PipelineKey) {
+    /// Records one draw, setting only what differs from the one before (an
+    /// outlined primitive's three passes share its buffers and material).
+    fn record(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bound: &mut Bound,
+        i: usize,
+        draw: &ModelDraw,
+        key: &PipelineKey,
+    ) {
         let model = &self.models[draw.model.0];
         let primitive = &model.primitives[draw.primitive];
-        pass.set_pipeline(&self.pipelines[key]);
-        pass.set_bind_group(1, &self.draw_bind_group, &[(i as u64 * DRAW_STRIDE) as u32]);
-        pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
-        pass.set_vertex_buffer(0, primitive.vertex.slice(..));
-        if let Some(skin) = &primitive.skin {
-            pass.set_vertex_buffer(1, skin.slice(..));
+        if bound.pipeline != Some(*key) {
+            pass.set_pipeline(&self.pipelines[key]);
+            bound.pipeline = Some(*key);
         }
-        pass.set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_bind_group(1, &self.draw_bind_group, &[(i as u64 * DRAW_STRIDE) as u32]);
+        let material = (draw.model.0, primitive.material);
+        if bound.material != Some(material) {
+            pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
+            bound.material = Some(material);
+        }
+        let buffers = (draw.model.0, draw.primitive);
+        if bound.buffers != Some(buffers) {
+            pass.set_vertex_buffer(0, primitive.vertex.slice(..));
+            if let Some(skin) = &primitive.skin {
+                pass.set_vertex_buffer(1, skin.slice(..));
+            }
+            pass.set_index_buffer(primitive.index.slice(..), wgpu::IndexFormat::Uint32);
+            bound.buffers = Some(buffers);
+        }
         pass.draw_indexed(0..primitive.count, 0, 0..1);
     }
 
     fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, opaque: bool) {
         pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        let mut bound = Bound::default();
         for (i, (draw, key)) in self.frame.iter().enumerate() {
-            if (key.blend == BlendKind::Opaque) != opaque {
+            if (key.blend == BlendKind::Opaque) != opaque || !self.frame_visible[i] {
                 continue;
             }
-            self.record(pass, i, draw, key);
+            self.record(pass, &mut bound, i, draw, key);
         }
     }
 
@@ -1216,4 +1327,33 @@ fn skin_vertices(p: &ModelPrimitive) -> Option<Vec<SkinVertex>> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rendering::camera::Camera;
+
+    #[test]
+    fn draws_out_of_view_are_culled_unless_told_not_to() {
+        let frustum = Frustum::from_view_projection(Camera::default().view_projection(16.0 / 9.0));
+        let unit = (Vec3::splat(-1.0), Vec3::splat(1.0));
+        let at = |z: f32| ModelDraw::new(ModelHandle(0), 0, Mat4::from_translation(Vec3::new(0.0, 0.0, z)));
+        assert!(draw_visible(&frustum, &at(100.0), unit, false));
+        assert!(!draw_visible(&frustum, &at(-100.0), unit, false));
+        // A ragdoll's box says nothing about where its bones are.
+        let free = ModelDraw {
+            cull: false,
+            ..at(-100.0)
+        };
+        assert!(draw_visible(&frustum, &free, unit, false));
+        // A box just behind the near plane, reached by its scale.
+        let scaled = ModelDraw::new(
+            ModelHandle(0),
+            0,
+            Mat4::from_scale_rotation_translation(Vec3::splat(10.0), glam::Quat::IDENTITY, Vec3::new(0.0, 0.0, -5.0)),
+        );
+        assert!(draw_visible(&frustum, &scaled, unit, false));
+        assert_eq!(position_bounds(&[]), (Vec3::ZERO, Vec3::ZERO));
+    }
 }

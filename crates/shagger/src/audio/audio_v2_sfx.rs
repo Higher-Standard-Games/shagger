@@ -18,6 +18,7 @@ use glam::DVec3;
 
 use crate::audio::decode::{SoundBuffer, decode_sound};
 use crate::audio::device::DeviceOutput;
+use crate::audio::loop_overlap::{LoopShape, shape_loop};
 use crate::audio::mixer::{Command, Mixer, Play, Route, SfxChannel, Spatial, VoiceId};
 use crate::audio::spatial::Listener;
 
@@ -89,7 +90,10 @@ impl Device {
     fn hold(&mut self, command: Command) {
         let voice = |c: &Command| match c {
             Command::Play(p) => Some(p.id),
-            Command::PlayStream { id, .. } | Command::Stop(id) | Command::SetVoiceVolume(id, _) => Some(*id),
+            Command::PlayStream { id, .. }
+            | Command::Stop(id)
+            | Command::SetVoiceVolume(id, _)
+            | Command::SetVoicePosition(id, _) => Some(*id),
             _ => None,
         };
         match &command {
@@ -99,6 +103,16 @@ impl Device {
                     .pending
                     .iter()
                     .position(|c| matches!(c, Command::SetVoiceVolume(other, _) if other == id))
+                {
+                    self.pending[at] = command;
+                    return;
+                }
+            }
+            Command::SetVoicePosition(id, _) => {
+                if let Some(at) = self
+                    .pending
+                    .iter()
+                    .position(|c| matches!(c, Command::SetVoicePosition(other, _) if other == id))
                 {
                     self.pending[at] = command;
                     return;
@@ -183,6 +197,9 @@ enum Output {
 pub struct AudioV2Sfx {
     output: Output,
     buffers: HashMap<String, Arc<SoundBuffer>>,
+    /// Loops built from `buffers` (`getBuffer` with a loop's shape), and
+    /// the frame each repeats from.
+    shaped: HashMap<String, Option<(Arc<SoundBuffer>, usize)>>,
     channel_volumes: [f32; 4],
     volume: f32,
     muted: bool,
@@ -303,6 +320,7 @@ impl AudioV2Sfx {
         Self {
             output,
             buffers: HashMap::new(),
+            shaped: HashMap::new(),
             channel_volumes: [1.0; 4],
             volume: 1.0,
             muted: false,
@@ -446,6 +464,7 @@ impl AudioV2Sfx {
             route: Route::Sfx(options.channel),
             volume: options.volume.unwrap_or(1.0).max(0.0),
             looped: false,
+            loop_start: 0,
             spatial: None,
             slot: None,
             instances: Some((group, options.max_instances.unwrap_or(8))),
@@ -468,6 +487,7 @@ impl AudioV2Sfx {
             route: Route::Sfx(options.channel),
             volume: options.volume.unwrap_or(1.0).max(0.0),
             looped: false,
+            loop_start: 0,
             spatial: Some(Spatial {
                 position,
                 rolloff: options.attenuation.unwrap_or(attenuation::NORMAL).max(0.0),
@@ -482,6 +502,52 @@ impl AudioV2Sfx {
     /// stopped.
     pub fn play_loop_3d(&mut self, path: &str, position: Option<DVec3>, options: &SfxPlayOptions) -> Option<SfxLoop> {
         let buffer = self.buffers.get(&normalize_path(path)).cloned()?;
+        Some(self.start_loop(buffer, 0, position, options))
+    }
+
+    /// `playLoop3D` with `LoopSfxPlayOptions`' region, overlap, intro and
+    /// pitch: the loop's buffer is built on first use and kept.
+    pub fn play_loop_shaped(
+        &mut self,
+        path: &str,
+        position: Option<DVec3>,
+        options: &SfxPlayOptions,
+        shape: &LoopShape,
+    ) -> Option<SfxLoop> {
+        let key = format!("{}{}", normalize_path(path), shape.key());
+        if !self.shaped.contains_key(&key) {
+            let source = self.buffers.get(&normalize_path(path)).cloned()?;
+            let attack = shape
+                .intro
+                .as_ref()
+                .and_then(|i| self.buffers.get(&normalize_path(&i.path)).cloned());
+            let built = match shape_loop(&source, attack.as_deref(), shape) {
+                Ok((buffer, start)) => Some((Arc::new(buffer), start)),
+                Err(e) => {
+                    eprintln!("[AudioManager] Failed to build loop '{path}': {e}");
+                    None
+                }
+            };
+            self.shaped.insert(key.clone(), built);
+        }
+        let (buffer, start) = self.shaped.get(&key)?.clone()?;
+        Some(self.start_loop(buffer, start, position, options))
+    }
+
+    /// `SfxLoop.setPosition`: a placed loop moves.
+    pub fn set_loop_position(&mut self, handle: SfxLoop, position: DVec3) {
+        if self.loops.contains_key(&handle.0) {
+            self.send(Command::SetVoicePosition(handle.0, position));
+        }
+    }
+
+    fn start_loop(
+        &mut self,
+        buffer: Arc<SoundBuffer>,
+        loop_start: usize,
+        position: Option<DVec3>,
+        options: &SfxPlayOptions,
+    ) -> SfxLoop {
         let volume = options.volume.unwrap_or(1.0).max(0.0);
         let id = self.next_id();
         self.loops.insert(id, volume);
@@ -491,6 +557,7 @@ impl AudioV2Sfx {
             route: Route::Sfx(options.channel),
             volume: if self.loops_muted { 0.0 } else { volume },
             looped: true,
+            loop_start,
             spatial: position.map(|position| Spatial {
                 position,
                 rolloff: options.attenuation.unwrap_or(attenuation::NORMAL).max(0.0),
@@ -498,7 +565,7 @@ impl AudioV2Sfx {
             slot: None,
             instances: None,
         }));
-        Some(SfxLoop(id))
+        SfxLoop(id)
     }
 
     pub fn stop_loop(&mut self, handle: SfxLoop) {
@@ -606,6 +673,7 @@ mod tests {
             route: Route::Sfx(SfxChannel::Effects),
             volume: 1.0,
             looped: false,
+            loop_start: 0,
             spatial: None,
             slot: None,
             instances: None,

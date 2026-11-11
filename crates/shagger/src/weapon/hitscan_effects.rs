@@ -296,7 +296,7 @@ impl HitscanEffects {
 
     /// `spawnWallMark`, unless `r_marks` is off.
     fn spawn_wall_mark(&mut self, now: f64, position: DVec3, normal: DVec3, color: Vec3, size: f64) {
-        let on = crate::core::cvar::with_cvars(|c| c.get("r_marks").is_none() || c.get_number("r_marks") != 0.0);
+        let on = crate::core::cvar::with_cvars(|c| crate::rendering::render_toggles::render_toggle(c, "r_marks"));
         if on {
             self.wall_marks.spawn(now, position, normal, color, size);
         }

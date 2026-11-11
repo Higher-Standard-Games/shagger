@@ -83,6 +83,8 @@ pub struct Play {
     pub route: Route,
     pub volume: f32,
     pub looped: bool,
+    /// The frame a loop repeats from (after an intro played once).
+    pub loop_start: usize,
     pub spatial: Option<Spatial>,
     /// One sound at a time per slot.
     pub slot: Option<u64>,
@@ -104,6 +106,8 @@ pub enum Command {
     },
     Stop(VoiceId),
     SetVoiceVolume(VoiceId, f32),
+    /// A placed voice moves (`SfxLoop.setPosition`).
+    SetVoicePosition(VoiceId, DVec3),
     SetListener(Listener),
     /// The sfx bus (`s_sfxvolume`, 0 when muted).
     SetSfxGain(f32),
@@ -151,6 +155,8 @@ struct Voice {
     buffer: Arc<SoundBuffer>,
     cursor: usize,
     looped: bool,
+    /// Where a loop repeats from, past its intro.
+    loop_start: usize,
     gain: Ramp,
     bus: usize,
     spatial: Option<Spatial>,
@@ -279,6 +285,16 @@ impl Mixer {
                     v.gain.set(volume, frames);
                 }
             }
+            Command::SetVoicePosition(id, position) => {
+                if let Some(spatial) = self
+                    .voices
+                    .iter_mut()
+                    .find(|v| v.id == id)
+                    .and_then(|v| v.spatial.as_mut())
+                {
+                    spatial.position = position;
+                }
+            }
             Command::SetListener(listener) => self.listener = listener,
             Command::SetSfxGain(gain) => self.sfx.set(gain, self.ramp_frames),
             Command::SetChannelGain(channel, gain) => self.buses[channel.index()].set(gain, self.ramp_frames),
@@ -305,11 +321,13 @@ impl Mixer {
             self.remove_oldest(|_| true);
         }
         self.started += 1;
+        let loop_start = play.loop_start.min(play.buffer.frames() - 1);
         self.voices.push(Voice {
             id: play.id,
             buffer: play.buffer,
             cursor: 0,
             looped: play.looped,
+            loop_start,
             gain: Ramp::new(play.volume.max(0.0)),
             bus: match play.route {
                 Route::Sfx(channel) => channel.index(),
@@ -391,7 +409,7 @@ impl Mixer {
             for f in 0..frames {
                 if voice.cursor >= total {
                     if voice.looped {
-                        voice.cursor = 0;
+                        voice.cursor = voice.loop_start;
                     } else {
                         voice.finished = true;
                         break;
@@ -455,10 +473,37 @@ mod tests {
             route: Route::Sfx(SfxChannel::Effects),
             volume: 1.0,
             looped: false,
+            loop_start: 0,
             spatial: None,
             slot: None,
             instances: None,
         }
+    }
+
+    #[test]
+    fn a_loop_repeats_from_past_its_intro_and_moves() {
+        let buffer = Arc::new(SoundBuffer {
+            channels: 1,
+            sample_rate: 48000,
+            samples: (0..8).map(|i| i as f32 / 8.0).collect(),
+        });
+        let mut mixer = Mixer::new(48000);
+        mixer.apply(Command::Play(Play {
+            looped: true,
+            loop_start: 5,
+            ..play(1, &buffer)
+        }));
+        let mut out = vec![0.0; 2 * 14];
+        mixer.render(&mut out);
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let expect: Vec<f32> = [0, 1, 2, 3, 4, 5, 6, 7, 5, 6, 7, 5, 6, 7]
+            .iter()
+            .map(|&i| i as f32 / 8.0)
+            .collect();
+        for (a, b) in left.iter().zip(&expect) {
+            assert!((a - b).abs() < 1e-3, "{left:?}");
+        }
+        mixer.apply(Command::SetVoicePosition(1, DVec3::ONE));
     }
 
     #[test]
@@ -504,6 +549,7 @@ mod tests {
         let mut mixer = Mixer::new(48000);
         mixer.apply(Command::Play(Play {
             looped: true,
+            loop_start: 0,
             ..play(1, &tone(10, 1))
         }));
         mixer.apply(Command::SetSfxGain(0.0));

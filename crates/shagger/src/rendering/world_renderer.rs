@@ -417,8 +417,22 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
     })
 }
 
+/// `r_anisotropy` (Babylon's `anisotropicFilteringLevel`, 4 by default) as
+/// a sampler's anisotropy clamp. wgpu takes only powers of two, so a level
+/// between them rounds down.
+#[must_use]
+pub fn sampler_anisotropy(level: f64) -> u16 {
+    let level = if level.is_finite() {
+        level.clamp(1.0, 16.0) as u16
+    } else {
+        4
+    };
+    1 << (15 - level.leading_zeros())
+}
+
 impl WorldRenderer {
-    /// Uploads the map. `textures` loads an image by base path (as
+    /// Uploads the map. The textures are filtered at `r_anisotropy` as it
+    /// stands now; a change takes effect with the next map. `textures` loads an image by base path (as
     /// `resolveAndLoadTexture` does, extensions its own business); each
     /// pass's candidates are tried in order. `color_format` is the target's
     /// format.
@@ -477,7 +491,9 @@ impl WorldRenderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            anisotropy_clamp: 8,
+            anisotropy_clamp: sampler_anisotropy(crate::core::cvar::with_cvars(|c| {
+                crate::rendering::render_vars::render_var(c, "r_anisotropy")
+            })),
             ..Default::default()
         });
 
@@ -1419,5 +1435,21 @@ pub(crate) fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
         count: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sampler_anisotropy;
+
+    #[test]
+    fn anisotropy_follows_r_anisotropy() {
+        assert_eq!(sampler_anisotropy(4.0), 4);
+        assert_eq!(sampler_anisotropy(1.0), 1);
+        assert_eq!(sampler_anisotropy(16.0), 16);
+        assert_eq!(sampler_anisotropy(6.0), 4);
+        assert_eq!(sampler_anisotropy(40.0), 16);
+        assert_eq!(sampler_anisotropy(0.0), 1);
+        assert_eq!(sampler_anisotropy(f64::NAN), 4);
     }
 }
