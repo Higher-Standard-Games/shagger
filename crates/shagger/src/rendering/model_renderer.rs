@@ -35,6 +35,7 @@ use wgpu::util::DeviceExt;
 use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::frustum::Frustum;
 use super::gpu::Gpu;
+use super::player_outline_smoothing::smooth_player_outline_normals;
 use super::world_renderer::{DEPTH_FORMAT, Rgba8Image, sampler_entry, texture_entry, upload_texture};
 use crate::babylon::materials::STANDARD_WGSL;
 use crate::rendering::world_fog_controller::FogUniforms;
@@ -312,6 +313,9 @@ enum BlendKind {
 
 struct GpuPrimitive {
     vertex: wgpu::Buffer,
+    /// A rigged primitive's vertices with the outline's smoothed normals
+    /// (`PlayerOutlineSmoothing`), when they differ from its own.
+    outline_vertex: Option<wgpu::Buffer>,
     skin: Option<wgpu::Buffer>,
     index: wgpu::Buffer,
     count: u32,
@@ -329,8 +333,8 @@ struct Bound {
     pipeline: Option<PipelineKey>,
     /// Model and material index.
     material: Option<(usize, usize)>,
-    /// Model and primitive index.
-    buffers: Option<(usize, usize)>,
+    /// Model and primitive index, and whether the outline's vertices.
+    buffers: Option<(usize, usize, bool)>,
 }
 
 /// The box of `positions` (empty: a point at the origin).
@@ -794,6 +798,26 @@ impl ModelRenderer {
                         uv: p.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
                     })
                     .collect();
+                // The outline's own normals: a hard edge's split vertices
+                // averaged, so the outline does not tear along it.
+                let outline_vertex = p
+                    .skin
+                    .as_ref()
+                    .and_then(|skin| {
+                        smooth_player_outline_normals(&p.positions, &p.normals, &skin.joints, &skin.weights)
+                    })
+                    .map(|normals| {
+                        let smoothed: Vec<ModelVertex> = vertices
+                            .iter()
+                            .zip(normals)
+                            .map(|(v, normal)| ModelVertex { normal, ..*v })
+                            .collect();
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("model outline vertices"),
+                            contents: bytemuck::cast_slice(&smoothed),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        })
+                    });
                 GpuPrimitive {
                     vertex: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("model vertices"),
@@ -801,6 +825,7 @@ impl ModelRenderer {
                         // Effects (trails) rewrite theirs each frame.
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     }),
+                    outline_vertex,
                     skin: skin_vertices(p).map(|skin| {
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("model skin"),
@@ -1286,9 +1311,14 @@ impl ModelRenderer {
             pass.set_bind_group(2, &model.materials[primitive.material].bind_group, &[]);
             bound.material = Some(material);
         }
-        let buffers = (draw.model.0, draw.primitive);
+        let outline = key.pass != PassKind::Color && primitive.outline_vertex.is_some();
+        let buffers = (draw.model.0, draw.primitive, outline);
         if bound.buffers != Some(buffers) {
-            pass.set_vertex_buffer(0, primitive.vertex.slice(..));
+            let vertex = match (&primitive.outline_vertex, outline) {
+                (Some(smoothed), true) => smoothed,
+                _ => &primitive.vertex,
+            };
+            pass.set_vertex_buffer(0, vertex.slice(..));
             if let Some(skin) = &primitive.skin {
                 pass.set_vertex_buffer(1, skin.slice(..));
             }
