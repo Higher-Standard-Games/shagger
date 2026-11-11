@@ -161,6 +161,21 @@ impl Hud2d {
             .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     }
 
+    /// A textured quad by its four corners (top left, top right, bottom
+    /// left, bottom right) in target pixels.
+    fn quad_corners(&mut self, corners: [[f32; 2]; 4], uv0: [f32; 2], uv1: [f32; 2], color: [f32; 4]) {
+        let base = self.vertices.len() as u32;
+        for (position, uv) in
+            corners
+                .into_iter()
+                .zip([[uv0[0], uv0[1]], [uv1[0], uv0[1]], [uv0[0], uv1[1]], [uv1[0], uv1[1]]])
+        {
+            self.vertices.push(HudVertex { position, uv, color });
+        }
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    }
+
     /// A filled rectangle in CSS pixels.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         if w <= 0.0 || h <= 0.0 || color[3] <= 0.0 {
@@ -439,13 +454,58 @@ impl Hud2d {
         self.text(x, baseline, text, style)
     }
 
+    /// `writing-mode: vertical-rl`: `text` turned a quarter clockwise,
+    /// read top to bottom in a column whose left edge is `x` and top `y`
+    /// (CSS pixels), its glyphs' tops to the right. The column is a line
+    /// of the font wide; returns its length.
+    pub fn text_vertical(&mut self, x: f32, y: f32, text: &str, style: &TextStyle) -> f32 {
+        let length = self.measure(text, style);
+        let (_, descent) = self.line_metrics(style);
+        let baseline = x + descent;
+        if let Some((offset, color)) = style.shadow {
+            self.run_turned(
+                Some((baseline + offset[0], y + offset[1])),
+                0.0,
+                0.0,
+                text,
+                style,
+                color,
+            );
+        }
+        self.run_turned(Some((baseline, y)), 0.0, 0.0, text, style, style.color);
+        length
+    }
+
     fn run(&mut self, x: f32, y: f32, text: &str, style: &TextStyle, color: [f32; 4]) {
+        self.run_turned(None, x, y, text, style, color);
+    }
+
+    /// Lays `text` out along a baseline from (`x`, `y`); with `turned`,
+    /// along a vertical baseline at `turned.0` from `turned.1` downwards,
+    /// turned a quarter clockwise.
+    fn run_turned(
+        &mut self,
+        turned: Option<(f32, f32)>,
+        x: f32,
+        y: f32,
+        text: &str,
+        style: &TextStyle,
+        color: [f32; 4],
+    ) {
         if self.fonts.get(style.font.0).is_none() || color[3] <= 0.0 {
             return;
         }
         let px = (style.size * self.scale).round().max(1.0);
+        let (x, y) = turned.map_or((x, y), |_| (0.0, 0.0));
         let mut pen = (x * self.scale).round();
         let baseline = (y * self.scale).round();
+        // A point of the flat run, placed: (pen, baseline) along the
+        // column from its top, the glyphs' tops to its right.
+        let origin = turned.map(|(bx, top)| ((bx * self.scale).round(), (top * self.scale).round()));
+        let place = |p: [f32; 2]| match origin {
+            Some((bx, top)) => [bx - p[1], top + p[0]],
+            None => p,
+        };
         let inv = 1.0 / self.atlas.size as f32;
         for ch in text.chars() {
             let font = &self.fonts[style.font.0];
@@ -487,7 +547,12 @@ impl Hud2d {
                 let p1 = [p0[0] + gw as f32, p0[1] + gh as f32];
                 let uv0 = [gx as f32 * inv, gy as f32 * inv];
                 let uv1 = [(gx + gw) as f32 * inv, (gy + gh) as f32 * inv];
-                self.quad(p0, p1, uv0, uv1, color);
+                self.quad_corners(
+                    [place(p0), place([p1[0], p0[1]]), place([p0[0], p1[1]]), place(p1)],
+                    uv0,
+                    uv1,
+                    color,
+                );
             }
             pen += (advance + style.letter_spacing * self.scale).round();
         }
@@ -604,5 +669,29 @@ mod with_a_font {
         let used = hud.atlas.pixels.iter().filter(|&&p| p > 0).count();
         hud.text(0.0, 50.0, "58:0", &style);
         assert_eq!(hud.atlas.pixels.iter().filter(|&&p| p > 0).count(), used);
+    }
+
+    #[test]
+    fn turns_vertical_text_a_quarter_clockwise() {
+        let Ok(path) = std::env::var("SHAGGER_TEST_FONT") else {
+            return;
+        };
+        let mut hud = Hud2d::new();
+        let font = hud.add_font(Font::from_bytes(std::fs::read(path).unwrap()).unwrap());
+        hud.begin(800.0, 600.0, 1.0);
+        let style = TextStyle::new(font, 20.0, [1.0; 4]);
+        let length = hud.text_vertical(100.0, 50.0, "TIME", &style);
+        assert_eq!(hud.indices.len(), 6 * 4);
+        let (ascent, descent) = hud.line_metrics(&style);
+        for v in &hud.vertices {
+            let [x, y] = v.position;
+            assert!(x >= 99.0 && x <= 100.0 + ascent + descent + 1.0, "{x}");
+            assert!(y >= 49.0 && y <= 50.0 + length + 1.0, "{y}");
+        }
+        // Top left of the T's glyph is its top right on screen: the
+        // glyph's top faces right.
+        let [tl, tr, bl, _] = [0, 1, 2, 3].map(|i| hud.vertices[i].position);
+        assert!(tl[0] > bl[0] && (tl[1] - bl[1]).abs() < 0.01, "{tl:?} {bl:?}");
+        assert!(tr[1] > tl[1], "{tl:?} {tr:?}");
     }
 }
