@@ -26,6 +26,10 @@ pub enum MessageType {
     Pong = 0x0a,
     Snapshot = 0x0b,
     ResumeToken = 0x0c,
+    /// The match is paused (a timeout), counting back in, or running again.
+    Pause = 0x0d,
+    /// A chat line while paused, when no snapshot carries it.
+    PausedChat = 0x0e,
     Join = 0x81,
     Ready = 0x82,
     Input = 0x83,
@@ -38,6 +42,8 @@ pub enum MessageType {
     SetLoadout = 0x8a,
     Resume = 0x8b,
     ClientPrefs = 0x8c,
+    /// A player calls a timeout, or time in.
+    CallPause = 0x8d,
 }
 
 impl MessageType {
@@ -58,6 +64,8 @@ impl MessageType {
             0x0a => M::Pong,
             0x0b => M::Snapshot,
             0x0c => M::ResumeToken,
+            0x0d => M::Pause,
+            0x0e => M::PausedChat,
             0x81 => M::Join,
             0x82 => M::Ready,
             0x83 => M::Input,
@@ -70,6 +78,7 @@ impl MessageType {
             0x8a => M::SetLoadout,
             0x8b => M::Resume,
             0x8c => M::ClientPrefs,
+            0x8d => M::CallPause,
             _ => return None,
         })
     }
@@ -314,6 +323,114 @@ pub fn decode_resume_token(data: &[u8]) -> Result<ResumeToken, DecodeError> {
     })
 }
 
+/// `MatchPauseState`: `Timeout` holds the match still until someone calls
+/// time in or the timeout runs out, `Timein` counts back in, `Running` plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchPauseState {
+    #[default]
+    Running,
+    Timeout,
+    Timein,
+}
+
+const PAUSE_STATES: [MatchPauseState; 3] = [
+    MatchPauseState::Running,
+    MatchPauseState::Timeout,
+    MatchPauseState::Timein,
+];
+
+/// `MatchPauseNotice`: the Pause message.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MatchPauseNotice {
+    pub state: MatchPauseState,
+    /// Until the timeout runs out, or the count ends; 0 while running.
+    pub ms_left: u32,
+    /// Who called the timeout, or who dropped for one called on their behalf.
+    pub caller: String,
+    /// Called by the server for a player whose connection dropped.
+    pub for_drop: bool,
+}
+
+/// `encodePause` (Server to Client): sent to everyone when the pause state
+/// changes and to each client that joins or resumes while paused. No
+/// snapshot goes out while the match is paused, so this is how a client
+/// learns it.
+#[must_use]
+pub fn encode_pause(notice: &MatchPauseNotice) -> Vec<u8> {
+    let mut e = message(MessageType::Pause);
+    let state = PAUSE_STATES.iter().position(|s| *s == notice.state).unwrap_or(0);
+    e.write_uint8(u8::try_from(state).unwrap_or(0));
+    e.write_uint32(notice.ms_left);
+    e.write_string(&notice.caller);
+    e.write_uint8(u8::from(notice.for_drop));
+    e.into_data()
+}
+
+/// `decodePause`.
+///
+/// # Errors
+/// Another message, truncated, or `Unknown pause state`.
+pub fn decode_pause(data: &[u8]) -> Result<MatchPauseNotice, DecodeError> {
+    let mut d = begin(data, MessageType::Pause)?;
+    let state = *PAUSE_STATES
+        .get(usize::from(d.read_uint8()?))
+        .ok_or(DecodeError::Invalid("Unknown pause state"))?;
+    Ok(MatchPauseNotice {
+        state,
+        ms_left: d.read_uint32()?,
+        caller: d.read_string()?,
+        for_drop: d.read_uint8()? == 1,
+    })
+}
+
+/// A chat line delivered while the match is paused (`PausedChat`). A running
+/// match carries chat in its snapshots; a paused one sends none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PausedChat {
+    pub sender_id: String,
+    pub sender_name: String,
+    pub team: String,
+    pub text: String,
+}
+
+#[must_use]
+pub fn encode_paused_chat(chat: &PausedChat) -> Vec<u8> {
+    let mut e = message(MessageType::PausedChat);
+    e.write_string(&chat.sender_id);
+    e.write_string(&chat.sender_name);
+    e.write_string(&chat.team);
+    e.write_string(&chat.text);
+    e.into_data()
+}
+
+/// # Errors
+/// Another message, or truncated.
+pub fn decode_paused_chat(data: &[u8]) -> Result<PausedChat, DecodeError> {
+    let mut d = begin(data, MessageType::PausedChat)?;
+    Ok(PausedChat {
+        sender_id: d.read_string()?,
+        sender_name: d.read_string()?,
+        team: d.read_string()?,
+        text: d.read_string()?,
+    })
+}
+
+/// `encodeCallPause` (Client to Server): a timeout (`true`) or time in.
+#[must_use]
+pub fn encode_call_pause(timeout: bool) -> Vec<u8> {
+    let mut e = message(MessageType::CallPause);
+    e.write_uint8(u8::from(timeout));
+    e.into_data()
+}
+
+/// `decodeCallPause`: whether it calls a timeout.
+///
+/// # Errors
+/// Another message, or truncated.
+pub fn decode_call_pause(data: &[u8]) -> Result<bool, DecodeError> {
+    Ok(begin(data, MessageType::CallPause)?.read_uint8()? == 1)
+}
+
 #[must_use]
 pub fn encode_resume(token: &str) -> Vec<u8> {
     let mut e = message(MessageType::Resume);
@@ -520,6 +637,46 @@ mod tests {
                 assert_eq!(t as u8, byte);
             }
         }
+    }
+
+    #[test]
+    fn match_pause_messages_round_trip() {
+        // MatchPauseWire.test.ts.
+        for notice in [
+            MatchPauseNotice {
+                state: MatchPauseState::Timeout,
+                ms_left: 119_500,
+                caller: "Alice".into(),
+                for_drop: false,
+            },
+            MatchPauseNotice {
+                state: MatchPauseState::Timein,
+                ms_left: 3000,
+                caller: "Bob".into(),
+                for_drop: true,
+            },
+            MatchPauseNotice::default(),
+        ] {
+            let data = encode_pause(&notice);
+            assert_eq!(data[0], MessageType::Pause as u8);
+            assert_eq!(decode_pause(&data), Ok(notice));
+        }
+        let chat = PausedChat {
+            sender_id: "player_2".into(),
+            sender_name: "Bob".into(),
+            team: "soba".into(),
+            text: "brb".into(),
+        };
+        assert_eq!(decode_paused_chat(&encode_paused_chat(&chat)), Ok(chat));
+        assert_eq!(decode_call_pause(&encode_call_pause(true)), Ok(true));
+        assert_eq!(decode_call_pause(&encode_call_pause(false)), Ok(false));
+
+        let mut data = encode_pause(&MatchPauseNotice {
+            state: MatchPauseState::Timeout,
+            ..MatchPauseNotice::default()
+        });
+        data[1] = 7;
+        assert_eq!(decode_pause(&data), Err(DecodeError::Invalid("Unknown pause state")));
     }
 
     #[test]

@@ -117,11 +117,12 @@ function writeWireSnapshot(e) {
     if (flags & 0x08) e.writeUint32(int(0x1_0000_0000));
     if (flags & 0x10) e.writeUint16(int(0x10000));
     if (flags & 0x20) e.writeString(pick(["", "red", "blue"]));
+    if (flags & 0x40) e.writeUint8(int(256));
   }
   // Codes no game defines: SHAG's switch reads nothing for them.
   const events = int(3);
   e.writeUint16(events);
-  for (let i = 0; i < events; i++) e.writeUint8(chance(0.3) ? 0 : 26 + int(230));
+  for (let i = 0; i < events; i++) e.writeUint8(chance(0.3) ? 0 : 27 + int(229));
   if (chance(0.7)) {
     const count = pick([0, 1, 7, 8, 9, 16, 33, int(80)]);
     e.writeUint16(count);
@@ -153,6 +154,7 @@ function canonicalState(state) {
   });
   const players = [...state.players].map(([id, p]) => [id, {
     entityId: p.entityId, name: p.name, team: p.team, score: p.score, deaths: p.deaths, ping: p.ping,
+    look: p.look ?? null,
   }]);
   return {
     tick: state.tick,
@@ -223,6 +225,8 @@ function serverState(tick, previous) {
     const old = previous?.players.get(id);
     state.players.set(id, old && chance(0.5) ? { ...old } : {
       entityId: id, name: pick(strings), team: pick(["red", "blue", ""]), score: int(200) - 50, deaths: int(100), ping: int(400),
+      // A free-for-all look, absent in team modes and older recordings
+      ...(chance(0.5) ? { look: int(256) } : {}),
     });
   }
   state.pickupActiveMask = Array.from({ length: int(20) }, () => chance(0.5));
@@ -352,6 +356,18 @@ function messageVectors() {
       return { clientSendTime: num(d.clientSendTime), serverTime: num(d.serverTime) };
     });
   }
+  for (const notice of [
+    { state: "timeout", msLeft: 119_500, caller: "Alice", forDrop: false },
+    { state: "timein", msLeft: 3000, caller: "日本", forDrop: true },
+    { state: "running", msLeft: 0, caller: "", forDrop: false },
+  ]) {
+    add("pause", [notice], MessageCodec.encodePause(notice), MessageCodec.decodePause);
+  }
+  const chat = { senderId: "player_2", senderName: "Bob", team: "soba", text: "brb é" };
+  add("pausedChat", [chat], MessageCodec.encodePausedChat(chat), MessageCodec.decodePausedChat);
+  for (const timeout of [true, false]) {
+    add("callPause", [timeout], MessageCodec.encodeCallPause(timeout), MessageCodec.decodeCallPause);
+  }
   add("ready", [], MessageCodec.encodeReady());
   add("spectate", [], MessageCodec.encodeSpectate());
   add("requestSpawn", [], MessageCodec.encodeRequestSpawn());
@@ -470,7 +486,7 @@ const { gzipSync } = await import("node:zlib");
 
 function demoFile() {
   const e = new BinaryEncoder();
-  const version = pick([1, 2, 3, 4, 5, 6, 6, 6, 6, 0, 7]);
+  const version = pick([1, 2, 3, 4, 5, 6, 6, 6, 7, 7, 0, 8]);
   for (const b of chance(0.03) ? [0x53, 0x48, 0x41, 0x48] : [0x53, 0x48, 0x41, 0x47]) e.writeUint8(b);
   e.writeUint8(version);
   e.writeString(pick(["washoi_dm2", "maps/WDM7.bsp", "日本", ""]));

@@ -56,6 +56,8 @@ pub enum SessionRequest {
         primary: String,
         secondary: String,
     },
+    /// Call a timeout (`true`) or time in (`CallPause`).
+    CallPause(bool),
     /// Close the connection and give up the seat.
     Disconnect,
 }
@@ -231,6 +233,7 @@ fn message_for<C: EventCodec>(host: &mut NetworkGameHost<C>, request: SessionReq
         SessionRequest::Chat { text, team_only } => host.send_chat(&text, team_only),
         SessionRequest::ClientPrefs(p) => host.set_client_prefs(p),
         SessionRequest::Loadout { primary, secondary } => host.send_loadout(&primary, &secondary),
+        SessionRequest::CallPause(timeout) => host.send_call_pause(timeout),
         SessionRequest::Disconnect => None,
     }
 }

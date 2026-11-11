@@ -276,6 +276,35 @@ fn messages_encode_and_decode_like_shag() {
                     server_time: f(&a[1]),
                 }))
             }
+            "pause" => {
+                let back = mc::decode_pause(&data).unwrap();
+                let state = match s(field("state")) {
+                    "running" => mc::MatchPauseState::Running,
+                    "timeout" => mc::MatchPauseState::Timeout,
+                    "timein" => mc::MatchPauseState::Timein,
+                    other => panic!("vector {i}: pause state {other}"),
+                };
+                assert_eq!(back.state, state);
+                assert_eq!(f64::from(back.ms_left), field("msLeft").as_f64().unwrap());
+                assert_eq!(back.caller, s(field("caller")));
+                assert_eq!(back.for_drop, field("forDrop").as_bool().unwrap());
+                Some(mc::encode_pause(&back))
+            }
+            "pausedChat" => {
+                let back = mc::decode_paused_chat(&data).unwrap();
+                assert_eq!(back.sender_id, s(field("senderId")));
+                assert_eq!(back.sender_name, s(field("senderName")));
+                assert_eq!(back.team, s(field("team")));
+                assert_eq!(back.text, s(field("text")));
+                Some(mc::encode_paused_chat(&back))
+            }
+            "callPause" => {
+                assert_eq!(
+                    mc::decode_call_pause(&data).unwrap(),
+                    field("timeout").as_bool().unwrap()
+                );
+                Some(mc::encode_call_pause(a[0].as_bool().unwrap()))
+            }
             "ready" => Some(mc::encode_ready()),
             "spectate" => Some(mc::encode_spectate()),
             "requestSpawn" => Some(mc::encode_request_spawn()),

@@ -137,6 +137,7 @@ pub fn canonical<E>(state: &GameState<E>) -> Value {
                     ("score", int(p.score)),
                     ("deaths", int(p.deaths)),
                     ("ping", int(p.ping)),
+                    ("look", p.look.map_or(Value::Null, int)),
                 ]),
             ])
         })

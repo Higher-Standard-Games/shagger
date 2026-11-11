@@ -36,6 +36,10 @@
 //!
 //! The blade reflects `BladeEnvironment`'s fill ([`blade_reflection`]).
 //!
+//! `cl_gun 0` hides the gun ([`WeaponView::is_drawn`]); `cl_gunsize`
+//! shrinks the whole view into the screen's corner on the gun's side
+//! ([`WeaponView::apply_gun_size`]), full size again while aimed.
+//!
 //! Not yet: MD3 view models.
 
 use glam::{DVec3, Mat4, Vec3};
@@ -54,6 +58,9 @@ use crate::core::cvar::Cvars;
 use crate::loader::bsp::light_grid_sampling::LightSample;
 use crate::loader::model::gltf_model::ModelMaterial;
 use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline, ReflectionFill};
+
+/// The gun's scale for each `cl_gunsize`: normal, small and smallest.
+pub const GUN_SIZES: [f64; 3] = [1.0, 0.9, 0.8];
 
 /// The weapon camera's near plane.
 pub const WEAPON_CAMERA_MIN_Z: f32 = 0.1;
@@ -90,6 +97,10 @@ pub struct ViewModelCvars {
     pub ads: DVec3,
     /// `cl_wep_scale`.
     pub scale: f64,
+    /// `cl_gun`: draw your own gun at all.
+    pub draw_gun: bool,
+    /// `cl_gunsize`: 0 normal, 1 small, 2 smallest ([`GUN_SIZES`]).
+    pub gun_size: f64,
 }
 
 impl Default for ViewModelCvars {
@@ -103,6 +114,8 @@ impl Default for ViewModelCvars {
             hip: DVec3::ZERO,
             ads: DVec3::ZERO,
             scale: 0.0,
+            draw_gun: true,
+            gun_size: 0.0,
         }
     }
 }
@@ -145,6 +158,8 @@ impl ViewModelCvars {
             hip: vec("cl_wep_hip"),
             ads: vec("cl_wep_ads"),
             scale: num("cl_wep_scale", 0.0),
+            draw_gun: num("cl_gun", 1.0) > 0.0,
+            gun_size: num("cl_gunsize", 0.0),
         }
     }
 }
@@ -414,6 +429,12 @@ pub struct WeaponView {
     pub reload_anim: WeaponReloadAnim,
     /// The holder's switch slide this frame.
     pub switch_offsets: SwitchAnimOffsets,
+    /// The whole view's scaling and position in the weapon camera's space
+    /// (`weaponRoot`), which `cl_gunsize` shrinks into the screen's corner.
+    pub view_scale: f64,
+    pub view_offset: DVec3,
+    /// The weapon camera's aspect ratio, which the caller keeps.
+    pub aspect_ratio: f64,
     /// `WeaponHolsterAnim`: stowed while climbing.
     pub holster: WeaponHolsterAnim,
     /// `WeaponLighting`: the light grid's colour at the camera, eased.
@@ -463,6 +484,9 @@ impl WeaponView {
             charge_outline: None,
             reload_anim: WeaponReloadAnim::default(),
             switch_offsets: SwitchAnimOffsets::default(),
+            view_scale: 1.0,
+            view_offset: DVec3::ZERO,
+            aspect_ratio: 16.0 / 9.0,
             holster: WeaponHolsterAnim::default(),
             lighting: WeaponLighting::default(),
             submersion_amount: 0.0,
@@ -505,10 +529,45 @@ impl WeaponView {
         self.holster.set_holstered(hidden);
     }
 
-    /// The mesh draws until the holster has fully stowed it.
+    /// `gunDrawn`: the mesh draws until the holster has fully stowed it,
+    /// and not at all with `cl_gun 0`.
     #[must_use]
     pub fn is_drawn(&self) -> bool {
-        !self.holster.is_fully_holstered()
+        !self.holster.is_fully_holstered() && self.cvars.draw_gun
+    }
+
+    /// `applyGunSize`: draw the whole first-person view smaller for
+    /// `cl_gunsize`, shrinking it into the bottom corner of the screen on
+    /// the gun's side, at the gun's depth, so the gun stays where it meets
+    /// the screen edge. Aiming down sights grows it back to full size, so
+    /// the sights stay on the centre of the screen.
+    pub fn apply_gun_size(&mut self) {
+        let setting = self.cvars.gun_size;
+        // `GUN_SIZES[setting] ?? 1`: only a whole index in range picks one.
+        let size = if setting.fract() == 0.0 && (0.0..3.0).contains(&setting) {
+            GUN_SIZES[setting as usize]
+        } else {
+            1.0
+        };
+        let scale = size + (1.0 - size) * self.ads_progress;
+        if scale == 1.0 {
+            self.view_scale = 1.0;
+            self.view_offset = DVec3::ZERO;
+            return;
+        }
+        let base = self.effective_base_position;
+        let half_height = (self.cvars.fov * std::f64::consts::PI / 180.0 / 2.0).tan() * base.z;
+        let half_width = half_height * self.aspect_ratio;
+        let pull = 1.0 - scale;
+        let side = if base.x > 0.0 {
+            1.0
+        } else if base.x < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        self.view_scale = scale;
+        self.view_offset = DVec3::new(side * half_width * pull, -half_height * pull, base.z * pull);
     }
 
     /// `updateLightingFromBsp`: the light grid's sample at the camera.
@@ -524,6 +583,9 @@ impl WeaponView {
         self.bob = old.bob.clone();
         self.recoil = old.recoil.clone();
         self.ads_progress = old.ads_progress;
+        self.view_scale = old.view_scale;
+        self.view_offset = old.view_offset;
+        self.aspect_ratio = old.aspect_ratio;
         self.slash = old.slash.clone();
         self.charge = old.charge;
         self.charge_outline = old.charge_outline;
@@ -635,6 +697,8 @@ impl WeaponView {
         let ads_y = (ads_target.y - base.y) * self.ads_progress;
         let ads_z = (ads_target.z - base.z) * self.ads_progress;
 
+        self.apply_gun_size();
+
         // The blade's charge: aiming a melee weapon holds its charge.
         let charging = input.aiming && self.def.is_some_and(|d| d.melee);
         let charge_time = self
@@ -685,10 +749,15 @@ impl WeaponView {
         }
     }
 
-    /// The weapon root's matrix in the camera's space.
+    /// The weapon root's matrix in the camera's space, under the view's
+    /// (`weaponRoot`).
     #[must_use]
     pub fn root_matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(
+            Vec3::splat(self.view_scale as f32),
+            glam::Quat::IDENTITY,
+            self.view_offset.as_vec3(),
+        ) * Mat4::from_scale_rotation_translation(
             Vec3::splat(self.scale as f32),
             babylon_euler(self.rotation.as_vec3()),
             self.position.as_vec3(),
@@ -1130,5 +1199,38 @@ mod tests {
         let m = glb_root_matrix("plasmagun");
         let tip = m.transform_vector3(Vec3::X);
         assert!(tip.z.abs() > 0.99, "{tip}");
+    }
+
+    #[test]
+    fn gun_size_shrinks_the_view_into_its_corner_and_aiming_grows_it_back() {
+        let mut gun = WeaponView::new("plasmagun", None);
+        gun.aspect_ratio = 2.0;
+        gun.effective_base_position = DVec3::new(12.0, -25.0, 20.0);
+        gun.apply_gun_size();
+        assert_eq!((gun.view_scale, gun.view_offset), (1.0, DVec3::ZERO));
+        gun.cvars.gun_size = 2.0;
+        gun.apply_gun_size();
+        assert!((gun.view_scale - 0.8).abs() < 1e-12);
+        let half_height = (DEFAULT_WEAPON_FOV.to_radians() / 2.0).tan() * 20.0;
+        let expected = DVec3::new(half_height * 2.0 * 0.2, -half_height * 0.2, 4.0);
+        assert!((gun.view_offset - expected).length() < 1e-9);
+        // Left-handed, the corner is the left one; half aimed, half the pull.
+        gun.effective_base_position.x = -12.0;
+        gun.ads_progress = 0.5;
+        gun.apply_gun_size();
+        assert!((gun.view_scale - 0.9).abs() < 1e-12);
+        assert!(gun.view_offset.x < 0.0);
+        gun.ads_progress = 1.0;
+        gun.apply_gun_size();
+        assert_eq!(gun.view_scale, 1.0);
+        // Out of range is normal size.
+        gun.ads_progress = 0.0;
+        gun.cvars.gun_size = 3.0;
+        gun.apply_gun_size();
+        assert_eq!(gun.view_scale, 1.0);
+        // `cl_gun 0` hides it.
+        assert!(gun.is_drawn());
+        gun.cvars.draw_gun = false;
+        assert!(!gun.is_drawn());
     }
 }

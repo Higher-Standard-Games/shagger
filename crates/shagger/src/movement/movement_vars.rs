@@ -484,6 +484,24 @@ pub const DEFAULT_VARS: &[MovementVar] = &[
         developer_only: false,
     },
     MovementVar {
+        name: "cl_gun",
+        default_value: 1.0,
+        min: 0.0,
+        max: 1.0,
+        description: "Draw your own first-person gun (0 = hidden)",
+        category: Category::Camera,
+        developer_only: false,
+    },
+    MovementVar {
+        name: "cl_gunsize",
+        default_value: 0.0,
+        min: 0.0,
+        max: 2.0,
+        description: "Your first-person gun's size: 0 normal, 1 small (10% smaller), 2 smallest (20% smaller)",
+        category: Category::Camera,
+        developer_only: false,
+    },
+    MovementVar {
         name: "cl_gunbob",
         default_value: 1.0,
         min: 0.0,
@@ -764,7 +782,7 @@ mod tests {
         let mut cvars = Cvars::new(None, false);
         assert_eq!(movement_var(&cvars, "cl_fov"), 90.0);
         register_movement_vars(&mut cvars);
-        assert_eq!(DEFAULT_VARS.len(), 78);
+        assert_eq!(DEFAULT_VARS.len(), 80);
         assert!(cvars.set("cl_fov", 200));
         assert_eq!(movement_var(&cvars, "cl_fov"), 110.0);
         assert_eq!(movement_var(&cvars, "m_sensitivity"), 1.0);

@@ -113,6 +113,8 @@ pub struct SnapshotBuffer {
     last_receive_time: f64,
     jitter_samples: Vec<f64>,
     frame: Option<Frame>,
+    /// While the match is paused: the newest snapshot is where everything stands.
+    held: bool,
     last_tick: Option<u32>,
 }
 
@@ -134,8 +136,29 @@ impl SnapshotBuffer {
             last_receive_time: 0.0,
             jitter_samples: Vec::new(),
             frame: None,
+            held: false,
             last_tick: None,
         }
+    }
+
+    /// `hold`: holds the render time at the newest snapshot while the match
+    /// is paused, so nothing is extrapolated past where the server stopped
+    /// it. On release the pause's gap is not taken for network jitter.
+    pub fn hold(&mut self, held: bool) {
+        if held == self.held {
+            return;
+        }
+        self.held = held;
+        if !held {
+            self.last_receive_time = 0.0;
+        }
+        self.frame = None;
+    }
+
+    /// Whether [`Self::hold`] holds the render time.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        self.held
     }
 
     /// Pushes a snapshot that arrived at `now`. A tick not newer than the
@@ -235,7 +258,11 @@ impl SnapshotBuffer {
         } else {
             self.interp_delay
         });
-        now - delay + self.cl_timenudge
+        let time = now - delay + self.cl_timenudge;
+        match self.buffer.last() {
+            Some(newest) if self.held => time.min(self.snap_time(newest)),
+            _ => time,
+        }
     }
 
     fn bracket(&self, render_time: f64) -> (Option<usize>, Option<usize>) {
@@ -414,6 +441,29 @@ mod tests {
 
     fn one(id: &str, e: EntitySnapshot) -> HashMap<String, EntitySnapshot> {
         HashMap::from([(id.to_string(), e)])
+    }
+
+    #[test]
+    fn held_for_a_pause_stops_at_the_newest_snapshot() {
+        // SnapshotBuffer.test.ts "SnapshotBuffer held for a pause".
+        let mut b = SnapshotBuffer::new();
+        let moving = |x: f64| EntitySnapshot {
+            vx: 600.0,
+            ..entity(x, 0.0, 0.0)
+        };
+        let mut now = 0.0;
+        for i in 0..6_u32 {
+            now = 1000.0 + f64::from(i) * 16.0;
+            b.push(now, i + 1, one("a", moving(f64::from(i) * 10.0)), None);
+        }
+        let delay = b.interp_delay();
+        b.hold(true);
+        now += 5000.0;
+        assert_eq!(b.sample(now, "a", None).unwrap().x, 50.0);
+        b.hold(false);
+        now += 16.0;
+        b.push(now, 7, one("a", moving(60.0)), None);
+        assert_eq!(b.interp_delay(), delay);
     }
 
     #[test]

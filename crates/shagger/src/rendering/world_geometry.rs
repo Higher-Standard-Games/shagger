@@ -16,6 +16,9 @@
 //! which builds each with `buildBrushModel` and places it at the entity's
 //! origin) get batches of their own, tagged with their model index, so the
 //! renderer can drop the ones the bomb destroyed (`BrushModelState`).
+//! The `func_static` brush models (`handleStatic`: scenery kept out of the
+//! world model, such as a structure standing in the sky) are built where
+//! they stand, with the world's batches, as nothing ever removes them.
 //!
 //! Not yet followed from `buildAll`: liquids, cubemap objects, fog and
 //! spatial cells. Billboards are skipped, as SHAG skips them.
@@ -240,6 +243,37 @@ struct SpriteGroup {
     faces: Vec<SpriteFace>,
 }
 
+/// `parseModelIndex`: a `*N` model's index (`parseInt`'s leading digits).
+#[must_use]
+pub fn parse_model_index(model: &str) -> Option<usize> {
+    let digits: String = model
+        .strip_prefix('*')?
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The `func_static` entities' brush models (`handleStatic`): each `*N`
+/// model past the world's, in entity order, once.
+#[must_use]
+pub fn static_brush_models(bsp: &BspFile) -> Vec<usize> {
+    let mut out = Vec::new();
+    for entity in &bsp.entities {
+        if entity.classname != "func_static" {
+            continue;
+        }
+        let Some(index) = entity.properties.get("model").and_then(parse_model_index) else {
+            continue;
+        };
+        if index >= 1 && index < bsp.common.models.len() && !out.contains(&index) {
+            out.push(index);
+        }
+    }
+    out
+}
+
 /// Builds the world model's (model 0's) surfaces, then the `func_explosive`
 /// brush models' (`extractBrushModels`), offset to their entities' origins. `material_passes` resolves
 /// a texture name to its passes (a `Q3ShaderRegistry::resolve_material_passes`);
@@ -273,10 +307,11 @@ pub fn build_world_geometry(
     let mut sprite_groups: Vec<Group> = Vec::new();
     let mut sprite_keys: std::collections::HashMap<(i32, Option<usize>), usize> = std::collections::HashMap::new();
     // Every face to build: the world's, then each explosive's with its
-    // model index and its Babylon-space origin.
-    let mut faces: Vec<(usize, Option<usize>, [f64; 3])> =
+    // model index and its Babylon-space origin, then each static's; the
+    // last says whether it is a brush model's.
+    let mut faces: Vec<(usize, Option<usize>, [f64; 3], bool)> =
         record_range(world.first_face, world.num_faces, bsp.common.faces.len())
-            .map(|i| (i, None, [0.0; 3]))
+            .map(|i| (i, None, [0.0; 3], false))
             .collect();
     for definition in extract_brush_models(&bsp.entities, &bsp.models) {
         let Some(model) = bsp.common.models.get(definition.model_index) else {
@@ -285,10 +320,16 @@ pub fn build_world_geometry(
         let origin = [definition.origin.x, definition.origin.y, definition.origin.z];
         faces.extend(
             record_range(model.first_face, model.num_faces, bsp.common.faces.len())
-                .map(|i| (i, Some(definition.model_index), origin)),
+                .map(|i| (i, Some(definition.model_index), origin, true)),
         );
     }
-    for (i, brush_model, origin) in faces {
+    for index in static_brush_models(bsp) {
+        let model = &bsp.common.models[index];
+        faces.extend(
+            record_range(model.first_face, model.num_faces, bsp.common.faces.len()).map(|i| (i, None, [0.0; 3], true)),
+        );
+    }
+    for (i, brush_model, origin, in_brush_model) in faces {
         let Some(face) = bsp.common.faces.get(i) else { continue };
         if !should_render_texture(bsp, face.texture_index) {
             continue;
@@ -305,7 +346,7 @@ pub fn build_world_geometry(
         let two_sided_shader = !passes[0].back_face_culling;
         if passes[0].is_sky || texture.surface_flags & SURF_SKY != 0 {
             // A brush model's sky would hang in the world's sky box.
-            if brush_model.is_some() {
+            if in_brush_model {
                 continue;
             }
             if !out.sky_shaders.iter().any(|s| s.texture_name == texture.name) {
@@ -493,4 +534,15 @@ pub fn build_world_geometry(
         out.indices.extend(group.indices.iter().map(|i| i + base));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_brush_model_is_named_by_its_leading_digits() {
+        assert_eq!(super::parse_model_index("*5"), Some(5));
+        assert_eq!(super::parse_model_index("*12abc"), Some(12));
+        assert_eq!(super::parse_model_index("models/a.md3"), None);
+        assert_eq!(super::parse_model_index("*"), None);
+    }
 }

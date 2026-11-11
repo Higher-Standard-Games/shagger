@@ -37,11 +37,24 @@ impl std::fmt::Display for ShaderParseError {
 
 impl std::error::Error for ShaderParseError {}
 
-/// The parser and the templates it has collected so far.
+/// A shader body usable as a template (`ShaderTemplate`): its tokens
+/// between the outer braces and the source line of each, since a `template`
+/// line's arguments end with it.
+#[derive(Debug, Clone, Default)]
+struct ShaderTemplate {
+    body_tokens: Vec<String>,
+    body_lines: Vec<usize>,
+}
+
+/// Templates that use templates expand this many levels deep.
+const MAX_TEMPLATE_DEPTH: usize = 4;
+
+/// The parser and every shader body it has parsed so far, by lower-cased
+/// name: as in Warsow, `template <name> <args...>` may name any shader, not
+/// only one whose name ends in `_template`.
 #[derive(Debug, Clone, Default)]
 pub struct Q3ShaderParser {
-    /// Lower-cased template name → body tokens.
-    templates: HashMap<String, Vec<String>>,
+    templates: HashMap<String, ShaderTemplate>,
 }
 
 type Tokens = [String];
@@ -75,51 +88,20 @@ impl Q3ShaderParser {
         Self::default()
     }
 
-    /// `parseShaderFile`: every shader in one script, in order.
+    /// `parseShaderFile`: every shader in one script, in order, each
+    /// shader-level `template` line expanded. Warsow's `_template` shaders
+    /// exist only to be expanded and are not emitted.
     ///
     /// # Errors
-    /// Where the TypeScript throws (see [`ShaderParseError`]).
+    /// None now: SHAG beta9 no longer throws on a bare `template`. Kept for
+    /// callers that handle the old failure.
     pub fn parse_shader_file(&mut self, content: &str) -> Result<Vec<Q3Shader>, ShaderParseError> {
-        let tokens = tokenize(content);
-        let mut shaders = Vec::new();
+        let mut lines = Vec::new();
+        let tokens = tokenize_with_lines(content, &mut lines);
+        let mut bodies: Vec<(String, usize, usize)> = Vec::new();
 
-        // First pass: collect templates.
+        // First pass: find each shader body and keep it as a possible template.
         let mut pos = 0;
-        while pos < tokens.len() {
-            if tokens[pos] == "{" || tokens[pos] == "}" {
-                pos += 1;
-                continue;
-            }
-            let name = &tokens[pos];
-            pos += 1;
-            if name.is_empty() || pos >= tokens.len() {
-                break;
-            }
-            if tokens[pos] != "{" {
-                continue;
-            }
-            pos += 1;
-            let body_start = pos;
-            let mut depth = 1;
-            while pos < tokens.len() && depth > 0 {
-                if tokens[pos] == "{" {
-                    depth += 1;
-                } else if tokens[pos] == "}" {
-                    depth -= 1;
-                }
-                pos += 1;
-            }
-            // `pos - 1` excludes the closing brace; an unclosed body runs to the end
-            // less its last token, as `slice(bodyStart, pos - 1)` does.
-            let body_end = (pos - 1).max(body_start);
-            if name.to_lowercase().ends_with("_template") {
-                self.templates
-                    .insert(name.to_lowercase(), tokens[body_start..body_end].to_vec());
-            }
-        }
-
-        // Second pass: shaders, with templates expanded.
-        pos = 0;
         while pos < tokens.len() {
             if tokens[pos] == "{" || tokens[pos] == "}" {
                 pos += 1;
@@ -134,42 +116,97 @@ impl Q3ShaderParser {
                 continue;
             }
             pos += 1;
-            if name.to_lowercase().ends_with("_template") {
-                let mut depth = 1;
-                while pos < tokens.len() && depth > 0 {
-                    if tokens[pos] == "{" {
-                        depth += 1;
-                    } else if tokens[pos] == "}" {
-                        depth -= 1;
-                    }
-                    pos += 1;
+            let start = pos;
+            let mut depth = 1;
+            while pos < tokens.len() && depth > 0 {
+                if tokens[pos] == "{" {
+                    depth += 1;
+                } else if tokens[pos] == "}" {
+                    depth -= 1;
                 }
+                pos += 1;
+            }
+            // `pos - 1` excludes the closing brace; an unclosed body runs to the end
+            // less its last token, as `slice(start, pos - 1)` does.
+            let end = (pos - 1).max(start);
+            self.templates.insert(
+                name.to_lowercase(),
+                ShaderTemplate {
+                    body_tokens: tokens[start..end].to_vec(),
+                    body_lines: lines[start..end].to_vec(),
+                },
+            );
+            bodies.push((name, start, end));
+        }
+
+        // Second pass: parse shaders with their template lines expanded.
+        let mut shaders = Vec::new();
+        for (name, start, end) in bodies {
+            if name.to_lowercase().ends_with("_template") {
                 continue;
             }
-            if lower(&tokens, pos).as_deref() == Some("template") {
-                pos += 1;
-                let template_name = tok(&tokens, pos)
-                    .ok_or_else(|| ShaderParseError(format!("{name}: `template` without a name")))?
-                    .to_lowercase();
-                pos += 1;
-                let mut params = Vec::new();
-                while pos < tokens.len() && tokens[pos] != "}" {
-                    params.push(tokens[pos].clone());
-                    pos += 1;
-                }
-                pos += 1;
-                if let Some(body) = self.templates.get(&template_name) {
-                    let expanded = expand_template(body, &params);
-                    let (shader, _) = parse_shader_body(&name, &expanded, 0);
-                    shaders.push(shader);
-                }
-            } else {
-                let (shader, next) = parse_shader_body(&name, &tokens, pos);
-                shaders.push(shader);
-                pos = next;
-            }
+            let (mut expanded, _) = self.expand_template_lines(&tokens[start..end], &lines[start..end], 0);
+            expanded.push("}".to_owned());
+            shaders.push(parse_shader_body(&name, &expanded, 0).0);
         }
         Ok(shaders)
+    }
+
+    /// `expandTemplateLines`: each shader-level `template <name> <args...>`
+    /// line replaced with that template's body, its `$1`, `$2`... set to the
+    /// arguments. The line may stand anywhere among the shader's own
+    /// directives; an unknown template (or one too deep) drops the line.
+    fn expand_template_lines(
+        &self,
+        body_tokens: &[String],
+        body_lines: &[usize],
+        depth: usize,
+    ) -> (Vec<String>, Vec<usize>) {
+        let mut tokens = Vec::new();
+        let mut lines = Vec::new();
+        let mut brace_depth = 0i64;
+        let mut i = 0;
+        while i < body_tokens.len() {
+            let token = &body_tokens[i];
+            if token == "{" {
+                brace_depth += 1;
+            } else if token == "}" {
+                brace_depth -= 1;
+            }
+            if brace_depth > 0 || token.to_lowercase() != "template" || i + 1 >= body_tokens.len() {
+                tokens.push(token.clone());
+                lines.push(body_lines[i]);
+                i += 1;
+                continue;
+            }
+            let line = body_lines[i];
+            i += 1;
+            let template_name = body_tokens[i].to_lowercase();
+            let mut params = Vec::new();
+            // `!"{}".includes(token)`: an empty token ends the arguments too.
+            while i + 1 < body_tokens.len()
+                && body_lines[i + 1] == line
+                && !matches!(body_tokens[i + 1].as_str(), "" | "{" | "}" | "{}")
+            {
+                i += 1;
+                params.push(body_tokens[i].clone());
+            }
+            i += 1;
+            let Some(template) = self.templates.get(&template_name) else {
+                continue;
+            };
+            if depth >= MAX_TEMPLATE_DEPTH {
+                continue;
+            }
+            let (inner_tokens, inner_lines) = self.expand_template_lines(
+                &expand_template(&template.body_tokens, &params),
+                &template.body_lines,
+                depth + 1,
+            );
+            tokens.extend(inner_tokens);
+            lines.extend(inner_lines);
+        }
+        (tokens, lines)
     }
 }
 
@@ -236,13 +273,24 @@ pub fn js_replace_all(haystack: &str, needle: &str, replacement: &str) -> String
 /// on white space and braces.
 #[must_use]
 pub fn tokenize(content: &str) -> Vec<String> {
+    tokenize_with_lines(content, &mut Vec::new())
+}
+
+/// `tokenize(content, lines)`: the tokens, and each token's line (counted
+/// from 0) pushed to `lines`. A line break inside quotes is not counted, as
+/// the TypeScript does not count it.
+pub fn tokenize_with_lines(content: &str, lines: &mut Vec<usize>) -> Vec<String> {
     let c: Vec<char> = content.chars().collect();
     let len = c.len();
     let mut tokens = Vec::new();
+    let mut line = 0;
     let mut i = 0;
     while i < len {
         let ch = c[i];
         if is_js_whitespace(ch) {
+            if ch == '\n' {
+                line += 1;
+            }
             i += 1;
             continue;
         }
@@ -255,6 +303,9 @@ pub fn tokenize(content: &str) -> Vec<String> {
         if ch == '/' && c.get(i + 1) == Some(&'*') {
             i += 2;
             while i + 1 < len && !(c[i] == '*' && c[i + 1] == '/') {
+                if c[i] == '\n' {
+                    line += 1;
+                }
                 i += 1;
             }
             i += 2;
@@ -262,6 +313,7 @@ pub fn tokenize(content: &str) -> Vec<String> {
         }
         if ch == '{' || ch == '}' {
             tokens.push(ch.to_string());
+            lines.push(line);
             i += 1;
             continue;
         }
@@ -274,6 +326,7 @@ pub fn tokenize(content: &str) -> Vec<String> {
             }
             i += 1;
             tokens.push(s);
+            lines.push(line);
             continue;
         }
         let mut token = String::new();
@@ -283,6 +336,7 @@ pub fn tokenize(content: &str) -> Vec<String> {
         }
         if !token.is_empty() {
             tokens.push(token);
+            lines.push(line);
         }
     }
     tokens
