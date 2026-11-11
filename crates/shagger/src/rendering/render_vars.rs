@@ -31,7 +31,7 @@ pub struct RenderVarDef {
 }
 
 /// `DEFAULT_VARS`.
-pub const DEFAULT_VARS: [RenderVarDef; 56] = [
+pub const DEFAULT_VARS: [RenderVarDef; 60] = [
     RenderVarDef {
         name: "r_deluxe",
         default_value: 1.0,
@@ -391,6 +391,38 @@ pub const DEFAULT_VARS: [RenderVarDef; 56] = [
         max: 1.0,
         description: "Underwater view-warp strength. At 0 the motion stops entirely and tint, fog and audio still say you are underwater — nothing is communicated by movement alone.",
         category: RenderVarCategory::Lighting,
+    },
+    RenderVarDef {
+        name: "r_dynamiclight",
+        default_value: 1.0,
+        min: 0.0,
+        max: 1.0,
+        description: "Dynamic lights (0/1): projectile, explosion, impact, charge and muzzle-flash lights.",
+        category: RenderVarCategory::Lighting,
+    },
+    RenderVarDef {
+        name: "r_marks",
+        default_value: 1.0,
+        min: 0.0,
+        max: 1.0,
+        description: "Wall marks (0/1): bullet holes and scorches where shots hit.",
+        category: RenderVarCategory::Display,
+    },
+    RenderVarDef {
+        name: "r_gibs",
+        default_value: 1.0,
+        min: 0.0,
+        max: 1.0,
+        description: "Gibs (0/1): the shards a player breaks into on death.",
+        category: RenderVarCategory::Display,
+    },
+    RenderVarDef {
+        name: "r_teleport_ghost",
+        default_value: 1.0,
+        min: 0.0,
+        max: 1.0,
+        description: "Teleport afterimage (0/1): the silhouette left where a player teleported from.",
+        category: RenderVarCategory::Display,
     },
     RenderVarDef {
         name: "r_showtris",

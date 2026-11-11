@@ -19,6 +19,7 @@ pub mod hdr_target;
 pub mod hud_2d_renderer;
 pub mod model_renderer;
 pub mod offscreen;
+pub mod render_toggles;
 pub mod render_vars;
 pub mod sky_renderer;
 pub mod water;
