@@ -161,11 +161,19 @@ pub fn open_external(url: &str) -> bool {
 /// GTK for the webview on Linux; nothing elsewhere. Call once, on the main
 /// thread, before the first [`WebviewHost::new`].
 ///
+/// GTK is held to X11, the same backend as the game's winit window: wry
+/// attaches a child webview only to an X11 window, and on a Wayland desktop
+/// GTK would otherwise pick Wayland and wry would panic on its missing X11
+/// display.
+///
 /// # Errors
 /// GTK did not start (no display).
 pub fn init_platform() -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    gtk::init().map_err(|e| format!("gtk: {e}"))?;
+    {
+        gtk::gdk::set_allowed_backends("x11");
+        gtk::init().map_err(|e| format!("gtk: {e}"))?;
+    }
     Ok(())
 }
 
@@ -242,7 +250,15 @@ impl WebviewHost {
         config: &WebviewConfig,
     ) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
-        keep_gtk_errors_from_winit(window);
+        {
+            // wry unwraps GDK's X11 display; say so instead of panicking.
+            use gtk::glib::prelude::ObjectExt;
+            let backend = gtk::gdk::Display::default().map(|d| d.type_().name());
+            if backend != Some("GdkX11Display") {
+                return Err(format!("GTK is not on X11 ({})", backend.unwrap_or("no display")));
+            }
+            keep_gtk_errors_from_winit(window);
+        }
         let inbox: Rc<RefCell<VecDeque<HostEvent>>> = Rc::default();
         let mut context = wry::WebContext::new(config.data_dir.clone());
         let origins = config.allowed_origins.clone();
