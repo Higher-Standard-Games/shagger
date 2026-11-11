@@ -6,6 +6,7 @@ pub mod audio_cvars;
 pub mod audio_v2_sfx;
 pub mod decode;
 pub mod device;
+pub mod loop_overlap;
 pub mod mixer;
 pub mod music;
 pub mod spatial;
