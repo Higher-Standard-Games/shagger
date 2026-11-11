@@ -3,4 +3,5 @@
 
 //! Babylon's `PostProcesses` folder, the parts SHAGGER needs.
 
+pub mod fxaa_post_process;
 pub mod image_processing_post_process;
