@@ -41,8 +41,10 @@ pub struct TriggerVolume {
     pub dest_yaw: Option<f64>,
 }
 
-const DEST_CLASSNAMES: [&str; 5] = [
+const DEST_CLASSNAMES: [&str; 6] = [
     "target_position",
+    // A point origin used as a ballistic target (SHAG beta9).
+    "target_push",
     "misc_teleporter_dest",
     "info_teleport_destination",
     "target_location",
