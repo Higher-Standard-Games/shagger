@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
-use super::types::LobbyIn;
+use super::types::{LobbyIn, RatingPool};
 
 /// How long to wait for the connection before giving up.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -247,31 +247,25 @@ impl LobbyClient {
     }
 
     /// `leaderboard:get` (TrueSkill); the answer is `leaderboard:page` or
-    /// `leaderboard:error` with this id.
+    /// `leaderboard:error` with this id. No scope reads Overall.
     pub fn request_leaderboard(
         &mut self,
         gametype: &str,
         period: &str,
         offset: u32,
         limit: u32,
-        private: bool,
+        scope: Option<RatingPool>,
     ) -> String {
         let request_id = self.next_request_id("leaderboard");
-        let scope = if private { "private" } else { "public" };
-        self.send(&json!({
-            "type": "leaderboard:get", "requestId": request_id, "gametype": gametype, "period": period,
-            "offset": offset, "limit": limit, "scope": scope, "system": "trueskill"
-        }));
+        self.send(&leaderboard_get(&request_id, gametype, period, offset, limit, scope));
         request_id
     }
 
-    /// `stats:get`: this account's summary (`stats:summary`).
-    pub fn request_stats(&mut self, gametype: &str, period: &str, private: bool) -> String {
+    /// `stats:get`: this account's summary (`stats:summary`). No scope reads
+    /// Overall.
+    pub fn request_stats(&mut self, gametype: &str, period: &str, scope: Option<RatingPool>) -> String {
         let request_id = self.next_request_id("stats");
-        let scope = if private { "private" } else { "public" };
-        self.send(&json!({
-            "type": "stats:get", "requestId": request_id, "gametype": gametype, "scope": scope, "period": period
-        }));
+        self.send(&stats_get(&request_id, gametype, period, scope));
         request_id
     }
 
@@ -281,6 +275,36 @@ impl LobbyClient {
         self.send(&json!({ "type": "match:seat_reissue", "requestId": request_id, "matchId": match_id }));
         request_id
     }
+}
+
+/// `leaderboard:get`, with `scope` left out when it is `None`.
+fn leaderboard_get(
+    request_id: &str,
+    gametype: &str,
+    period: &str,
+    offset: u32,
+    limit: u32,
+    scope: Option<RatingPool>,
+) -> Value {
+    let mut message = json!({
+        "type": "leaderboard:get", "requestId": request_id, "gametype": gametype, "period": period,
+        "offset": offset, "limit": limit
+    });
+    if let Some(scope) = scope {
+        message["scope"] = json!(scope);
+    }
+    message["system"] = json!("trueskill");
+    message
+}
+
+/// `stats:get`, with `scope` left out when it is `None`.
+fn stats_get(request_id: &str, gametype: &str, period: &str, scope: Option<RatingPool>) -> Value {
+    let mut message = json!({ "type": "stats:get", "requestId": request_id, "gametype": gametype });
+    if let Some(scope) = scope {
+        message["scope"] = json!(scope);
+    }
+    message["period"] = json!(period);
+    message
 }
 
 impl Drop for LobbyClient {
@@ -357,4 +381,32 @@ async fn run(url: &str, mut requests: async_mpsc::UnboundedReceiver<Outgoing>, e
         }
     };
     let _ = events.send(LobbyEvent::Disconnected { reason, code });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_scope_leaves_it_out_for_overall() {
+        let board = leaderboard_get("lb", "duel", "all", 0, 20, None);
+        assert!(board.get("scope").is_none());
+        assert_eq!(board["system"], "trueskill");
+        assert!(stats_get("st", "duel", "all", None).get("scope").is_none());
+    }
+
+    #[test]
+    fn a_pool_is_sent_by_name() {
+        let board = leaderboard_get("lb", "ffa", "month", 20, 20, Some(RatingPool::Private));
+        assert_eq!(board["scope"], "private");
+        let stats = stats_get("st", "snd", "all", Some(RatingPool::Overall));
+        assert_eq!(stats["scope"], "overall");
+        assert_eq!(stats["period"], "all");
+    }
+
+    #[test]
+    fn an_answer_names_its_pool() {
+        let pool: RatingPool = serde_json::from_value(json!("overall")).unwrap();
+        assert_eq!(pool, RatingPool::Overall);
+    }
 }

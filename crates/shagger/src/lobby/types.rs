@@ -8,6 +8,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// `RatingPool`: a rating pool, one lobby visibility or Overall, which rates
+/// every match. A stats or leaderboard request that leaves it out reads
+/// Overall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RatingPool {
+    Public,
+    Private,
+    Overall,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamNames {
