@@ -9,10 +9,12 @@
 //! settings sync finds them.
 //!
 //! Not ported: SHAG's built-in camera and menu actions (no Rust game uses
-//! them), axes, touch, gamepads, and the fullscreen keyboard lock.
+//! them), axes, touch and the fullscreen keyboard lock. Pads reach the
+//! actions as virtual actions ([`InputSystem::set_virtual_action`]), as the
+//! browser's `ControllerInput` sets them.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -54,6 +56,11 @@ pub struct InputSystem {
     overrides: Vec<(String, Vec<InputBinding>)>,
     /// The folder `synced-storage.json` is in; `None` keeps nothing.
     storage: Option<PathBuf>,
+    /// Actions held by something other than a binding (a pad), by source.
+    virtual_held: HashSet<String>,
+    virtual_sources: HashMap<String, HashSet<String>>,
+    virtual_pressed: HashSet<String>,
+    virtual_released: HashSet<String>,
 }
 
 impl Default for InputSystem {
@@ -82,6 +89,10 @@ impl InputSystem {
             pending_releases: HashSet::new(),
             overrides: Vec::new(),
             storage,
+            virtual_held: HashSet::new(),
+            virtual_sources: HashMap::new(),
+            virtual_pressed: HashSet::new(),
+            virtual_released: HashSet::new(),
         }
     }
 
@@ -213,8 +224,37 @@ impl InputSystem {
         self.raw.keys.contains(code)
     }
 
+    /// `setVirtualAction`: `source` holds the action, or lets go of it. It
+    /// reads like a held key: pressed once, active while any source holds
+    /// it, released once.
+    pub fn set_virtual_action(&mut self, id: &str, held: bool, source: &str) {
+        let sources = self.virtual_sources.entry(id.to_owned()).or_default();
+        if held {
+            sources.insert(source.to_owned());
+        } else {
+            sources.remove(source);
+        }
+        let held = !sources.is_empty();
+        if !held {
+            self.virtual_sources.remove(id);
+        }
+        if held == self.virtual_held.contains(id) {
+            return;
+        }
+        if held {
+            self.virtual_held.insert(id.to_owned());
+            self.virtual_pressed.insert(id.to_owned());
+        } else {
+            self.virtual_held.remove(id);
+            self.virtual_released.insert(id.to_owned());
+        }
+    }
+
     /// `releaseHeldInput`: the window lost focus, or a text field took the keys.
     pub fn release_held_input(&mut self) {
+        self.virtual_held.clear();
+        self.virtual_sources.clear();
+        self.virtual_pressed.clear();
         let keys: Vec<String> = self.raw.keys.drain().collect();
         self.raw.keys_released.extend(keys);
         self.raw.keys_pressed.clear();
@@ -282,7 +322,10 @@ impl InputSystem {
                     }
                 }
             }
-            released |= self.pending_releases.contains(id);
+            active |= self.virtual_held.contains(id);
+            pressed |= self.virtual_pressed.contains(id);
+            released |= self.virtual_released.contains(id);
+            let released = !active && (released || self.pending_releases.contains(id));
             next.push((
                 id.clone(),
                 ActionState {
@@ -306,6 +349,8 @@ impl InputSystem {
         self.raw.buttons_pressed.clear();
         self.raw.buttons_released.clear();
         self.raw.wheel = 0.0;
+        self.virtual_pressed.clear();
+        self.virtual_released.clear();
         self.pending_releases.clear();
         for (_, state) in &mut self.states {
             state.pressed = false;
@@ -533,5 +578,75 @@ mod tests {
         other.reset_all_bindings();
         assert_eq!(load_synced_storage(&dir).remove(BINDINGS_KEY).unwrap(), "{}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One frame: (active, pressed, released) for `jump`.
+    fn frame(input: &mut InputSystem) -> (bool, bool, bool) {
+        input.update();
+        let state = (
+            input.is_active("jump"),
+            input.was_pressed("jump"),
+            input.was_released("jump"),
+        );
+        input.end_frame();
+        state
+    }
+
+    // `VirtualActions.test.ts`.
+    #[test]
+    fn a_virtual_release_waits_for_a_physical_binding_still_held() {
+        let mut input = system(None);
+        input.key_down("Space");
+        input.set_virtual_action("jump", true, "gamepad");
+        frame(&mut input);
+        input.set_virtual_action("jump", false, "gamepad");
+        assert_eq!(frame(&mut input), (true, false, false));
+        input.key_up("Space");
+        assert_eq!(frame(&mut input), (false, false, true));
+    }
+
+    #[test]
+    fn a_physical_release_waits_for_a_virtual_source_still_holding() {
+        let mut input = system(None);
+        input.key_down("Space");
+        input.set_virtual_action("jump", true, "gamepad");
+        frame(&mut input);
+        input.key_up("Space");
+        assert_eq!(frame(&mut input), (true, false, false));
+        input.set_virtual_action("jump", false, "gamepad");
+        assert!(frame(&mut input).2);
+    }
+
+    #[test]
+    fn an_action_held_by_another_source_is_not_released() {
+        let mut input = system(None);
+        input.set_virtual_action("jump", true, "gamepad");
+        input.set_virtual_action("jump", true, "touch");
+        frame(&mut input);
+        input.set_virtual_action("jump", false, "gamepad");
+        assert_eq!(frame(&mut input), (true, false, false));
+        input.set_virtual_action("jump", false, "touch");
+        assert!(frame(&mut input).2);
+    }
+
+    #[test]
+    fn virtual_actions_read_like_a_held_key() {
+        let mut input = system(None);
+        input.set_virtual_action("jump", true, "touch");
+        assert_eq!(frame(&mut input), (true, true, false));
+        input.set_virtual_action("jump", true, "touch");
+        assert_eq!(frame(&mut input), (true, false, false));
+        input.set_virtual_action("jump", false, "touch");
+        assert_eq!(frame(&mut input), (false, false, true));
+        assert_eq!(frame(&mut input), (false, false, false));
+        // A press and release within one frame is a tap.
+        input.set_virtual_action("jump", true, "touch");
+        input.set_virtual_action("jump", false, "touch");
+        assert_eq!(frame(&mut input), (false, true, true));
+        // Leaving play lets go.
+        input.set_virtual_action("jump", true, "touch");
+        frame(&mut input);
+        input.release_held_input();
+        assert!(!frame(&mut input).0);
     }
 }
