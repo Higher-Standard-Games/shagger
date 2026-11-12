@@ -417,7 +417,7 @@ pub fn paint_brand(
         let brand_size = clamp_css(24.0, screen_width * 0.026, 44.0);
         let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
         let y = top + 14.0;
-        painter.galley(
+        painter.galley_with_override_text_color(
             pos2(inner_left + 3.0, y + 4.0),
             brand.clone(),
             hsla(30.0, 90.0, 32.0, 0.3).gamma_multiply(alpha),

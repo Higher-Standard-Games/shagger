@@ -928,7 +928,7 @@ impl MatchLobbyView {
         painter.galley(pos2(words_left, wy), kicker, a.face);
         let hy = wy + kh + 8.0;
         let hh = head.size().y;
-        painter.galley(pos2(words_left + 4.0, hy + 5.0), head.clone(), hsl(250.0, 50.0, 3.0));
+        painter.galley_with_override_text_color(pos2(words_left + 4.0, hy + 5.0), head.clone(), hsl(250.0, 50.0, 3.0));
         painter.galley(pos2(words_left, hy), head, head_color);
         painter.galley(pos2(words_left, hy + hh + 10.0), sub, sub_color);
 
@@ -2105,7 +2105,7 @@ fn vs_galley(painter: &Painter, size: f32, style: &RoomStyle<'_>) -> std::sync::
 fn paint_vs(painter: &Painter, centre: Pos2, g: std::sync::Arc<egui::Galley>) {
     let at = centre - g.size() / 2.0;
     let size = g.size().y;
-    painter.galley(at + vec2(size * 0.08, size * 0.1), g.clone(), hsl(250.0, 50.0, 3.0));
+    painter.galley_with_override_text_color(at + vec2(size * 0.08, size * 0.1), g.clone(), hsl(250.0, 50.0, 3.0));
     painter.galley(at, g, hsl(46.0, 100.0, 60.0));
 }
 
@@ -2263,7 +2263,7 @@ fn map_card(
             let y = shot_bottom - 8.0 - n.size().y;
             let nh = n.size().y;
             let nw = n.size().x;
-            painter.galley(pos2(x + 3.0, y + 4.0), n.clone(), hsl(250.0, 50.0, 3.0));
+            painter.galley_with_override_text_color(pos2(x + 3.0, y + 4.0), n.clone(), hsl(250.0, 50.0, 3.0));
             painter.galley(pos2(x, y), n, cream());
             painter.galley(pos2(x + nw + 8.0, y + nh * 0.78 - w.size().y), w, cream());
         }
