@@ -132,7 +132,8 @@ pub struct WaterActorReflection {
 
 impl WaterActorReflection {
     /// `claim(root)`: the drawn, opaque, non-liquid, non-autosprite batches
-    /// block reflections (not a `func_explosive`, which can be destroyed).
+    /// block reflections (not a `func_explosive`, which can be destroyed,
+    /// nor a mover).
     #[must_use]
     pub fn new(gpu: &Gpu, geometry: &WorldGeometry, liquid: &[bool]) -> Self {
         let occluders = geometry
@@ -142,6 +143,7 @@ impl WaterActorReflection {
             .filter(|(i, b)| {
                 b.index_count > 0
                     && b.brush_model.is_none()
+                    && b.mover.is_none()
                     && !liquid.get(*i).copied().unwrap_or(false)
                     && !b.passes.is_empty()
                     && b.passes

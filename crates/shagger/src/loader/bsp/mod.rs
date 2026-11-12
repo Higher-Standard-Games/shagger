@@ -1,5 +1,6 @@
 //! Quake 3 and Warsow maps (SHAG `src/engine/loader/bsp`).
 
+pub mod ambient_entity_handlers;
 pub mod bsp_lighting_profile;
 pub mod bsp_loader;
 pub mod light_grid_sampling;

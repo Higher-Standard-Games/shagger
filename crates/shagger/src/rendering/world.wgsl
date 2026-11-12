@@ -85,6 +85,9 @@ struct Material {
     // to the side seen (TWOSIDEDLIGHTING); z: 1 when the material uses its
     // emissive as illumination
     environment: vec4f,
+    // A mover's world matrix (its batch turned or lifted); the identity
+    // for the rest of the world.
+    model: mat4x4f,
 };
 @group(1) @binding(2) var<uniform> material: Material;
 @group(1) @binding(3) var normal_texture: texture_2d<f32>;
@@ -197,18 +200,20 @@ fn vs_main(v: VertexIn) -> VertexOut {
     let billboard = autosprite(v);
     var normal = v.normal;
     if (dot(billboard.facing, billboard.facing) > 0.0) { normal = billboard.facing; }
-    o.clip = globals.view_proj * vec4f(billboard.position, 1.0);
+    let world = (material.model * vec4f(billboard.position, 1.0)).xyz;
+    normal = (material.model * vec4f(normal, 0.0)).xyz;
+    o.clip = globals.view_proj * vec4f(world, 1.0);
     o.normal = normal;
     o.uv = v.uv.x * material.uv_rows.xy + v.uv.y * material.uv_rows.zw + material.uv_origin.xy;
-    let depth = dot(globals.eye.xyz - billboard.position, normalize(normal));
+    let depth = dot(globals.eye.xyz - world, normalize(normal));
     o.fade = vec2f(ramp(material.ramp_rgb, depth), ramp(material.ramp_alpha, depth));
     o.uv0 = v.uv;
     o.uv2 = v.uv2;
     o.color = v.color;
     o.lightmapped = v.lightmapped;
-    o.world_position = billboard.position;
+    o.world_position = world;
     let tbn_normal = normalize(normal);
-    let tbn_tangent = normalize(v.tangent.xyz);
+    let tbn_tangent = normalize((material.model * vec4f(v.tangent.xyz, 0.0)).xyz);
     o.tbn0 = tbn_tangent;
     o.tbn1 = cross(tbn_normal, tbn_tangent) * v.tangent.w;
     return o;
@@ -424,7 +429,8 @@ fn shade(in: VertexOut, front: bool) -> vec4f {
     var spec = vec3f(0.0);
     if (globals.lighting.y > 0.5) {
         let encoded = textureSampleLevel(lightmap_direction, lightmap_sampler, uv, i32(layer), 0.0).rgb - vec3f(0.5);
-        let dir = encoded / max(length(encoded), 0.0001);
+        // A mover's baked direction turns with it (bspWorld * bspDir).
+        let dir = normalize((material.model * vec4f(encoded / max(length(encoded), 0.0001), 0.0)).xyz);
         let n_dot_l = max(dot(n, dir), 0.0);
         light = light * n_dot_l + globals.ambient.rgb * (1.0 - n_dot_l);
         if (material.surface.y > 0.5) {
