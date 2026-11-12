@@ -64,6 +64,9 @@ sha2 = "0.10"
 wry = { version = "0.57.1", optional = true }
 # The Downloads folder a page's file lands in (webview/), as wry finds it.
 dirs = { version = "7", optional = true }
+# Controllers (input/gamepad_backend): the native stand-in for the browser's
+# Gamepad API. On Linux it reads evdev and needs libudev's development files.
+gilrs = "0.11"
 
 # Standard output and error into a file (core/console_log).
 [target.'cfg(unix)'.dependencies]
