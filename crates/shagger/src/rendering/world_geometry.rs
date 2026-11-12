@@ -18,7 +18,11 @@
 //! renderer can drop the ones the bomb destroyed (`BrushModelState`).
 //! The `func_static` brush models (`handleStatic`: scenery kept out of the
 //! world model, such as a structure standing in the sky) are built where
-//! they stand, with the world's batches, as nothing ever removes them.
+//! they stand, with the world's batches, as nothing ever removes them. So
+//! are the `func_door` ones (`handleFuncDoor`): SHAG builds each door where
+//! it stands and only the `door` console command ever opens one, so in play
+//! a door is scenery too. Lifts (`func_plat`, and a `func_door` with angle
+//! -1 or -2) move, and are not drawn yet.
 //!
 //! Not yet followed from `buildAll`: liquids, cubemap objects, fog and
 //! spatial cells. Billboards are skipped, as SHAG skips them.
@@ -255,13 +259,24 @@ pub fn parse_model_index(model: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-/// The `func_static` entities' brush models (`handleStatic`): each `*N`
-/// model past the world's, in entity order, once.
+/// A `func_static`, or a `func_door` that is not a lift.
+fn stands_still(classname: &str, angle: Option<&str>) -> bool {
+    match classname {
+        "func_static" => true,
+        "func_door" => !matches!(angle, Some("-1" | "-2")),
+        _ => false,
+    }
+}
+
+/// The brush models that stand still: the `func_static` entities'
+/// (`handleStatic`) and the closed `func_door` ones' (`handleFuncDoor`, but
+/// not the lifts `handleLift` takes, angle -1 or -2). Each `*N` model past
+/// the world's, in entity order, once.
 #[must_use]
 pub fn static_brush_models(bsp: &BspFile) -> Vec<usize> {
     let mut out = Vec::new();
     for entity in &bsp.entities {
-        if entity.classname != "func_static" {
+        if !stands_still(&entity.classname, entity.properties.get("angle")) {
             continue;
         }
         let Some(index) = entity.properties.get("model").and_then(parse_model_index) else {
@@ -544,5 +559,17 @@ mod tests {
         assert_eq!(super::parse_model_index("*12abc"), Some(12));
         assert_eq!(super::parse_model_index("models/a.md3"), None);
         assert_eq!(super::parse_model_index("*"), None);
+    }
+
+    #[test]
+    fn statics_and_closed_doors_stand_still_but_lifts_do_not() {
+        assert!(super::stands_still("func_static", None));
+        assert!(super::stands_still("func_door", Some("270")));
+        assert!(super::stands_still("func_door", None));
+        assert!(!super::stands_still("func_door", Some("-1")));
+        assert!(!super::stands_still("func_door", Some("-2")));
+        assert!(!super::stands_still("func_plat", None));
+        assert!(!super::stands_still("func_explosive", None));
+        assert!(!super::stands_still("func_rotating", None));
     }
 }
