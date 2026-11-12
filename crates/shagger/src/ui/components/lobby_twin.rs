@@ -676,6 +676,43 @@ pub fn gradient_polygon(painter: &Painter, points: &[Pos2], stops: &[(f32, Color
     painter.add(mesh);
 }
 
+/// A convex polygon filled left to right through `stops` (at 0..1 of its
+/// width): CSS's `linear-gradient(90deg, ...)` under a `clip-path`.
+pub fn gradient_polygon_x(painter: &Painter, points: &[Pos2], stops: &[(f32, Color32)]) {
+    let (x0, x1) = points
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+    let color_at = |x: f32| {
+        let t = ((x - x0) / (x1 - x0).max(1.0)).clamp(0.0, 1.0);
+        let i = stops.iter().rposition(|(at, _)| *at <= t).unwrap_or(0);
+        let (a, ca) = stops[i];
+        let Some(&(b, cb)) = stops.get(i + 1) else { return ca };
+        ca.lerp_to_gamma(cb, (t - a) / (b - a))
+    };
+    let mut mesh = Mesh::default();
+    let mut cuts: Vec<f32> = stops.iter().map(|(at, _)| x0 + at * (x1 - x0)).collect();
+    if cuts.first().is_none_or(|&c| c > x0) {
+        cuts.insert(0, x0);
+    }
+    if cuts.last().is_none_or(|&c| c < x1) {
+        cuts.push(x1);
+    }
+    for pair in cuts.windows(2) {
+        let clipped = clip_band(points, |p| p.x, pair[0], pair[1]);
+        if clipped.len() < 3 {
+            continue;
+        }
+        let base = mesh.vertices.len() as u32;
+        for p in &clipped {
+            mesh.colored_vertex(*p, color_at(p.x));
+        }
+        for i in 1..clipped.len() as u32 - 1 {
+            mesh.add_triangle(base, base + i, base + i + 1);
+        }
+    }
+    painter.add(mesh);
+}
+
 /// A rectangle filled left to right through `stops` (at 0..1 of its width).
 pub fn horizontal_gradient(painter: &Painter, rect: Rect, stops: &[(f32, Color32)]) {
     let mut mesh = Mesh::default();
