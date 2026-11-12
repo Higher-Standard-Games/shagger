@@ -54,8 +54,9 @@ struct Globals {
 struct Material {
     // x: alpha cutoff (< 0: none), y: alpha from the image, z: lighting
     // (0 baked, 1 full bright, 2 vertex colour, 3 vertex colour and game
-    // lights (BspVertexLightingPlugin), 4 glow overlay), w: times vertex
-    // alpha
+    // lights (BspVertexLightingPlugin), 4 glow overlay, 5 baked with the
+    // base tinted by the vertex colour, as a lightmapped rgbGen vertex
+    // StandardMaterial draws), w: times vertex alpha
     params: vec4f,
     // The texture matrix (Babylon's getTextureMatrix): U row, V row, origin.
     uv_rows: vec4f,
@@ -347,8 +348,10 @@ fn shade(in: VertexOut, front: bool) -> vec4f {
     if (material.params.y > 0.5) { alpha = alpha * base.a; }
     if (material.params.w > 0.5) { alpha = alpha * in.color.a; }
     if (material.params.x >= 0.0 && alpha < material.params.x) { discard; }
-    let tint = material.color.rgb * in.fade.x;
-    if (material.params.z > 3.5) {
+    let vertex_tinted = material.params.z > 4.5;
+    var tint = material.color.rgb * in.fade.x;
+    if (vertex_tinted && in.lightmapped > 0.5) { tint = tint * in.color.rgb; }
+    if (material.params.z > 3.5 && !vertex_tinted) {
         // GlowOverlayShaderMaterial: the base lit by the raw lightmap page,
         // then the glow added (or mixed by its alpha).
         var lit = base.rgb;
@@ -361,7 +364,7 @@ fn shade(in: VertexOut, front: bool) -> vec4f {
         if (material.gloss.x > 0.5) { color = mix(lit, glow_sample.rgb, glow_sample.a); }
         return vec4f(pow(max(color, vec3f(0.0)), vec3f(2.2)), base.a);
     }
-    if (material.params.z > 2.5) {
+    if (material.params.z > 2.5 && material.params.z < 3.5) {
         // BspVertexLightingPlugin: the vertex-lit image, plus the image lit
         // by the game lights, their specular and the emissive colour.
         var n = normalize(in.normal);
@@ -381,7 +384,7 @@ fn shade(in: VertexOut, front: bool) -> vec4f {
         let color = image * in.color.rgb + image * dynamic_diffuse(in.world_position, n) + specular + emissive;
         return vec4f(pow(max(color, vec3f(0.0)), vec3f(2.2)), alpha * in.fade.y);
     }
-    if (material.params.z > 0.5 || in.lightmapped < 0.5) {
+    if ((material.params.z > 0.5 && !vertex_tinted) || in.lightmapped < 0.5) {
         var light = in.color.rgb;
         var image = base.rgb;
         if (material.params.z < 1.5 && material.params.z > 0.5) {

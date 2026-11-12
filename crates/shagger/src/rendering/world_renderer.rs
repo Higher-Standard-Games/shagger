@@ -91,8 +91,9 @@ pub const Q3_SOFT_FADE_RATE: f32 = 0.02;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MaterialUniform {
     /// x: alpha cutoff (negative: no test), y: 1 to take alpha from the
-    /// image, z: lighting (0 baked, 1 full bright, 2 vertex colour),
-    /// w: 1 to multiply alpha by the vertex alpha.
+    /// image, z: lighting (0 baked, 1 full bright, 2 vertex colour, 3 the
+    /// vertex lighting plugin, 4 glow overlay, 5 baked with the vertex
+    /// colour), w: 1 to multiply alpha by the vertex alpha.
     params: [f32; 4],
     /// The texture matrix: U row (xy) and V row (zw).
     uv_rows: [f32; 4],
@@ -721,6 +722,12 @@ impl WorldRenderer {
                     if props.uses_vertex_rgb == Some(true) { 2.0 } else { 1.0 }
                 } else if uses_vertex_lighting_plugin(props) {
                     3.0
+                } else if props.uses_vertex_rgb == Some(true) && props.use_lightmap && !props.is_fullbright {
+                    // applyLightmaps lights it too: the StandardMaterial's
+                    // vertex colour tints its base, and the baked lighting
+                    // multiplies that (a lightmapped face; others keep the
+                    // vertex colour alone).
+                    5.0
                 } else if props.uses_vertex_rgb == Some(true) {
                     2.0
                 } else if props.use_lightmap {
@@ -732,7 +739,7 @@ impl WorldRenderer {
                 let base_path = base_path.unwrap_or_default();
                 let mut companion = |explicit: Option<&str>, blank: bool, suffixes: &[&str]| {
                     // The baked path and the vertex lighting plugin light them.
-                    if lighting != 0.0 && lighting != 3.0 {
+                    if lighting != 0.0 && lighting != 3.0 && lighting != 5.0 {
                         return None;
                     }
                     let candidates = optional_texture_candidates(explicit, blank, &base_path, suffixes);
@@ -774,7 +781,7 @@ impl WorldRenderer {
                     Some(key.clone())
                 } else if filter {
                     None
-                } else if lighting == 0.0 || props.is_fullbright {
+                } else if lighting == 0.0 || lighting == 5.0 || props.is_fullbright {
                     let candidates = optional_texture_candidates(
                         props.glow_texture.as_deref(),
                         props.glow_texture_explicitly_blank,
