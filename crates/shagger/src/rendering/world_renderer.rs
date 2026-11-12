@@ -43,7 +43,7 @@ use wgpu::util::DeviceExt;
 use super::dynamic_lights::{DynamicLight, DynamicLightBlock};
 use super::gpu::Gpu;
 use super::world_fog_controller::FogUniforms;
-use super::world_geometry::{WorldGeometry, WorldVertex};
+use super::world_geometry::{Mover, WorldGeometry, WorldVertex};
 use super::world_materials::{
     Blend, GLOSS_SUFFIXES, MissingImage, NORMAL_SUFFIXES, PassState, add_texture_prefixes, build_diffuse_candidates,
     emissive_as_illumination, gloss_exponent, gloss_intensity, missing_image, optional_texture_candidates,
@@ -121,6 +121,9 @@ struct MaterialUniform {
     /// (`surroundmap`); y 1 to turn the normal to the side seen
     /// (`TWOSIDEDLIGHTING`).
     environment: [f32; 4],
+    /// The world matrix of a mover's batch (`Mover::transform`); the
+    /// identity for the rest of the world.
+    model: [[f32; 4]; 4],
 }
 
 impl MaterialUniform {
@@ -287,6 +290,11 @@ pub struct WorldRenderer {
     brush_models: Vec<Option<usize>>,
     /// Batches whose brush model is disabled (`set_disabled_brush_models`).
     disabled: Vec<bool>,
+    /// The brush models that move, and each batch's, if any.
+    movers: Vec<Mover>,
+    batch_movers: Vec<Option<usize>>,
+    /// Seconds the rotators have turned (`move_movers`).
+    mover_time: f64,
     /// The scene depth soft particles read: its layout, a copy of the main
     /// depth taken between the opaque and blended passes, its size, and
     /// whether this frame reads it.
@@ -959,6 +967,11 @@ impl WorldRenderer {
                             f32::from(u8::from(emissive_as_illumination(props))),
                             0.0,
                         ],
+                        model: batch
+                            .mover
+                            .and_then(|m| geometry.movers.get(m))
+                            .map_or(Mat4::IDENTITY, |m| m.transform(0.0, None))
+                            .to_cols_array_2d(),
                     };
                     let cube = layer
                         .environment
@@ -1174,6 +1187,9 @@ impl WorldRenderer {
             hidden: Vec::new(),
             brush_models: geometry.batches.iter().map(|b| b.brush_model).collect(),
             disabled: vec![false; geometry.batches.len()],
+            movers: geometry.movers.clone(),
+            batch_movers: geometry.batches.iter().map(|b| b.mover).collect(),
+            mover_time: 0.0,
             soft_batches,
             soft_layout,
             soft_depth: None,
@@ -1297,6 +1313,36 @@ impl WorldRenderer {
             gpu.queue
                 .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
         }
+    }
+
+    /// Moves the movers' batches by `delta_seconds`: the rotators turn
+    /// (`handleFuncRotating`'s `mesh.rotate` each frame) and each lift
+    /// stands where `travel(model_index)`, the lift system's travel for its
+    /// model, puts it, or at rest without one (`handleLift`).
+    pub fn move_movers(&mut self, gpu: &Gpu, delta_seconds: f64, travel: impl Fn(usize) -> Option<f64>) {
+        if self.movers.is_empty() {
+            return;
+        }
+        self.mover_time += delta_seconds;
+        let transforms: Vec<[[f32; 4]; 4]> = self
+            .movers
+            .iter()
+            .map(|m| m.transform(self.mover_time, travel(m.model_index)).to_cols_array_2d())
+            .collect();
+        for pass in &mut self.passes {
+            let Some(mover) = self.batch_movers.get(pass.batch).copied().flatten() else {
+                continue;
+            };
+            pass.uniform.model = transforms[mover];
+            gpu.queue
+                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+        }
+    }
+
+    /// The brush models that move ([`Self::move_movers`]).
+    #[must_use]
+    pub fn movers(&self) -> &[Mover] {
+        &self.movers
     }
 
     /// Batches drawn by something else (the water), by batch index.

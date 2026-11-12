@@ -21,8 +21,14 @@
 //! they stand, with the world's batches, as nothing ever removes them. So
 //! are the `func_door` ones (`handleFuncDoor`): SHAG builds each door where
 //! it stands and only the `door` console command ever opens one, so in play
-//! a door is scenery too. Lifts (`func_plat`, and a `func_door` with angle
-//! -1 or -2) move, and are not drawn yet.
+//! a door is scenery too.
+//!
+//! The brush models that move get batches of their own, tagged with their
+//! [`Mover`]: each `func_rotating` (`handleFuncRotating`, spun by the
+//! renderer from its [`RotationPlan`]) and each lift (`handleLift`: a
+//! `func_plat`, or a `func_door` with angle -1 or -2, placed by the lift
+//! system). Their vertices stay where the map compiled them; the renderer
+//! moves them with [`Mover::transform`].
 //!
 //! Not yet followed from `buildAll`: liquids, cubemap objects, fog and
 //! spatial cells. Billboards are skipped, as SHAG skips them.
@@ -37,6 +43,9 @@ use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
 use crate::loader::bsp::mesh::pvs::build_face_clusters;
 use crate::loader::bsp::mesh::tangents::build_bsp_tangents;
 use shagger_shared::bsp::brush_model_state::extract_brush_models;
+use shagger_shared::bsp::lift_system::extract_lifts;
+
+use crate::loader::bsp::ambient_entity_handlers::{RotationPlan, rotation_pivot, rotation_plan};
 
 use crate::loader::shader::q3_shader_types::{
     AlphaMode, Q3Shader, ResolveMaterialOptions, ResolvedMaterialProps, SkyParms,
@@ -108,6 +117,9 @@ pub struct WorldBatch {
     pub bounds: [[f32; 3]; 2],
     /// The `func_explosive` brush model it belongs to; `None` for the world.
     pub brush_model: Option<usize>,
+    /// The moving brush model it belongs to, by index into
+    /// [`WorldGeometry::movers`].
+    pub mover: Option<usize>,
     /// Its shader's glow overlay stages, when `loadTextures` would draw its
     /// pass with the glow overlay ShaderMaterial
     /// ([`WorldGeometry::find_glow_overlays`]).
@@ -135,6 +147,140 @@ pub struct WorldGeometry {
     pub lightmap_stride: usize,
     /// Faces drawn as autosprites.
     pub sprite_faces: usize,
+    /// The brush models that move, which batches name by index.
+    pub movers: Vec<Mover>,
+}
+
+/// A brush model that moves, and how.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mover {
+    pub model_index: usize,
+    pub kind: MoverKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MoverKind {
+    /// `handleFuncRotating`: turns about `pivot` (model coordinates),
+    /// which stands at `position`.
+    Rotating {
+        plan: RotationPlan,
+        pivot: [f64; 3],
+        position: [f64; 3],
+    },
+    /// `handleLift`: at its origin raised by the lift system's travel for
+    /// its model (`LiftSystem.offset`), or by its start until there is one.
+    Lift { origin: [f64; 3], start: f64 },
+}
+
+impl Mover {
+    /// Its world matrix (engine space): `seconds` since the map loaded
+    /// turn a spinning rotator; `travel` is the lift system's travel for a
+    /// lift's model, if it has one.
+    #[must_use]
+    pub fn transform(&self, seconds: f64, travel: Option<f64>) -> glam::Mat4 {
+        use glam::{DVec3, Mat4, Quat};
+        match self.kind {
+            MoverKind::Rotating { plan, pivot, position } => {
+                let angle = if plan.spinning {
+                    (plan.degrees_per_second * seconds)
+                        .to_radians()
+                        .rem_euclid(std::f64::consts::TAU)
+                } else {
+                    0.0
+                };
+                let axis = DVec3::from(plan.axis).as_vec3();
+                Mat4::from_translation(DVec3::from(position).as_vec3())
+                    * Mat4::from_quat(Quat::from_axis_angle(axis, angle as f32))
+                    * Mat4::from_translation(-DVec3::from(pivot).as_vec3())
+            }
+            MoverKind::Lift { origin, start } => {
+                Mat4::from_translation(DVec3::new(origin[0], origin[1] + travel.unwrap_or(start), origin[2]).as_vec3())
+            }
+        }
+    }
+
+    /// Engine-space bounds of everything it can reach, from its compiled
+    /// `bounds`.
+    #[must_use]
+    pub fn reach(&self, bounds: [[f32; 3]; 2], lift_travel: (f64, f64)) -> [[f32; 3]; 2] {
+        match self.kind {
+            MoverKind::Rotating { pivot, position, .. } => {
+                let mut radius = 0.0f64;
+                for corner in 0..8 {
+                    let mut d = 0.0;
+                    for k in 0..3 {
+                        let c = f64::from(bounds[(corner >> k) & 1][k]);
+                        d += (c - pivot[k]).powi(2);
+                    }
+                    radius = radius.max(d.sqrt());
+                }
+                [
+                    position.map(|c| (c - radius) as f32),
+                    position.map(|c| (c + radius) as f32),
+                ]
+            }
+            MoverKind::Lift { origin, .. } => {
+                let (low, high) = (lift_travel.0.min(lift_travel.1), lift_travel.0.max(lift_travel.1));
+                let mut out = bounds;
+                for k in 0..3 {
+                    out[0][k] += origin[k] as f32;
+                    out[1][k] += origin[k] as f32;
+                }
+                out[0][1] += low as f32;
+                out[1][1] += high as f32;
+                out
+            }
+        }
+    }
+}
+
+/// The map's movers (`func_rotating`, then the lifts) with their lift
+/// travel (start, end; zero for a rotator).
+fn find_movers(bsp: &BspFile) -> Vec<(Mover, (f64, f64))> {
+    let mut out = Vec::new();
+    for entity in &bsp.entities {
+        if entity.classname != "func_rotating" {
+            continue;
+        }
+        let Some(index) = entity.properties.get("model").and_then(parse_model_index) else {
+            continue;
+        };
+        if index == 0
+            || index >= bsp.common.models.len()
+            || out.iter().any(|(m, _): &(Mover, _)| m.model_index == index)
+        {
+            continue;
+        }
+        let (pivot, position) = rotation_pivot(entity, &bsp.common.models[index]);
+        out.push((
+            Mover {
+                model_index: index,
+                kind: MoverKind::Rotating {
+                    plan: rotation_plan(entity),
+                    pivot,
+                    position,
+                },
+            },
+            (0.0, 0.0),
+        ));
+    }
+    for lift in extract_lifts(&bsp.entities, &bsp.models) {
+        if out.iter().any(|(m, _)| m.model_index == lift.model_index) {
+            continue;
+        }
+        let o = lift.origin;
+        out.push((
+            Mover {
+                model_index: lift.model_index,
+                kind: MoverKind::Lift {
+                    origin: [o.x, o.y, o.z],
+                    start: lift.start,
+                },
+            },
+            (lift.start, lift.end),
+        ));
+    }
+    out
 }
 
 impl WorldGeometry {
@@ -167,12 +313,15 @@ impl WorldGeometry {
         maps
     }
 
-    /// Which batches belong to a `func_explosive` brush model, by batch
-    /// index: geometry that comes and goes, which static consumers (the
-    /// ragdolls' collision, the water's occluders) leave out.
+    /// Which batches belong to a `func_explosive` brush model or a mover,
+    /// by batch index: geometry that comes and goes or moves, which static
+    /// consumers (the ragdolls' collision, the water's occluders) leave out.
     #[must_use]
     pub fn brush_model_batches(&self) -> Vec<bool> {
-        self.batches.iter().map(|b| b.brush_model.is_some()).collect()
+        self.batches
+            .iter()
+            .map(|b| b.brush_model.is_some() || b.mover.is_some())
+            .collect()
     }
 }
 
@@ -200,6 +349,7 @@ struct Group {
     pvs_clusters: Vec<i32>,
     bounds: [[f32; 3]; 2],
     brush_model: Option<usize>,
+    mover: Option<usize>,
 }
 
 const EMPTY_BOUNDS: [[f32; 3]; 2] = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
@@ -257,6 +407,26 @@ pub fn parse_model_index(model: &str) -> Option<usize> {
         .take_while(char::is_ascii_digit)
         .collect();
     digits.parse().ok()
+}
+
+/// What groups faces into a batch: texture, lightmap (`-2` for any layered
+/// page), patch-ness, explosive and mover.
+type BatchKey = (i32, i32, bool, Option<usize>, Option<usize>);
+
+/// A face to build: its index, its explosive's model index, the origin it
+/// is moved to, whether it is a brush model's, and its mover.
+type FaceToBuild = (usize, Option<usize>, [f64; 3], bool, Option<usize>);
+
+/// A face's PVS clusters (`bspPvsClusters`). A brush model's are `-1`,
+/// which keeps it drawn: `buildBrushModel` gives its mesh no clusters.
+/// The leaves can still list a brush model's faces (snd6's lift sits in
+/// cluster 0's), which would cull it from everywhere that cluster is not
+/// seen.
+fn face_pvs_clusters(face_clusters: &[Vec<i32>], face: usize, in_brush_model: bool) -> &[i32] {
+    if in_brush_model {
+        return &[-1];
+    }
+    face_clusters.get(face).map_or(&[-1][..], Vec::as_slice)
 }
 
 /// A `func_static`, or a `func_door` that is not a lift.
@@ -318,16 +488,16 @@ pub fn build_world_geometry(
     let mut passes_by_texture: std::collections::HashMap<i32, Vec<ResolvedMaterialProps>> =
         std::collections::HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
-    let mut keys: std::collections::HashMap<(i32, i32, bool, Option<usize>), usize> = std::collections::HashMap::new();
+    let mut keys: std::collections::HashMap<BatchKey, usize> = std::collections::HashMap::new();
     let mut sprite_groups: Vec<Group> = Vec::new();
-    let mut sprite_keys: std::collections::HashMap<(i32, Option<usize>), usize> = std::collections::HashMap::new();
+    let mut sprite_keys: std::collections::HashMap<(i32, Option<usize>, Option<usize>), usize> =
+        std::collections::HashMap::new();
     // Every face to build: the world's, then each explosive's with its
-    // model index and its Babylon-space origin, then each static's; the
-    // last says whether it is a brush model's.
-    let mut faces: Vec<(usize, Option<usize>, [f64; 3], bool)> =
-        record_range(world.first_face, world.num_faces, bsp.common.faces.len())
-            .map(|i| (i, None, [0.0; 3], false))
-            .collect();
+    // model index and its Babylon-space origin, then each static's, then
+    // each mover's; then whether it is a brush model's, and its mover.
+    let mut faces: Vec<FaceToBuild> = record_range(world.first_face, world.num_faces, bsp.common.faces.len())
+        .map(|i| (i, None, [0.0; 3], false, None))
+        .collect();
     for definition in extract_brush_models(&bsp.entities, &bsp.models) {
         let Some(model) = bsp.common.models.get(definition.model_index) else {
             continue;
@@ -335,16 +505,26 @@ pub fn build_world_geometry(
         let origin = [definition.origin.x, definition.origin.y, definition.origin.z];
         faces.extend(
             record_range(model.first_face, model.num_faces, bsp.common.faces.len())
-                .map(|i| (i, Some(definition.model_index), origin, true)),
+                .map(|i| (i, Some(definition.model_index), origin, true, None)),
         );
     }
     for index in static_brush_models(bsp) {
         let model = &bsp.common.models[index];
         faces.extend(
-            record_range(model.first_face, model.num_faces, bsp.common.faces.len()).map(|i| (i, None, [0.0; 3], true)),
+            record_range(model.first_face, model.num_faces, bsp.common.faces.len())
+                .map(|i| (i, None, [0.0; 3], true, None)),
         );
     }
-    for (i, brush_model, origin, in_brush_model) in faces {
+    let movers = find_movers(bsp);
+    for (at, (mover, _)) in movers.iter().enumerate() {
+        let model = &bsp.common.models[mover.model_index];
+        faces.extend(
+            record_range(model.first_face, model.num_faces, bsp.common.faces.len())
+                .map(|i| (i, None, [0.0; 3], true, Some(at))),
+        );
+    }
+    out.movers = movers.iter().map(|(m, _)| *m).collect();
+    for (i, brush_model, origin, in_brush_model, mover) in faces {
         let Some(face) = bsp.common.faces.get(i) else { continue };
         if !should_render_texture(bsp, face.texture_index) {
             continue;
@@ -402,12 +582,15 @@ pub fn build_world_geometry(
                 pvs_clusters: Vec::new(),
                 bounds: EMPTY_BOUNDS,
                 brush_model,
+                mover,
             };
             let at = if additive {
-                *sprite_keys.entry((face.texture_index, brush_model)).or_insert_with(|| {
-                    sprite_groups.push(new_group());
-                    sprite_groups.len() - 1
-                })
+                *sprite_keys
+                    .entry((face.texture_index, brush_model, mover))
+                    .or_insert_with(|| {
+                        sprite_groups.push(new_group());
+                        sprite_groups.len() - 1
+                    })
             } else {
                 sprite_groups.push(new_group());
                 sprite_groups.len() - 1
@@ -422,7 +605,7 @@ pub fn build_world_geometry(
                 }
             }
             let center = sum.map(|c| c / n as f64);
-            group.add_clusters(face_clusters.get(i).map_or(&[-1][..], Vec::as_slice));
+            group.add_clusters(face_pvs_clusters(&face_clusters, i, in_brush_model));
             // A sprite turns about its centre, so it can reach as far as its
             // farthest corner in any direction.
             let reach = g
@@ -469,6 +652,7 @@ pub fn build_world_geometry(
             if layered { -2 } else { lightmap },
             is_patch,
             brush_model,
+            mover,
         );
         let at = *keys.entry(key).or_insert_with(|| {
             groups.push(Group {
@@ -480,6 +664,7 @@ pub fn build_world_geometry(
                 pvs_clusters: Vec::new(),
                 bounds: EMPTY_BOUNDS,
                 brush_model,
+                mover,
             });
             groups.len() - 1
         });
@@ -491,7 +676,7 @@ pub fn build_world_geometry(
         };
         let colors = scale_bsp_vertex_colors(&g.colors, vertex_gain);
         let base = group.vertices.len() as u32;
-        group.add_clusters(face_clusters.get(i).map_or(&[-1][..], Vec::as_slice));
+        group.add_clusters(face_pvs_clusters(&face_clusters, i, in_brush_model));
         for p in g.positions.as_chunks::<3>().0.iter() {
             group.grow([p[0] as f32, p[1] as f32, p[2] as f32], 0.0);
         }
@@ -541,8 +726,12 @@ pub fn build_world_geometry(
             first_index: out.indices.len() as u32,
             index_count: group.indices.len() as u32,
             pvs_clusters: group.pvs_clusters,
-            bounds: group.bounds,
+            bounds: match group.mover {
+                Some(m) => movers[m].0.reach(group.bounds, movers[m].1),
+                None => group.bounds,
+            },
             brush_model: group.brush_model,
+            mover: group.mover,
             glow_overlay: None,
         });
         out.vertices.extend(group.vertices);
@@ -559,6 +748,66 @@ mod tests {
         assert_eq!(super::parse_model_index("*12abc"), Some(12));
         assert_eq!(super::parse_model_index("models/a.md3"), None);
         assert_eq!(super::parse_model_index("*"), None);
+    }
+
+    fn rotator(pivot: [f64; 3], position: [f64; 3], spinning: bool) -> super::Mover {
+        super::Mover {
+            model_index: 3,
+            kind: super::MoverKind::Rotating {
+                plan: crate::loader::bsp::ambient_entity_handlers::RotationPlan {
+                    axis: [0.0, 1.0, 0.0],
+                    degrees_per_second: 90.0,
+                    spinning,
+                },
+                pivot,
+                position,
+            },
+        }
+    }
+
+    #[test]
+    fn a_rotator_turns_about_its_pivot_where_it_stands() {
+        use glam::Vec3;
+        // An origin brush: the model about zero, standing at its origin.
+        let fan = rotator([0.0; 3], [100.0, 0.0, 50.0], true);
+        let at_rest = fan.transform(0.0, None).transform_point3(Vec3::new(10.0, 0.0, 0.0));
+        assert!(at_rest.abs_diff_eq(Vec3::new(110.0, 0.0, 50.0), 1e-4));
+        // A quarter turn about +Y takes +X to -Z.
+        let turned = fan.transform(1.0, None).transform_point3(Vec3::new(10.0, 0.0, 0.0));
+        assert!(turned.abs_diff_eq(Vec3::new(100.0, 0.0, 40.0), 1e-3), "{turned}");
+        // Its origin inside the model: it turns where it was compiled.
+        let inside = rotator([100.0, 0.0, 50.0], [100.0, 0.0, 50.0], true);
+        let p = inside
+            .transform(1.0, None)
+            .transform_point3(Vec3::new(110.0, 0.0, 50.0));
+        assert!(p.abs_diff_eq(Vec3::new(100.0, 0.0, 40.0), 1e-3), "{p}");
+        // One waiting for a trigger stays put.
+        let idle = rotator([0.0; 3], [0.0; 3], false);
+        assert_eq!(idle.transform(5.0, None), glam::Mat4::IDENTITY);
+    }
+
+    #[test]
+    fn a_lift_stands_at_its_travel_or_its_start() {
+        use glam::Vec3;
+        let lift = super::Mover {
+            model_index: 1,
+            kind: super::MoverKind::Lift {
+                origin: [0.0, 8.0, 0.0],
+                start: -64.0,
+            },
+        };
+        let p = Vec3::new(1.0, 2.0, 3.0);
+        assert_eq!(
+            lift.transform(0.0, None).transform_point3(p),
+            Vec3::new(1.0, -54.0, 3.0)
+        );
+        assert_eq!(
+            lift.transform(0.0, Some(16.0)).transform_point3(p),
+            Vec3::new(1.0, 26.0, 3.0)
+        );
+        // It can reach from its start to its end.
+        let reach = lift.reach([[0.0, 0.0, 0.0], [10.0, 20.0, 10.0]], (-64.0, 0.0));
+        assert_eq!(reach, [[0.0, -56.0, 0.0], [10.0, 28.0, 10.0]]);
     }
 
     #[test]
