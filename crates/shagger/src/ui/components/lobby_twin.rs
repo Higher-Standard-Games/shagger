@@ -13,6 +13,8 @@
 
 use std::sync::Arc;
 
+use super::raised_key::desaturate;
+
 use egui::{Align2, Color32, FontFamily, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 /// The game's look for the twin: its logo or name at the head of the rail,
@@ -197,71 +199,14 @@ impl TwinRail {
     pub fn paint(&self, painter: &Painter, screen: Rect, style: &TwinStyle) {
         let w = Self::width(screen.width());
         let (x0, y0, h) = (screen.min.x, screen.min.y, screen.height());
-        let rail = [
-            pos2(x0, y0),
-            pos2(x0 + w, y0),
-            pos2(x0 + w - RAIL_SKEW, y0 + h),
-            pos2(x0, y0 + h),
-        ];
-        gradient_polygon(
-            painter,
-            &rail,
-            &[(0.0, hsl(46.0, 100.0, 57.0)), (1.0, hsl(41.0, 96.0, 48.0))],
-        );
-        // The highlight at the top left.
-        radial_glow(
-            painter,
-            pos2(x0 + w * 0.25, y0),
-            vec2(w * 0.6, h * 0.275),
-            hsla(54.0, 100.0, 78.0, 0.55),
-            Some(&rail),
-        );
-        // The violet edge along the slant.
-        let edge = [
-            pos2(x0 + w - 8.0, y0),
-            pos2(x0 + w, y0),
-            pos2(x0 + w - RAIL_SKEW, y0 + h),
-            pos2(x0 + w - RAIL_SKEW - 8.0, y0 + h),
-        ];
-        gradient_polygon(painter, &edge, &[(0.0, violet()), (1.0, hsl(262.0, 75.0, 42.0))]);
-
+        paint_rail(painter, x0, y0, y0 + h, w, RAIL_SKEW, 1.0);
         let inner_left = x0 + 22.0;
         let inner_right = x0 + w - RAIL_SKEW - 18.0;
         // The brand: `.twin__rail`'s padding, 14px when the window is short.
         let short = screen.width() > 700.0 && h <= 680.0;
-        let mut y = y0 + if short { 14.0 } else { 22.0 };
-        if let Some(texture) = style.logo.as_ref().map(|image| logo_texture(painter.ctx(), image)) {
-            // `.twin__brand img`: the brand's width up to 420px, its height
-            // following, at most 11vh in a short window.
-            let brand_right = x0 + w - RAIL_SKEW - 16.0;
-            let size = texture.size_vec2();
-            let mut width = (brand_right - inner_left).min(420.0);
-            if short {
-                width = width.min(h * 0.11 * size.x / size.y);
-            }
-            let logo = Rect::from_min_size(pos2(inner_left, y), vec2(width, width * size.y / size.x));
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            // The drop shadow, unblurred.
-            painter.image(
-                texture.id(),
-                logo.translate(vec2(0.0, 6.0)),
-                uv,
-                hsla(28.0, 90.0, 14.0, 0.35),
-            );
-            painter.image(texture.id(), logo, uv, Color32::WHITE);
-            y += logo.height() + 16.0;
-        } else {
-            let brand_size = clamp_css(24.0, screen.width() * 0.026, 44.0);
-            let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
-            y += 14.0;
-            painter.galley(
-                pos2(inner_left + 3.0, y + 4.0),
-                brand.clone(),
-                hsla(30.0, 90.0, 32.0, 0.3),
-            );
-            painter.galley(pos2(inner_left, y), brand.clone(), ink());
-            y += brand.size().y + 6.0 + 16.0;
-        }
+        let top = y0 + if short { 14.0 } else { 22.0 };
+        let max_h = short.then_some(h * 0.11);
+        let mut y = paint_brand(painter, x0, w, top, max_h, screen.width(), style, 1.0);
 
         // The steps, as keys.
         let hints = screen.width() > 1500.0;
@@ -395,6 +340,93 @@ impl TwinRail {
     }
 }
 
+/// The gold rail (`.lobby__rail`, `.twin__rail`): `width` wide at the top,
+/// `skew` ([`RAIL_SKEW`]) narrower at the bottom, from `left`, with its glow at the
+/// head and the violet edge along the slant. `alpha` fades it (a menu
+/// sliding in).
+pub fn paint_rail(painter: &Painter, left: f32, top: f32, bottom: f32, width: f32, skew: f32, alpha: f32) {
+    let fade = |c: Color32| c.gamma_multiply(alpha);
+    let (x0, y0, w, h) = (left, top, width, bottom - top);
+    let rail = [
+        pos2(x0, y0),
+        pos2(x0 + w, y0),
+        pos2(x0 + w - skew, y0 + h),
+        pos2(x0, y0 + h),
+    ];
+    gradient_polygon(
+        painter,
+        &rail,
+        &[(0.0, fade(hsl(46.0, 100.0, 57.0))), (1.0, fade(hsl(41.0, 96.0, 48.0)))],
+    );
+    // The highlight at the top left (`radial-gradient(120% 55% at 25% 0%)`).
+    radial_glow(
+        painter,
+        pos2(x0 + w * 0.25, y0),
+        vec2(w * 0.6, h * 0.275),
+        fade(hsla(54.0, 100.0, 78.0, 0.55)),
+        Some(&rail),
+    );
+    // The violet edge along the slant.
+    let edge = [
+        pos2(x0 + w - 8.0, y0),
+        pos2(x0 + w, y0),
+        pos2(x0 + w - skew, y0 + h),
+        pos2(x0 + w - skew - 8.0, y0 + h),
+    ];
+    gradient_polygon(
+        painter,
+        &edge,
+        &[(0.0, fade(violet())), (1.0, fade(hsl(262.0, 75.0, 42.0)))],
+    );
+}
+
+/// The brand at the head of a rail `width` wide from `left` (`buildRailBrand`):
+/// the logo up to 420px wide, at most `max_height` tall, or the name set in
+/// type without one. Returns where the rail's next part starts.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_brand(
+    painter: &Painter,
+    left: f32,
+    width: f32,
+    top: f32,
+    max_height: Option<f32>,
+    screen_width: f32,
+    style: &TwinStyle,
+    alpha: f32,
+) -> f32 {
+    let inner_left = left + 22.0;
+    if let Some(texture) = style.logo.as_ref().map(|image| logo_texture(painter.ctx(), image)) {
+        let brand_right = left + width - RAIL_SKEW - 16.0;
+        let size = texture.size_vec2();
+        let mut w = (brand_right - inner_left).min(420.0);
+        if let Some(max) = max_height {
+            w = w.min(max * size.x / size.y);
+        }
+        let logo = Rect::from_min_size(pos2(inner_left, top), vec2(w, w * size.y / size.x));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        // The drop shadow, unblurred.
+        painter.image(
+            texture.id(),
+            logo.translate(vec2(0.0, 6.0)),
+            uv,
+            hsla(28.0, 90.0, 14.0, 0.35).gamma_multiply(alpha),
+        );
+        painter.image(texture.id(), logo, uv, Color32::WHITE.gamma_multiply(alpha));
+        logo.max.y + 16.0
+    } else {
+        let brand_size = clamp_css(24.0, screen_width * 0.026, 44.0);
+        let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
+        let y = top + 14.0;
+        painter.galley(
+            pos2(inner_left + 3.0, y + 4.0),
+            brand.clone(),
+            hsla(30.0, 90.0, 32.0, 0.3).gamma_multiply(alpha),
+        );
+        painter.galley(pos2(inner_left, y), brand.clone(), ink().gamma_multiply(alpha));
+        y + brand.size().y + 6.0 + 16.0
+    }
+}
+
 /// A rail key (`twin-key`): the side below and to the right, the face on
 /// top, pressed by its state.
 #[allow(clippy::too_many_arguments)]
@@ -504,15 +536,6 @@ fn paint_key(
     }
 }
 
-/// CSS `saturate()` then `brightness()`.
-fn desaturate(c: Color32, saturation: f32, brightness: f32) -> Color32 {
-    let [r, g, b, a] = c.to_srgba_unmultiplied().map(|v| f32::from(v) / 255.0);
-    let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let mix = |v: f32| ((gray + (v - gray) * saturation) * brightness).clamp(0.0, 1.0);
-    let byte = |v: f32| (v * 255.0).round() as u8;
-    Color32::from_rgba_unmultiplied(byte(mix(r)), byte(mix(g)), byte(mix(b)), byte(a))
-}
-
 /// The stage's backdrop: the lobby's blue, `linear-gradient(165deg, ...)`.
 pub fn paint_backdrop(painter: &Painter, screen: Rect) {
     gradient_polygon(
@@ -534,9 +557,15 @@ pub fn paint_backdrop(painter: &Painter, screen: Rect) {
 /// The stage's drifting light (`buildTwinLight`): three blurred fields
 /// wandering slowly, `time` seconds into their drift.
 pub fn paint_light(painter: &Painter, screen: Rect, time: f64) {
+    paint_light_in(painter, screen, time, cyan());
+}
+
+/// [`paint_light`] with the first field in `accent`, as the lobby's stage
+/// takes the picked mode's colour (`.lobby__orb--accent`).
+pub fn paint_light_in(painter: &Painter, screen: Rect, time: f64, accent: Color32) {
     // (size, opacity, colour, period, from (vw, vh), to (vw, vh)), as `twin__orb--*`.
     let orbs = [
-        (640.0, 0.24, cyan(), 38.0, (0.40, -0.10), (0.70, 0.40)),
+        (640.0, 0.24, accent, 38.0, (0.40, -0.10), (0.70, 0.40)),
         (760.0, 0.22, hsl(276.0, 90.0, 56.0), 47.0, (0.75, 0.50), (0.35, 0.05)),
         (560.0, 0.20, hsl(232.0, 85.0, 52.0), 31.0, (0.50, 0.70), (0.80, 0.10)),
     ];
