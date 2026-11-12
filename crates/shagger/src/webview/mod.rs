@@ -231,6 +231,24 @@ impl std::fmt::Debug for WebviewHost {
     }
 }
 
+/// On macOS the page fills the window's content view by AppKit's own
+/// measure, and follows it. The size winit reports did not always match that
+/// view (fullscreen on a MacBook with a notch cut the page's bottom off), and
+/// wry pins a child webview's top without resizing it.
+#[cfg(target_os = "macos")]
+fn fill_parent(webview: &wry::WebView) {
+    use objc2_app_kit::NSAutoresizingMaskOptions;
+    use wry::WebViewExtMacOS;
+    let Some(content) = webview.ns_window().contentView() else {
+        return;
+    };
+    let view = webview.webview();
+    view.setFrame(content.bounds());
+    view.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+}
+
 fn bounds(size: PhysicalSize<u32>) -> wry::Rect {
     wry::Rect {
         position: wry::dpi::PhysicalPosition::new(0, 0).into(),
@@ -324,6 +342,8 @@ impl WebviewHost {
             );
         }
         let webview = builder.build_as_child(window).map_err(|e| format!("webview: {e}"))?;
+        #[cfg(target_os = "macos")]
+        fill_parent(&webview);
         Ok(Self {
             webview,
             inbox,
@@ -346,6 +366,8 @@ impl WebviewHost {
     /// Follows the window's new size.
     pub fn resize(&self, size: PhysicalSize<u32>) {
         let _ = self.webview.set_bounds(bounds(size));
+        #[cfg(target_os = "macos")]
+        fill_parent(&self.webview);
     }
 
     /// Shows the page and gives it the keyboard.
