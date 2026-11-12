@@ -15,11 +15,14 @@ use std::sync::Arc;
 
 use egui::{Align2, Color32, FontFamily, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
-/// The game's look for the twin: its name at the head of the rail, its
-/// fonts (`--w-font-display`, `--w-font-body`) and the engine line.
+/// The game's look for the twin: its logo or name at the head of the rail,
+/// its fonts (`--w-font-display`, `--w-font-body`) and the engine line.
 #[derive(Debug, Clone)]
 pub struct TwinStyle {
     pub brand: String,
+    /// `LobbyTwinBrand.logo`, decoded. Without one the name stands in, as
+    /// the browser shows it until the logo loads.
+    pub logo: Option<Arc<egui::ColorImage>>,
     pub display: FontFamily,
     pub body: FontFamily,
     /// `EngineVersion.getEngineName()`.
@@ -32,12 +35,26 @@ impl Default for TwinStyle {
     fn default() -> Self {
         Self {
             brand: "SHAG".into(),
+            logo: None,
             display: FontFamily::Proportional,
             body: FontFamily::Proportional,
             engine: "SHAG".into(),
             version: String::new(),
         }
     }
+}
+
+/// The logo's texture, uploaded once per image and kept in the context.
+fn logo_texture(ctx: &egui::Context, image: &Arc<egui::ColorImage>) -> egui::TextureHandle {
+    let id = egui::Id::unique(("twin-logo", Arc::as_ptr(image) as usize));
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return texture;
+    }
+    // Mipmapped: the rail draws it at a fraction of its size.
+    let options = egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+    let texture = ctx.load_texture("twin-logo", (**image).clone(), options);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    texture
 }
 
 /// A CSS `hsla()`, saturation and lightness in percent.
@@ -210,18 +227,41 @@ impl TwinRail {
 
         let inner_left = x0 + 22.0;
         let inner_right = x0 + w - RAIL_SKEW - 18.0;
-        // The brand.
-        let brand_size = clamp_css(24.0, screen.width() * 0.026, 44.0);
-        // The browser draws the game's logo here; its name stands in.
-        let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
-        let mut y = y0 + 22.0 + 14.0;
-        painter.galley(
-            pos2(inner_left + 3.0, y + 4.0),
-            brand.clone(),
-            hsla(30.0, 90.0, 32.0, 0.3),
-        );
-        painter.galley(pos2(inner_left, y), brand.clone(), ink());
-        y += brand.size().y + 6.0 + 16.0;
+        // The brand: `.twin__rail`'s padding, 14px when the window is short.
+        let short = screen.width() > 700.0 && h <= 680.0;
+        let mut y = y0 + if short { 14.0 } else { 22.0 };
+        if let Some(texture) = style.logo.as_ref().map(|image| logo_texture(painter.ctx(), image)) {
+            // `.twin__brand img`: the brand's width up to 420px, its height
+            // following, at most 11vh in a short window.
+            let brand_right = x0 + w - RAIL_SKEW - 16.0;
+            let size = texture.size_vec2();
+            let mut width = (brand_right - inner_left).min(420.0);
+            if short {
+                width = width.min(h * 0.11 * size.x / size.y);
+            }
+            let logo = Rect::from_min_size(pos2(inner_left, y), vec2(width, width * size.y / size.x));
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            // The drop shadow, unblurred.
+            painter.image(
+                texture.id(),
+                logo.translate(vec2(0.0, 6.0)),
+                uv,
+                hsla(28.0, 90.0, 14.0, 0.35),
+            );
+            painter.image(texture.id(), logo, uv, Color32::WHITE);
+            y += logo.height() + 16.0;
+        } else {
+            let brand_size = clamp_css(24.0, screen.width() * 0.026, 44.0);
+            let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
+            y += 14.0;
+            painter.galley(
+                pos2(inner_left + 3.0, y + 4.0),
+                brand.clone(),
+                hsla(30.0, 90.0, 32.0, 0.3),
+            );
+            painter.galley(pos2(inner_left, y), brand.clone(), ink());
+            y += brand.size().y + 6.0 + 16.0;
+        }
 
         // The steps, as keys.
         let hints = screen.width() > 1500.0;
