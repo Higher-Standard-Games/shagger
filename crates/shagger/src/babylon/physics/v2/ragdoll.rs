@@ -24,7 +24,7 @@ use rapier3d::prelude::{
 };
 
 use crate::loader::model::gltf_model::{NodeTransform, Skeleton};
-use crate::physics::physics_system::{PhysicsSystem, debris_groups, from_rapier, quat_from_rapier, to_rapier};
+use crate::physics::physics_system::{PhysicsSystem, debris_groups, to_rapier};
 
 /// `PhysicsConstraintType`, the two a ragdoll uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,11 +274,12 @@ impl Ragdoll {
         &self.bodies
     }
 
-    /// The root box's world position.
+    /// The root box's world position, as drawn (between substeps).
     #[must_use]
     pub fn root_position(&self, physics: &PhysicsSystem) -> Option<Vec3> {
-        let body = physics.world.bodies.get(self.get_aggregate(self.root_bone_index)?)?;
-        Some(from_rapier(body.translation()))
+        physics
+            .interpolated(self.get_aggregate(self.root_bone_index)?)
+            .map(|(at, _)| at)
     }
 
     /// `ragdoll()`: joints on, bodies dynamic.
@@ -327,10 +328,10 @@ impl Ragdoll {
         let order =
             std::iter::once(self.root_bone_index).chain((0..self.bones.len()).filter(|&i| i != self.root_bone_index));
         for i in order {
-            let Some(body) = physics.world.bodies.get(self.bodies[i]) else {
+            // Drawn between substeps, so the limbs glide at any frame rate.
+            let Some((position, q_phys)) = physics.interpolated(self.bodies[i]) else {
                 continue;
             };
-            let q_phys = quat_from_rapier(*body.rotation());
             // `_setBodyOrientationToBone`: qphys * qmesh * qbind, in world
             // space; brought into the bone's parent's space.
             let world_rotation = q_phys * q_mesh * self.initial_rotation2[i];
@@ -340,7 +341,7 @@ impl Ragdoll {
             if let Some(local) = locals.get_mut(node) {
                 local.rotation = (rotation_of(parent).inverse() * model_rotation).normalize();
                 if i == self.root_bone_index {
-                    let model = inverse_root.transform_point3(from_rapier(body.translation()));
+                    let model = inverse_root.transform_point3(position);
                     local.translation = parent.inverse().transform_point3(model);
                 }
             }
@@ -363,6 +364,7 @@ impl Ragdoll {
 mod tests {
     use super::*;
     use crate::loader::model::gltf_model::SkeletonNode;
+    use crate::physics::physics_system::from_rapier;
 
     /// A two-bone chain: hips at 10 up, a leg 5 below it.
     fn chain() -> (Skeleton, Vec<NodeTransform>) {
@@ -437,7 +439,7 @@ mod tests {
         assert!(hips.y < 0.0, "fell under gravity to {hips}");
         assert!((locals[0].translation - hips).length() < 1e-4);
         // The joint holds the leg 5 under the hips.
-        let leg = from_rapier(physics.world.bodies[ragdoll.bodies()[1]].translation());
+        let (leg, _) = physics.interpolated(ragdoll.bodies()[1]).unwrap();
         assert!(((leg - hips).length() - 5.0).abs() < 0.5, "leg {leg} hips {hips}");
         ragdoll.dispose(&mut physics);
         assert_eq!(physics.body_count(), 0);

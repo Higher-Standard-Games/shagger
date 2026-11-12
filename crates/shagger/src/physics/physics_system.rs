@@ -10,14 +10,20 @@
 //!
 //! What changed: Havok steps with the frame's delta; rapier steps fixed
 //! 1/60 s substeps here ([`PhysicsSystem::step`]), so a ragdoll falls the
-//! same at any frame rate. `createBspCollision` makes one trimesh per child
+//! same at any frame rate, and [`PhysicsSystem::interpolated`] blends each
+//! body between its last two substeps by the time left over, so a body
+//! moves smoothly on a display faster than 60 Hz rather than stepping on
+//! some frames and standing on others. `createBspCollision` makes one trimesh per child
 //! mesh of the world; here one trimesh holds every drawn batch. Ragdoll
 //! boxes collide with the map only (Havok lets a ragdoll's boxes push each
 //! other apart, which rapier turns explosive where they start overlapped).
 
+use std::collections::HashMap;
+
 use glam::{Quat, Vec3};
 use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, Group, InteractionGroups, InteractionTestMode, PhysicsWorld, Rotation, Vector,
+    ColliderBuilder, ColliderHandle, Group, InteractionGroups, InteractionTestMode, PhysicsWorld, RigidBodyHandle,
+    Rotation, Vector,
 };
 
 use crate::rendering::world_geometry::WorldGeometry;
@@ -96,6 +102,8 @@ pub struct PhysicsSystem {
     pub world: PhysicsWorld,
     bsp_collision: Vec<ColliderHandle>,
     accumulator: f64,
+    /// Each moving body's pose before the last substep.
+    previous: HashMap<RigidBodyHandle, (Vec3, Quat)>,
 }
 
 impl PhysicsSystem {
@@ -110,6 +118,7 @@ impl PhysicsSystem {
             world,
             bsp_collision: Vec::new(),
             accumulator: 0.0,
+            previous: HashMap::new(),
         }
     }
 
@@ -168,6 +177,15 @@ impl PhysicsSystem {
         self.accumulator += dt.max(0.0);
         let mut steps = 0;
         while self.accumulator >= FIXED_STEP && steps < MAX_SUBSTEPS {
+            self.previous.clear();
+            for (handle, body) in self.world.bodies.iter() {
+                if !body.is_fixed() {
+                    self.previous.insert(
+                        handle,
+                        (from_rapier(body.translation()), quat_from_rapier(*body.rotation())),
+                    );
+                }
+            }
             self.world.step();
             self.accumulator -= FIXED_STEP;
             steps += 1;
@@ -176,6 +194,28 @@ impl PhysicsSystem {
             self.accumulator = self.accumulator.min(FIXED_STEP);
         }
         steps
+    }
+
+    /// How far the clock is between the last substep and the next, 0 to 1.
+    #[must_use]
+    pub fn alpha(&self) -> f32 {
+        (self.accumulator / FIXED_STEP).clamp(0.0, 1.0) as f32
+    }
+
+    /// `body`'s pose for drawing: blended from before the last substep to
+    /// after it by [`Self::alpha`]. A body that has not stepped yet stands
+    /// where it is.
+    #[must_use]
+    pub fn interpolated(&self, body: RigidBodyHandle) -> Option<(Vec3, Quat)> {
+        let now = self.world.bodies.get(body)?;
+        let (position, rotation) = (from_rapier(now.translation()), quat_from_rapier(*now.rotation()));
+        Some(match self.previous.get(&body) {
+            Some(&(p, r)) => {
+                let t = self.alpha();
+                (p.lerp(position, t), r.slerp(rotation, t))
+            }
+            None => (position, rotation),
+        })
     }
 
     /// How many dynamic or kinematic bodies the world holds.
@@ -211,6 +251,27 @@ mod tests {
         assert!((y - 5.0).abs() < 1.0, "rests on the floor, at {y}");
         physics.dispose_bsp_collision();
         assert!(!physics.has_bsp_collision());
+    }
+
+    #[test]
+    fn drawing_blends_between_the_last_two_substeps() {
+        let mut physics = PhysicsSystem::new(0.0);
+        let (body, _) = physics.world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.0, 0.0, 0.0))
+                .linvel(Vector::new(60.0, 0.0, 0.0)),
+            ColliderBuilder::ball(1.0).collision_groups(debris_groups()),
+        );
+        let x = |p: &PhysicsSystem| p.interpolated(body).map(|(at, _)| at.x).unwrap();
+        assert_eq!(x(&physics), 0.0, "not stepped yet: where it is");
+        physics.step(FIXED_STEP);
+        assert!((x(&physics)).abs() < 1e-4, "just stepped: still before");
+        physics.step(0.5 * FIXED_STEP);
+        assert!((x(&physics) - 0.5).abs() < 1e-3, "halfway: {}", x(&physics));
+        physics.step(0.25 * FIXED_STEP);
+        assert!((x(&physics) - 0.75).abs() < 1e-3, "three quarters: {}", x(&physics));
+        physics.step(0.25 * FIXED_STEP);
+        assert!((x(&physics) - 1.0).abs() < 1e-3, "next step: {}", x(&physics));
     }
 
     #[test]
