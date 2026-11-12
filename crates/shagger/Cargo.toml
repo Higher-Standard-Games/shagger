@@ -50,6 +50,9 @@ swash = "0.2"
 # wgpu device, fed winit's events. Without clipboard and links, which bring
 # in arboard and webbrowser; the game window does without both for now.
 egui = "0.37"
+# Glyph outlines for stroked display text (`-webkit-text-stroke`); egui
+# already builds on it.
+skrifa = "0.44"
 egui-wgpu = { version = "0.37", default-features = false }
 egui-winit = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }

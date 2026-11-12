@@ -3983,6 +3983,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shagger_shared",
+ "skrifa",
  "swash",
  "tokio",
  "tokio-tungstenite",
