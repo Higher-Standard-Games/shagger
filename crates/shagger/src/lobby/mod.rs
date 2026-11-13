@@ -4,5 +4,4 @@
 pub mod lobby_client;
 pub mod player_identity;
 pub mod settings_sync;
-pub mod storage_mirror;
 pub mod types;
