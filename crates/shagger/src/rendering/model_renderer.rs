@@ -128,6 +128,16 @@ pub struct ModelDraw {
     /// culling of an active mesh). False for a draw its joints carry away
     /// from `world` (a ragdoll's bones), whose box says nothing.
     pub cull: bool,
+    /// A light that reaches only this draw (Babylon's `includedOnlyMeshes`).
+    pub key_light: Option<KeyLight>,
+}
+
+/// A `HemisphericLight` of a draw's own: white from `direction` (up, as
+/// set), black from the opposite side, at `intensity`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyLight {
+    pub direction: Vec3,
+    pub intensity: f32,
 }
 
 /// SHAG `BladeEnvironment`: a small grey cube, brighter toward the sky, as
@@ -158,6 +168,7 @@ impl ModelDraw {
             outline: None,
             reflection: None,
             cull: true,
+            key_light: None,
         }
     }
 }
@@ -188,6 +199,8 @@ struct DrawUniform {
     uv_rows: [f32; 4],
     uv_origin: [f32; 4],
     reflection: [f32; 4],
+    /// xyz: the key light's direction (normalized), w: its intensity (0 none).
+    key_light: [f32; 4],
 }
 
 #[repr(C)]
@@ -1275,6 +1288,9 @@ impl ModelRenderer {
                 reflection: draw
                     .reflection
                     .map_or([0.0; 4], |r| r.color.extend(r.intensity.max(0.0)).into()),
+                key_light: draw.key_light.map_or([0.0; 4], |k| {
+                    k.direction.normalize_or_zero().extend(k.intensity.max(0.0)).into()
+                }),
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }

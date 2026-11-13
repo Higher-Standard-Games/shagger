@@ -18,6 +18,7 @@ pub mod gpu;
 pub mod hdr_target;
 pub mod hud_2d_renderer;
 pub mod model_renderer;
+pub mod model_stage;
 pub mod offscreen;
 pub mod player_outline_smoothing;
 pub mod render_toggles;

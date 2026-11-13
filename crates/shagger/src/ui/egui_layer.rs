@@ -6,6 +6,8 @@
 //! [`EguiLayer::run`], then [`EguiLayer::paint`] it into a render pass over
 //! whatever the game drew.
 
+use std::sync::{Arc, Mutex};
+
 pub use egui;
 use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
 use winit::event::WindowEvent;
@@ -18,6 +20,57 @@ pub struct EguiFrame {
     primitives: Vec<egui::ClippedPrimitive>,
     textures: egui::TexturesDelta,
     pixels_per_point: f32,
+}
+
+/// Work for the GPU that a widget asks for while it is laid out, such as
+/// drawing a model into an image ([`crate::rendering::model_stage`]). It runs
+/// in [`EguiLayer::paint`], before egui draws, with the frame's encoder and
+/// the layer's images.
+pub type GpuJob = Box<dyn FnOnce(&Gpu, &mut wgpu::CommandEncoder, &mut NativeTextures<'_>) + Send>;
+
+/// The jobs waiting for the next paint, kept in the context's memory so any
+/// widget with a `Ui` can add one.
+#[derive(Clone, Default)]
+struct GpuJobs(Arc<Mutex<Vec<GpuJob>>>);
+
+fn gpu_jobs(ctx: &egui::Context) -> GpuJobs {
+    ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<GpuJobs>(egui::Id::NULL.with("shagger-gpu-jobs"))
+            .clone()
+    })
+}
+
+/// Asks the next [`EguiLayer::paint`] of this context to run `job`.
+pub fn queue_gpu_job(ctx: &egui::Context, job: GpuJob) {
+    if let Ok(mut jobs) = gpu_jobs(ctx).0.lock() {
+        jobs.push(job);
+    }
+}
+
+/// Images drawn on the GPU (`Rgba8Unorm`, premultiplied, as egui takes
+/// them), shown through egui by their id.
+pub struct NativeTextures<'a> {
+    renderer: &'a mut Renderer,
+    device: &'a wgpu::Device,
+}
+
+impl NativeTextures<'_> {
+    /// Shows `view` under a new id, filtered linearly.
+    pub fn register(&mut self, view: &wgpu::TextureView) -> egui::TextureId {
+        self.renderer
+            .register_native_texture(self.device, view, wgpu::FilterMode::Linear)
+    }
+
+    /// Shows `view` under an id [`Self::register`] gave.
+    pub fn update(&mut self, id: egui::TextureId, view: &wgpu::TextureView) {
+        self.renderer
+            .update_egui_texture_from_wgpu_texture(self.device, view, wgpu::FilterMode::Linear, id);
+    }
+
+    /// Lets go of an id [`Self::register`] gave.
+    pub fn free(&mut self, id: egui::TextureId) {
+        self.renderer.free_texture(&id);
+    }
 }
 
 pub struct EguiLayer {
@@ -101,6 +154,19 @@ impl EguiLayer {
             size_in_pixels: size,
             pixels_per_point: frame.pixels_per_point,
         };
+        let jobs = std::mem::take(
+            &mut *gpu_jobs(&self.ctx)
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut textures = NativeTextures {
+            renderer: &mut self.renderer,
+            device: &gpu.device,
+        };
+        for job in jobs {
+            job(gpu, encoder, &mut textures);
+        }
         for (id, deltas) in &frame.textures.set {
             for delta in deltas {
                 self.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
