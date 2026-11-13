@@ -11,7 +11,13 @@
 //!
 //! The browser's thin-instanced plane per shader is an [`EffectQuadBatch`]
 //! per shader here, blending premultiplied: an additive stage writes no
-//! alpha, which is `ALPHA_ADD`.
+//! alpha, which is `ALPHA_ADD`. The sprites are unlit, the image times the
+//! stage tint (the browser's emissive), and draw between the map's
+//! alpha-blended surfaces and its additive ones (`PARTICLE_ALPHA_INDEX`,
+//! [`WorldRenderer::draw_visible_additive`]), so additive glass in front of
+//! a puff adds over it.
+//!
+//! [`WorldRenderer::draw_visible_additive`]: crate::rendering::world_renderer::WorldRenderer::draw_visible_additive
 
 use glam::DVec3;
 

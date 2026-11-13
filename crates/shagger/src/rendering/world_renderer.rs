@@ -273,6 +273,8 @@ pub struct WorldRenderer {
     passes: Vec<DrawPass>,
     /// The opaque passes lead `passes`; this many of them.
     opaque_count: usize,
+    /// Where the additive passes start, after the other blended ones.
+    additive_start: usize,
     animations: Vec<PassAnimation>,
     /// `ShaderAnimationSystem.totalTime`.
     total_time: f64,
@@ -1063,7 +1065,8 @@ impl WorldRenderer {
                         batch: batch_index,
                     };
                     if layer.key.blend != Blend::Opaque {
-                        blended.push((pass, animation));
+                        let additive = matches!(layer.key.blend, Blend::OneOne | Blend::Add);
+                        blended.push((pass, animation, additive));
                     } else {
                         opaque.push((pass, animation));
                     }
@@ -1072,9 +1075,16 @@ impl WorldRenderer {
         }
         let texture_count = views.len() - 3;
         let opaque_count = opaque.len();
+        // `BspMeshBuilder`'s alpha indices: blended surfaces 0-999, additive
+        // ones from 1000, so the additive draw last.
+        blended.sort_by_key(|(_, _, additive)| *additive);
+        let additive_start = opaque_count + blended.iter().filter(|(_, _, additive)| !additive).count();
         let mut passes = Vec::new();
         let mut animations = Vec::new();
-        for (pass, animation) in opaque.into_iter().chain(blended) {
+        for (pass, animation) in opaque
+            .into_iter()
+            .chain(blended.into_iter().map(|(pass, animation, _)| (pass, animation)))
+        {
             if let Some(mut animation) = animation {
                 animation.pass = passes.len();
                 animations.push(animation);
@@ -1171,6 +1181,7 @@ impl WorldRenderer {
             missing,
             passes,
             opaque_count,
+            additive_start,
             animations,
             total_time: 0.0,
             noise_seed: 0x9e37_79b9_7f4a_7c15,
@@ -1429,6 +1440,18 @@ impl WorldRenderer {
     /// draw after every opaque surface (the world's and the models').
     pub fn draw_visible_blended(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
         self.draw_passes(pass, visible, self.opaque_count..self.passes.len());
+    }
+
+    /// The blended passes that are not additive (alpha indices 0-999).
+    pub fn draw_visible_alpha_blended(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, self.opaque_count..self.additive_start);
+    }
+
+    /// The additive passes (alpha indices from 1000), which draw over
+    /// whatever sits between them and the other blended ones (map
+    /// particles, `PARTICLE_ALPHA_INDEX`).
+    pub fn draw_visible_additive(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, self.additive_start..self.passes.len());
     }
 
     fn draw_passes(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool], range: std::ops::Range<usize>) {

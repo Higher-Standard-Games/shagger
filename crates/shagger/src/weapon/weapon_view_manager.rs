@@ -316,18 +316,34 @@ pub fn view_material_mode(weapon: &str, material: &ModelMaterial) -> ModelMateri
 pub const WEAPON_OUTLINE_WIDTH: f32 = 0.15;
 
 /// `applyWeaponOutlines`: a black outline on every layer but the added
-/// light ones, its width divided by the root's scale (GLB weapons are
-/// scaled up, so outlines would read thicker).
+/// light ones, its width divided by [`outline_units`] (an outline is pushed
+/// out in the mesh's own units, so it draws equally thick on every weapon).
 #[must_use]
-pub fn weapon_outline(mode: &ModelMaterialMode, root_scale: f64) -> Option<Outline> {
+pub fn weapon_outline(mode: &ModelMaterialMode, units: f64) -> Option<Outline> {
     if *mode == ModelMaterialMode::AddedLight {
         return None;
     }
-    let scale = if root_scale == 0.0 { 1.0 } else { root_scale as f32 };
+    let scale = if units == 0.0 || units.is_nan() {
+        1.0
+    } else {
+        units as f32
+    };
     Some(Outline {
         color: Vec3::ZERO,
         width: WEAPON_OUTLINE_WIDTH / scale,
     })
+}
+
+/// `outlineUnits`: world units one unit of a view mesh spans below the
+/// camera, the root's scale times the mesh's own under it (`node_matrix`,
+/// its world scale over the root's). The blade model's meshes sit under a
+/// 0.13 node scale inside a 30x root, the guns' directly under a 2x one.
+#[must_use]
+pub fn outline_units(root_scale: f64, node_matrix: Mat4) -> f64 {
+    let ratio = f64::from(node_matrix.x_axis.truncate().length());
+    let ratio = if ratio == 0.0 || ratio.is_nan() { 1.0 } else { ratio };
+    let root = root_scale.abs();
+    (if root == 0.0 { 1.0 } else { root }) * ratio
 }
 
 /// What `presentFire` reads from the weapon's definition.
@@ -919,6 +935,18 @@ mod tests {
     }
 
     #[test]
+    fn outlines_are_normalized_by_each_meshs_own_scale() {
+        // The blade's meshes under a 0.13 node inside a 30x root, a gun's
+        // directly under a 2x root (`outlineUnits`).
+        let blade = outline_units(30.0, Mat4::from_scale(Vec3::new(0.13, 0.13, -0.13)));
+        assert!((blade - 3.9).abs() < 1e-5, "{blade}");
+        assert_eq!(outline_units(2.0, Mat4::IDENTITY), 2.0);
+        assert_eq!(outline_units(0.0, Mat4::IDENTITY), 1.0);
+        let width = weapon_outline(&ModelMaterialMode::Lit, blade).unwrap().width;
+        assert!((f64::from(width) * blade - f64::from(WEAPON_OUTLINE_WIDTH)).abs() < 1e-6);
+    }
+
+    #[test]
     fn aiming_a_blade_charges_it() {
         let blade_def = ViewModelDef {
             melee: true,
@@ -939,7 +967,7 @@ mod tests {
         }
         assert_eq!(blade.charge.progress, 1.0);
         let width = blade.charge_outline.unwrap().width;
-        assert!((width - 4.8).abs() < 1e-5, "{width}");
+        assert!((width - 0.6).abs() < 1e-5, "{width}");
         blade.update(&ViewModelInput { aiming: false, ..hold });
         assert!(blade.charge_outline.is_none());
         assert_eq!(blade.charge.progress, 0.0);

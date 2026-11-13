@@ -63,8 +63,9 @@ impl WeaponCharge {
             y: (now * 0.001 * shake_freq * 1.3).cos() * shake_intensity * 0.7,
         };
 
-        // Turquoise pulsing outline.
-        let (outline_min, outline_max) = (0.6, 4.8);
+        // Turquoise pulsing outline, in world units: from the normal weapon
+        // outline width to four times it at full charge.
+        let (outline_min, outline_max) = (0.15, 0.6);
         let width = outline_min + self.progress * (outline_max - outline_min);
         let pulse_rate = 4.0 + self.progress * 8.0;
         let pulse = 0.6 + 0.4 * (now * 0.001 * pulse_rate * std::f64::consts::PI * 2.0).sin();
@@ -96,12 +97,12 @@ mod tests {
         assert_eq!(charge.progress, 0.0);
         // No shake at the start, and the thinnest outline.
         assert_eq!(start.shake, ChargeShake::default());
-        assert!((start.outline.unwrap().width - 0.6).abs() < 1e-6);
+        assert!((start.outline.unwrap().width - 0.15).abs() < 1e-6);
         charge.update(true, 1.0, 1500.0);
         assert!((charge.progress - 0.5).abs() < 1e-12);
         let full = charge.update(true, 1.0, 3000.0);
         assert_eq!(charge.progress, 1.0);
-        assert!((full.outline.unwrap().width - 4.8).abs() < 1e-6);
+        assert!((full.outline.unwrap().width - 0.6).abs() < 1e-6);
         let released = charge.update(false, 1.0, 3100.0);
         assert_eq!(released, ChargeFrame::default());
         assert_eq!(charge.progress, 0.0);
