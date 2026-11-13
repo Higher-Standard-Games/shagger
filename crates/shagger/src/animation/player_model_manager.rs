@@ -51,6 +51,8 @@ use crate::loader::model::gltf_model::{GltfModel, NodeTransform, Skeleton};
 /// The gameplay hull's height (`PLAYER_HEIGHT`).
 pub const PLAYER_HEIGHT: f32 = 64.0;
 
+/// The victory dances, each optional (`DANCE_ANIMS`).
+pub const DANCE_ANIMS: [&str; 3] = ["dance_1", "dance_2", "dance_3"];
 /// The clip the blade's stance loops (`BLADE_STANCE`).
 pub const BLADE_STANCE: &str = "blade_idle";
 

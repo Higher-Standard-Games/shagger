@@ -68,6 +68,9 @@ struct Draw {
     uv_origin: vec4f,
     // The reflection fill: rgb its colour, w environmentIntensity (0 none).
     reflection: vec4f,
+    // A hemispheric light of the draw's own: xyz its direction, w its
+    // intensity (0 none); white above, black below.
+    key_light: vec4f,
 };
 
 struct Material {
@@ -283,6 +286,12 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
                 diffuse += light.diffuse.rgb * ndl * diffuse_brdf(ndl, n_dot_v, vdh, roughness);
                 specular += specular_brdf(n, v, l, ndl, n_dot_v, roughness, f0) * light.diffuse.rgb;
             }
+        }
+        if draw.key_light.w > 0.0 {
+            let ndl = clamp(dot(n, draw.key_light.xyz) * 0.5 + 0.5, 1e-6, 1.0);
+            let light = vec3f(draw.key_light.w);
+            diffuse += light * ndl;
+            specular += specular_brdf(n, v, draw.key_light.xyz, ndl, n_dot_v, roughness, f0) * light;
         }
         // The cluster's point lights: physical (inverse square) falloff,
         // inside the range the cluster culls them to.

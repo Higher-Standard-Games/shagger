@@ -54,6 +54,11 @@ struct Draw {
     // xy: the matrix origin; z: the texture's level; w: the alpha override
     // plus one (0 for none).
     uv_origin: vec4f,
+    // The lit models' reflection fill, unused here.
+    reflection: vec4f,
+    // A hemispheric light of the draw's own: xyz its direction, w its
+    // intensity (0 none); white above, black below.
+    key_light: vec4f,
 };
 
 struct Material {
@@ -185,6 +190,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
                 let spec = pow(max(0.0, dot(normal, angle)), max(1.0, glossiness));
                 specular_base += spec * light.specular.rgb;
             }
+        }
+        if draw.key_light.w > 0.0 {
+            let ndl = dot(normal, draw.key_light.xyz) * 0.5 + 0.5;
+            let light = vec3f(draw.key_light.w);
+            diffuse_base += light * ndl;
+            let angle = normalize(view_direction + draw.key_light.xyz);
+            specular_base += pow(max(0.0, dot(normal, angle)), max(1.0, glossiness)) * light;
         }
         // The cluster's point lights: computeLighting with a linear falloff
         // to each light's range.
