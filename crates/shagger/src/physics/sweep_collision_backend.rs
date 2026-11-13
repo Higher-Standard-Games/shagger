@@ -195,7 +195,29 @@ impl SweepCollisionBackend {
             brush_model_brushes.extend(range(m.first_brush, m.num_brushes));
             brush_model_faces.extend(range(m.first_face, m.num_faces));
         }
-        let definitions = extract_lifts(&bsp.entities, &bsp.models);
+        // A shootable button's brushes, as boxes a direct hit must land on.
+        let brush_boxes = |model_index: usize| {
+            let mut boxes = Vec::new();
+            let Some(model) = bsp.models.get(model_index) else {
+                return boxes;
+            };
+            for b in range(model.first_brush, model.num_brushes) {
+                let Some(brush) = get(&bsp.brushes, b) else { continue };
+                let mut planes = Vec::new();
+                for i in range(brush.first_side, brush.num_sides) {
+                    let plane = get(&bsp.brush_sides, i).and_then(|side| get(&bsp.planes, side.plane_index));
+                    if let Some(plane) = plane {
+                        planes.extend(plane_normal(plane.normal));
+                        planes.push(f64::from(plane.dist));
+                    }
+                }
+                if let Some(bounds) = plane_bounds(&planes, 0, planes.len() / 4, false) {
+                    boxes.push(([bounds[0], bounds[1], bounds[2]], [bounds[3], bounds[4], bounds[5]]));
+                }
+            }
+            boxes
+        };
+        let definitions = extract_lifts(&bsp.entities, &bsp.models, Some(&brush_boxes));
         let mut lift_brushes = HashMap::new();
         let mut lift_faces = HashSet::new();
         for d in &definitions {
@@ -204,6 +226,17 @@ impl SweepCollisionBackend {
                 lift_brushes.insert(i, d.model_index);
             }
             lift_faces.extend(range(m.first_face, m.num_faces));
+        }
+        let lifts = LiftSystem::new(definitions);
+        // A button is solid where it stands, pressed or not; it is traced on
+        // its own like a lift.
+        for button in &lifts.buttons {
+            let m = &bsp.models[button.model_index];
+            if lift_brushes.contains_key(&i64::from(m.first_brush)) {
+                continue;
+            }
+            brush_model_brushes.extend(range(m.first_brush, m.num_brushes));
+            brush_model_faces.extend(range(m.first_face, m.num_faces));
         }
         let collision_textures = bsp
             .textures
@@ -249,7 +282,7 @@ impl SweepCollisionBackend {
         let faces = bsp.faces.len();
         let mut backend = Self {
             bsp,
-            lifts: Some(LiftSystem::new(definitions)),
+            lifts: Some(lifts),
             brush_models: Some(brush_models),
             brush_model_brushes,
             brush_model_faces,
@@ -658,6 +691,22 @@ impl SweepCollisionBackend {
                 state.start = [q3_start[0] - origin.x, q3_start[1] - origin.z, q3_start[2] - origin.y];
                 state.end = [q3_end[0] - origin.x, q3_end[1] - origin.z, q3_end[2] - origin.y];
                 let model = self.bsp.models[model_index];
+                self.trace_model_brushes(&model, &mut state);
+            }
+        }
+        if let Some(lifts) = lifts {
+            for button in &lifts.buttons {
+                let model_index = button.model_index as i64;
+                if model_index == exclude_model || (only_model >= 0 && model_index != only_model) {
+                    continue;
+                }
+                let model = self.bsp.models[button.model_index];
+                if self.lift_brushes.contains_key(&i64::from(model.first_brush)) {
+                    continue;
+                }
+                let press = lifts.button_offset(button.model_index);
+                state.start = [q3_start[0] - press.x, q3_start[1] - press.z, q3_start[2] - press.y];
+                state.end = [q3_end[0] - press.x, q3_end[1] - press.z, q3_end[2] - press.y];
                 self.trace_model_brushes(&model, &mut state);
             }
         }

@@ -970,7 +970,7 @@ impl WorldRenderer {
                         model: batch
                             .mover
                             .and_then(|m| geometry.movers.get(m))
-                            .map_or(Mat4::IDENTITY, |m| m.transform(0.0, None))
+                            .map_or(Mat4::IDENTITY, |m| m.transform(0.0, None, None))
                             .to_cols_array_2d(),
                     };
                     let cube = layer
@@ -1316,10 +1316,17 @@ impl WorldRenderer {
     }
 
     /// Moves the movers' batches by `delta_seconds`: the rotators turn
-    /// (`handleFuncRotating`'s `mesh.rotate` each frame) and each lift
-    /// stands where `travel(model_index)`, the lift system's travel for its
-    /// model, puts it, or at rest without one (`handleLift`).
-    pub fn move_movers(&mut self, gpu: &Gpu, delta_seconds: f64, travel: impl Fn(usize) -> Option<f64>) {
+    /// (`handleFuncRotating`'s `mesh.rotate` each frame), each lift stands
+    /// where `travel(model_index)`, the lift system's travel for its model,
+    /// puts it, or at rest without one (`handleLift`), and each button is
+    /// pressed in by `press(model_index)` (`handleButton`).
+    pub fn move_movers(
+        &mut self,
+        gpu: &Gpu,
+        delta_seconds: f64,
+        travel: impl Fn(usize) -> Option<f64>,
+        press: impl Fn(usize) -> Option<[f64; 3]>,
+    ) {
         if self.movers.is_empty() {
             return;
         }
@@ -1327,7 +1334,10 @@ impl WorldRenderer {
         let transforms: Vec<[[f32; 4]; 4]> = self
             .movers
             .iter()
-            .map(|m| m.transform(self.mover_time, travel(m.model_index)).to_cols_array_2d())
+            .map(|m| {
+                m.transform(self.mover_time, travel(m.model_index), press(m.model_index))
+                    .to_cols_array_2d()
+            })
             .collect();
         for pass in &mut self.passes {
             let Some(mover) = self.batch_movers.get(pass.batch).copied().flatten() else {
