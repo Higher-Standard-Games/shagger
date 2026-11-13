@@ -417,7 +417,7 @@ pub fn paint_brand(
         let brand_size = clamp_css(24.0, screen_width * 0.026, 44.0);
         let brand = text(painter, &style.brand, brand_size, style.display.clone(), ink(), 0.0);
         let y = top + 14.0;
-        painter.galley(
+        painter.galley_with_override_text_color(
             pos2(inner_left + 3.0, y + 4.0),
             brand.clone(),
             hsla(30.0, 90.0, 32.0, 0.3).gamma_multiply(alpha),
@@ -648,6 +648,13 @@ pub fn gradient_polygon(painter: &Painter, points: &[Pos2], stops: &[(f32, Color
     let (y0, y1) = points
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+    gradient_polygon_in(painter, points, y0, y1, stops);
+}
+
+/// [`gradient_polygon`] with the gradient running from `y0` to `y1` rather
+/// than over the polygon's own height: a piece of a larger shape (a concave
+/// shape cut into convex parts) filled as the whole would be.
+pub fn gradient_polygon_in(painter: &Painter, points: &[Pos2], y0: f32, y1: f32, stops: &[(f32, Color32)]) {
     let color_at = |y: f32| {
         let t = ((y - y0) / (y1 - y0).max(1.0)).clamp(0.0, 1.0);
         let i = stops.iter().rposition(|(at, _)| *at <= t).unwrap_or(0);

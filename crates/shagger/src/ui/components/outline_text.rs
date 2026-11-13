@@ -104,7 +104,14 @@ pub fn paint_outline_text(
             };
             let settings = DrawSettings::unhinted(Size::new(size), LocationRef::default());
             if glyph.draw(settings, &mut pen).is_ok() {
-                for contour in pen.contours {
+                for mut contour in pen.contours {
+                    // A point twice in a row (a contour's closing point, a
+                    // curve ending where the next starts) has no direction,
+                    // and its join is drawn as a spike.
+                    contour.dedup_by(|a, b| a.distance(*b) < 0.01);
+                    if contour.len() > 2 && contour[0].distance(contour[contour.len() - 1]) < 0.01 {
+                        contour.pop();
+                    }
                     if contour.len() > 2 {
                         painter.add(Shape::closed_line(contour, stroke));
                     }

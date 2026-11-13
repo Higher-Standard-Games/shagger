@@ -129,8 +129,19 @@ impl LobbyClient {
         self.send(&message("auth", &[("key", key.and_then(s))]));
     }
 
+    /// Ask for a new name for this account; the answer is `identity:renamed`
+    /// or `identity:error`.
     pub fn rename(&self, name: &str) {
         self.send(&message("identity:rename", &[("name", s(name))]));
+    }
+
+    /// Delete this account for good; the answer is `identity:deleted` or
+    /// `identity:error`.
+    pub fn delete_account(&self, key: &str, confirmed: bool) {
+        self.send(&message(
+            "identity:delete",
+            &[("key", s(key)), ("confirmed", Some(Value::Bool(confirmed)))],
+        ));
     }
 
     // ── Chat ──
