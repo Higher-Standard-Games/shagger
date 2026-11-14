@@ -406,7 +406,7 @@ pub struct WorldRenderer {
     slab: UniformSlab,
 }
 
-fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
+pub(crate) fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
     let mut levels = vec![image.clone()];
     let mut current = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
         .expect("the pixel count matches the size");
@@ -457,6 +457,9 @@ pub(crate) fn upload_texture(gpu: &Gpu, label: &str, image: &Rgba8Image) -> wgpu
     let fitted = fit_to_device(gpu, image);
     let image = fitted.as_ref().unwrap_or(image);
     let levels = mip_chain(image);
+    if let Some(texture) = super::texture_compression::upload_bc7(gpu, label, &levels) {
+        return texture;
+    }
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {

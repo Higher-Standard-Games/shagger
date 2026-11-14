@@ -18,6 +18,8 @@ pub struct Gpu {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// The BC7 compressor, made with the first texture it compresses.
+    pub(crate) compressor: super::texture_compression::Compressor,
 }
 
 impl Gpu {
@@ -36,9 +38,12 @@ impl Gpu {
         // Timestamps where the GPU has them, for measuring its passes
         // (`washoi bench`); nothing else asks for them.
         let timing = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        // BC textures where the GPU samples them (every desktop GPU, Apple
+        // silicon included), for `texture_compression`.
+        let wanted = timing | wgpu::Features::TEXTURE_COMPRESSION_BC;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("shagger"),
-            required_features: adapter.features() & timing,
+            required_features: adapter.features() & wanted,
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             ..Default::default()
         }))
@@ -61,6 +66,7 @@ impl Gpu {
             adapter,
             device,
             queue,
+            compressor: super::texture_compression::Compressor::default(),
         })
     }
 

@@ -557,6 +557,16 @@ pub fn register_render_vars(cvars: &mut Cvars) {
             .range(0.0, 1.0)
             .kind(CvarType::Int),
     );
+    // Native only: SHAG uploads its textures as they decode.
+    cvars.register(
+        crate::rendering::texture_compression::CVAR,
+        1,
+        CvarOptions::describe(
+            "Compress map and model textures to BC7 (next map): 0 off, as the browser draws them; 1 on a GPU; 2 on a software renderer too",
+        )
+        .range(0.0, 2.0)
+        .kind(CvarType::Int),
+    );
 }
 
 /// `RenderVars.get`: a var's value, its default when unregistered.

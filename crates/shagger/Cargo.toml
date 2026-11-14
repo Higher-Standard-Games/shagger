@@ -32,6 +32,9 @@ image = { version = "0.25", default-features = false, features = ["webp", "tga",
 # The renderer (RUST.md 8.2, 21). wgpu 30 is the release egui 0.37 builds on,
 # so the HUD can share the device later (RUST.md 12 asks the versions agree).
 wgpu = "30"
+# Map and model textures compressed to BC7 on the GPU as they load (RUST.md
+# 20.6): Intel's ISPC compressor as WGSL compute shaders, no C++.
+block_compression = { version = "0.11", default-features = false, features = ["bc7", "wgpu"] }
 glam = { version = "0.34", features = ["bytemuck"] }
 # Ragdolls (RUST.md 8.2): rapier3d stands in for Havok on the client only;
 # the server never simulates bodies.
