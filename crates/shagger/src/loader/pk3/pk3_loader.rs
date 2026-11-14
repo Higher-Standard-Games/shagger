@@ -150,10 +150,8 @@ impl Pk3Loader {
     }
 
     /// `listFiles(pattern)`: the paths matching a glob, in [`Self::files`]
-    /// order. The TypeScript turns `*` into `.*` and `?` into `.` and leaves
-    /// the rest as a case-insensitive regular expression, so a `.` in the
-    /// pattern matches any character too; that is kept. Other regex syntax
-    /// is not supported and matches literally.
+    /// order, case-insensitively: `*` is any run of characters, `?` any one,
+    /// and everything else is literal.
     #[must_use]
     pub fn list_files(&self, pattern: &str) -> Vec<&str> {
         let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
@@ -176,14 +174,12 @@ impl Pk3Loader {
     }
 }
 
-/// `^pattern$` with `*` as `.*` and `.` and `?` as any one character.
+/// `^pattern$` with `*` as any run of characters and `?` as any one.
 fn glob_match(pattern: &[char], text: &[char]) -> bool {
     match pattern.split_first() {
         None => text.is_empty(),
         Some(('*', rest)) => (0..=text.len()).any(|skip| glob_match(rest, &text[skip..])),
-        Some((&p, rest)) => {
-            text.first().is_some_and(|&t| p == '.' || p == '?' || p == t) && glob_match(rest, &text[1..])
-        }
+        Some((&p, rest)) => text.first().is_some_and(|&t| p == '?' || p == t) && glob_match(rest, &text[1..]),
     }
 }
 
@@ -221,11 +217,14 @@ mod tests {
     }
 
     #[test]
-    fn globs_read_dots_as_any_character() {
+    fn globs_read_only_star_and_question_mark_as_wildcards() {
         let m = |p: &str, t: &str| glob_match(&p.chars().collect::<Vec<_>>(), &t.chars().collect::<Vec<_>>());
         assert!(m("scripts/*.shader", "scripts/a.shader"));
         assert!(m("scripts/*.shader", "scripts/sub/a.shader"));
-        assert!(m("scripts/*.shader", "scripts/xshader"));
+        assert!(!m("scripts/*.shader", "scripts/xshader"));
+        assert!(m("maps/dm?.bsp", "maps/dm5.bsp"));
+        assert!(m("a+(b).txt", "a+(b).txt"));
+        assert!(!m("a+(b).txt", "aa(b)xtxt"));
         assert!(!m("scripts/*.shader", "scripts/a.shader.txt"));
         assert!(!m("maps/*.bsp", "levelshots/a.bsp"));
     }

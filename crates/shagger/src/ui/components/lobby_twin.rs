@@ -680,6 +680,7 @@ pub fn gradient_polygon_in(painter: &Painter, points: &[Pos2], y0: f32, y1: f32,
             mesh.add_triangle(base, base + i, base + i + 1);
         }
     }
+    feather_convex(&mut mesh, points, |p| color_at(p.y), 1.0 / painter.pixels_per_point());
     painter.add(mesh);
 }
 
@@ -717,7 +718,58 @@ pub fn gradient_polygon_x(painter: &Painter, points: &[Pos2], stops: &[(f32, Col
             mesh.add_triangle(base, base + i, base + i + 1);
         }
     }
+    feather_convex(&mut mesh, points, |p| color_at(p.x), 1.0 / painter.pixels_per_point());
     painter.add(mesh);
+}
+
+/// Anti-aliases a convex polygon filled into `mesh` by hand, as egui
+/// feathers its own shapes: a fringe `width` wide (one physical pixel) all
+/// round the outline, from the edge's colour (`color_at`) to nothing.
+pub fn feather_convex(mesh: &mut Mesh, points: &[Pos2], color_at: impl Fn(Pos2) -> Color32, width: f32) {
+    let mut outline: Vec<Pos2> = Vec::with_capacity(points.len());
+    for &p in points {
+        if outline.last().is_none_or(|q: &Pos2| q.distance(p) > 1e-3) {
+            outline.push(p);
+        }
+    }
+    while outline.len() > 1 && outline[0].distance(outline[outline.len() - 1]) <= 1e-3 {
+        outline.pop();
+    }
+    let n = outline.len();
+    if n < 3 || width <= 0.0 {
+        return;
+    }
+    let centre = outline.iter().fold(Pos2::ZERO, |c, p| c + p.to_vec2()) / n as f32;
+    // Each edge's outward normal.
+    let normals: Vec<egui::Vec2> = (0..n)
+        .map(|i| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            let d = (b - a).normalized();
+            let normal = vec2(d.y, -d.x);
+            let mid = a + (b - a) * 0.5;
+            if normal.dot(mid - centre) < 0.0 {
+                -normal
+            } else {
+                normal
+            }
+        })
+        .collect();
+    let base = mesh.vertices.len() as u32;
+    for i in 0..n {
+        let (before, after) = (normals[(i + n - 1) % n], normals[i]);
+        // The mitre, so the fringe keeps its width round the corner.
+        let mitre = (before + after).normalized();
+        let cos = mitre.dot(after).max(0.25);
+        let p = outline[i];
+        mesh.colored_vertex(p, color_at(p));
+        mesh.colored_vertex(p + mitre * (width / cos), Color32::TRANSPARENT);
+    }
+    for i in 0..n as u32 {
+        let j = (i + 1) % n as u32;
+        let (inner_i, outer_i, inner_j, outer_j) = (base + 2 * i, base + 2 * i + 1, base + 2 * j, base + 2 * j + 1);
+        mesh.add_triangle(inner_i, outer_i, outer_j);
+        mesh.add_triangle(inner_i, outer_j, inner_j);
+    }
 }
 
 /// A rectangle filled left to right through `stops` (at 0..1 of its width).

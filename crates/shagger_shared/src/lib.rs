@@ -11,6 +11,7 @@ pub mod entities;
 pub mod fdlibm;
 pub mod js;
 pub mod json;
+pub mod math_random;
 pub mod net;
 pub mod server;
 pub mod settings;

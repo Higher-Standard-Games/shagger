@@ -24,6 +24,7 @@ pub mod player_outline_smoothing;
 pub mod render_toggles;
 pub mod render_vars;
 pub mod sky_renderer;
+pub mod texture_compression;
 pub mod water;
 pub mod world_culling;
 pub mod world_fog_controller;

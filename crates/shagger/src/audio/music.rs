@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::audio::audio_v2_sfx::AudioV2Sfx;
 use crate::audio::mixer::VoiceId;
 use crate::shared::json::{self, Value};
+use crate::shared::math_random::MathRandom;
 
 /// `PlaylistTrack`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +259,8 @@ pub struct MusicPlayer {
     playing_playlist: bool,
     track_index: usize,
     failed_attempts: usize,
-    rng: u64,
+    /// `Math.random` for the shuffle.
+    rng: MathRandom,
 }
 
 impl Default for MusicPlayer {
@@ -270,9 +272,6 @@ impl Default for MusicPlayer {
 impl MusicPlayer {
     #[must_use]
     pub fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |d| d.as_nanos() as u64);
         Self {
             current: None,
             fading_in: false,
@@ -286,21 +285,17 @@ impl MusicPlayer {
             playing_playlist: false,
             track_index: 0,
             failed_attempts: 0,
-            rng: seed | 1,
+            rng: MathRandom::from_entropy(),
         }
     }
 
     /// Seeds the shuffle (tests and offline renders).
     pub fn set_shuffle_seed(&mut self, seed: u64) {
-        self.rng = seed | 1;
+        self.rng = MathRandom::new(seed);
     }
 
     fn random(&mut self) -> f64 {
-        // xorshift64*: `Math.random` stands in, any spread will do.
-        self.rng ^= self.rng >> 12;
-        self.rng ^= self.rng << 25;
-        self.rng ^= self.rng >> 27;
-        (self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1u64 << 53) as f64
+        self.rng.next_f64()
     }
 
     #[must_use]

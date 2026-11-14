@@ -43,7 +43,7 @@ use crate::loader::bsp::mesh::lightmaps::scale_bsp_vertex_colors;
 use crate::loader::bsp::mesh::pvs::build_face_clusters;
 use crate::loader::bsp::mesh::tangents::build_bsp_tangents;
 use shagger_shared::bsp::brush_model_state::extract_brush_models;
-use shagger_shared::bsp::lift_system::extract_lifts;
+use shagger_shared::bsp::lift_system::{LiftSystem, extract_lifts};
 
 use crate::loader::bsp::ambient_entity_handlers::{RotationPlan, rotation_pivot, rotation_plan};
 
@@ -170,14 +170,18 @@ pub enum MoverKind {
     /// `handleLift`: at its origin raised by the lift system's travel for
     /// its model (`LiftSystem.offset`), or by its start until there is one.
     Lift { origin: [f64; 3], start: f64 },
+    /// `handleButton`: a `func_button`'s brush, moved by how far it is
+    /// pressed in (`LiftSystem.buttonOffset`), up to `push` (zero for a
+    /// button that calls nothing).
+    Button { push: [f64; 3] },
 }
 
 impl Mover {
     /// Its world matrix (engine space): `seconds` since the map loaded
     /// turn a spinning rotator; `travel` is the lift system's travel for a
-    /// lift's model, if it has one.
+    /// lift's model, if it has one; `press` how far a button is pressed in.
     #[must_use]
-    pub fn transform(&self, seconds: f64, travel: Option<f64>) -> glam::Mat4 {
+    pub fn transform(&self, seconds: f64, travel: Option<f64>, press: Option<[f64; 3]>) -> glam::Mat4 {
         use glam::{DVec3, Mat4, Quat};
         match self.kind {
             MoverKind::Rotating { plan, pivot, position } => {
@@ -196,6 +200,7 @@ impl Mover {
             MoverKind::Lift { origin, start } => {
                 Mat4::from_translation(DVec3::new(origin[0], origin[1] + travel.unwrap_or(start), origin[2]).as_vec3())
             }
+            MoverKind::Button { .. } => Mat4::from_translation(DVec3::from(press.unwrap_or([0.0; 3])).as_vec3()),
         }
     }
 
@@ -230,11 +235,19 @@ impl Mover {
                 out[1][1] += high as f32;
                 out
             }
+            MoverKind::Button { push } => {
+                let mut out = bounds;
+                for k in 0..3 {
+                    out[0][k] += push[k].min(0.0) as f32;
+                    out[1][k] += push[k].max(0.0) as f32;
+                }
+                out
+            }
         }
     }
 }
 
-/// The map's movers (`func_rotating`, then the lifts) with their lift
+/// The map's movers (`func_rotating`, the lifts, then the buttons) with their lift
 /// travel (start, end; zero for a rotator).
 fn find_movers(bsp: &BspFile) -> Vec<(Mover, (f64, f64))> {
     let mut out = Vec::new();
@@ -264,7 +277,8 @@ fn find_movers(bsp: &BspFile) -> Vec<(Mover, (f64, f64))> {
             (0.0, 0.0),
         ));
     }
-    for lift in extract_lifts(&bsp.entities, &bsp.models) {
+    let lifts = extract_lifts(&bsp.entities, &bsp.models, None);
+    for lift in &lifts {
         if out.iter().any(|(m, _)| m.model_index == lift.model_index) {
             continue;
         }
@@ -278,6 +292,33 @@ fn find_movers(bsp: &BspFile) -> Vec<(Mover, (f64, f64))> {
                 },
             },
             (lift.start, lift.end),
+        ));
+    }
+    // `handleButton`: every `func_button` brush, pressing in when it calls a lift.
+    let buttons = LiftSystem::new(lifts).buttons;
+    for entity in &bsp.entities {
+        if entity.classname != "func_button" {
+            continue;
+        }
+        let Some(index) = entity.properties.get("model").and_then(parse_model_index) else {
+            continue;
+        };
+        if index == 0
+            || index >= bsp.common.models.len()
+            || out.iter().any(|(m, _): &(Mover, _)| m.model_index == index)
+        {
+            continue;
+        }
+        let push = buttons
+            .iter()
+            .find(|b| b.model_index == index)
+            .map_or([0.0; 3], |b| [b.push.x, b.push.y, b.push.z]);
+        out.push((
+            Mover {
+                model_index: index,
+                kind: MoverKind::Button { push },
+            },
+            (0.0, 0.0),
         ));
     }
     out
@@ -467,7 +508,19 @@ pub fn static_brush_models(bsp: &BspFile) -> Vec<usize> {
 #[must_use]
 pub fn build_world_geometry(
     bsp: &BspFile,
+    material_passes: impl FnMut(&str, &ResolveMaterialOptions) -> Vec<ResolvedMaterialProps>,
+) -> WorldGeometry {
+    build_world_geometry_with(bsp, material_passes, |_| false)
+}
+
+/// [`build_world_geometry`], leaving out the faces whose shader
+/// `fog_volume` names: a fog brush's surface is drawn by its fog volume
+/// (`FogVolumes`), not as a face.
+#[must_use]
+pub fn build_world_geometry_with(
+    bsp: &BspFile,
     mut material_passes: impl FnMut(&str, &ResolveMaterialOptions) -> Vec<ResolvedMaterialProps>,
+    fog_volume: impl Fn(&str) -> bool,
 ) -> WorldGeometry {
     let profile = bsp_lighting_profile(bsp);
     let stride = if profile.deluxe { 2 } else { 1 };
@@ -530,6 +583,9 @@ pub fn build_world_geometry(
             continue;
         }
         let texture = &bsp.common.textures[face.texture_index as usize];
+        if fog_volume(&texture.name) {
+            continue;
+        }
         let passes = passes_by_texture.entry(face.texture_index).or_insert_with(|| {
             let mut passes = material_passes(&texture.name, &options);
             if passes.is_empty() {
@@ -770,20 +826,24 @@ mod tests {
         use glam::Vec3;
         // An origin brush: the model about zero, standing at its origin.
         let fan = rotator([0.0; 3], [100.0, 0.0, 50.0], true);
-        let at_rest = fan.transform(0.0, None).transform_point3(Vec3::new(10.0, 0.0, 0.0));
+        let at_rest = fan
+            .transform(0.0, None, None)
+            .transform_point3(Vec3::new(10.0, 0.0, 0.0));
         assert!(at_rest.abs_diff_eq(Vec3::new(110.0, 0.0, 50.0), 1e-4));
         // A quarter turn about +Y takes +X to -Z.
-        let turned = fan.transform(1.0, None).transform_point3(Vec3::new(10.0, 0.0, 0.0));
+        let turned = fan
+            .transform(1.0, None, None)
+            .transform_point3(Vec3::new(10.0, 0.0, 0.0));
         assert!(turned.abs_diff_eq(Vec3::new(100.0, 0.0, 40.0), 1e-3), "{turned}");
         // Its origin inside the model: it turns where it was compiled.
         let inside = rotator([100.0, 0.0, 50.0], [100.0, 0.0, 50.0], true);
         let p = inside
-            .transform(1.0, None)
+            .transform(1.0, None, None)
             .transform_point3(Vec3::new(110.0, 0.0, 50.0));
         assert!(p.abs_diff_eq(Vec3::new(100.0, 0.0, 40.0), 1e-3), "{p}");
         // One waiting for a trigger stays put.
         let idle = rotator([0.0; 3], [0.0; 3], false);
-        assert_eq!(idle.transform(5.0, None), glam::Mat4::IDENTITY);
+        assert_eq!(idle.transform(5.0, None, None), glam::Mat4::IDENTITY);
     }
 
     #[test]
@@ -798,11 +858,11 @@ mod tests {
         };
         let p = Vec3::new(1.0, 2.0, 3.0);
         assert_eq!(
-            lift.transform(0.0, None).transform_point3(p),
+            lift.transform(0.0, None, None).transform_point3(p),
             Vec3::new(1.0, -54.0, 3.0)
         );
         assert_eq!(
-            lift.transform(0.0, Some(16.0)).transform_point3(p),
+            lift.transform(0.0, Some(16.0), None).transform_point3(p),
             Vec3::new(1.0, 26.0, 3.0)
         );
         // It can reach from its start to its end.

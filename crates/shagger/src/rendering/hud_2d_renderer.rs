@@ -12,11 +12,18 @@ pub struct Hud2dRenderer {
     atlas: wgpu::Texture,
     atlas_size: u32,
     bind_group: wgpu::BindGroup,
-    vertices: wgpu::Buffer,
-    vertex_capacity: usize,
-    indices: wgpu::Buffer,
-    index_capacity: usize,
+    /// The frame's vertices, then its indices, in one buffer: one upload a
+    /// frame instead of two (each upload stages through a buffer of its
+    /// own).
+    geometry: wgpu::Buffer,
+    geometry_capacity: usize,
+    /// Where the indices start in `geometry`, in bytes.
+    index_offset: u64,
     index_count: u32,
+    /// The screen size last uploaded.
+    screen_size: [f32; 2],
+    /// The frame's bytes, kept for their storage.
+    bytes: Vec<u8>,
 }
 
 fn buffer(gpu: &Gpu, usage: wgpu::BufferUsages, bytes: u64) -> wgpu::Buffer {
@@ -157,21 +164,25 @@ impl Hud2dRenderer {
             atlas,
             atlas_size,
             bind_group,
-            vertices: buffer(gpu, wgpu::BufferUsages::VERTEX, 0),
-            vertex_capacity: 0,
-            indices: buffer(gpu, wgpu::BufferUsages::INDEX, 0),
-            index_capacity: 0,
+            geometry: buffer(gpu, wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX, 0),
+            geometry_capacity: 0,
+            index_offset: 0,
             index_count: 0,
+            screen_size: [1.0, 1.0],
+            bytes: Vec::new(),
         }
     }
 
     /// Uploads the frame (and the atlas when it changed).
     pub fn prepare(&mut self, gpu: &Gpu, hud: &mut Hud2d) {
-        gpu.queue.write_buffer(
-            &self.screen,
-            0,
-            bytemuck::cast_slice(&[hud.target[0], hud.target[1], 0.0f32, 0.0]),
-        );
+        if hud.target != self.screen_size {
+            self.screen_size = hud.target;
+            gpu.queue.write_buffer(
+                &self.screen,
+                0,
+                bytemuck::cast_slice(&[hud.target[0], hud.target[1], 0.0f32, 0.0]),
+            );
+        }
         if hud.atlas.dirty && hud.atlas.size == self.atlas_size {
             gpu.queue.write_texture(
                 self.atlas.as_image_copy(),
@@ -189,24 +200,27 @@ impl Hud2dRenderer {
             );
             hud.atlas.dirty = false;
         }
-        if hud.vertices.len() > self.vertex_capacity {
-            self.vertex_capacity = hud.vertices.len().next_power_of_two();
-            self.vertices = buffer(
+        // Vertices, then the indices at a 4-byte boundary.
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(&hud.vertices);
+        let index_offset = vertex_bytes.len().next_multiple_of(4);
+        self.bytes.clear();
+        self.bytes.extend_from_slice(vertex_bytes);
+        self.bytes.resize(index_offset, 0);
+        self.bytes.extend_from_slice(bytemuck::cast_slice(&hud.indices));
+        // `write_buffer` takes whole multiples of 4 bytes.
+        self.bytes.resize(self.bytes.len().next_multiple_of(4), 0);
+        if self.bytes.len() > self.geometry_capacity {
+            self.geometry_capacity = self.bytes.len().next_power_of_two();
+            self.geometry = buffer(
                 gpu,
-                wgpu::BufferUsages::VERTEX,
-                (self.vertex_capacity * std::mem::size_of::<HudVertex>()) as u64,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+                self.geometry_capacity as u64,
             );
         }
-        if hud.indices.len() > self.index_capacity {
-            self.index_capacity = hud.indices.len().next_power_of_two();
-            self.indices = buffer(gpu, wgpu::BufferUsages::INDEX, (self.index_capacity * 4) as u64);
+        if !hud.indices.is_empty() {
+            gpu.queue.write_buffer(&self.geometry, 0, &self.bytes);
         }
-        if !hud.vertices.is_empty() {
-            gpu.queue
-                .write_buffer(&self.vertices, 0, bytemuck::cast_slice(&hud.vertices));
-            gpu.queue
-                .write_buffer(&self.indices, 0, bytemuck::cast_slice(&hud.indices));
-        }
+        self.index_offset = index_offset as u64;
         self.index_count = hud.indices.len() as u32;
     }
 
@@ -216,8 +230,8 @@ impl Hud2dRenderer {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_vertex_buffer(0, self.geometry.slice(..self.index_offset));
+        pass.set_index_buffer(self.geometry.slice(self.index_offset..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
 }

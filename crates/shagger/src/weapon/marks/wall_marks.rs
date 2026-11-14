@@ -7,7 +7,7 @@
 
 use glam::{DVec3, Vec3};
 
-use crate::rendering::effect_quad_batch::{EffectFrame, EffectQuadBatch, EffectTemplate, instance5};
+use crate::rendering::effect_quad_batch::{EffectFrame, EffectInstance, EffectQuadBatch, EffectTemplate, instance5};
 use crate::rendering::gpu::Gpu;
 use crate::weapon::weapon_barrels::babylon_euler;
 
@@ -65,6 +65,13 @@ pub struct WallMarks {
     /// The shared material's emissive: the first mark's colour times 0.3.
     emissive: Option<Vec3>,
     batch: EffectQuadBatch,
+    /// The frame's instances, kept for their storage.
+    instances: Vec<EffectInstance>,
+}
+
+/// A mark's alpha at `now`: it fades out over its life.
+fn mark_alpha(mark: &WallMark, now: f64) -> f64 {
+    WALL_MARK_ALPHA * (1.0 - (now - mark.spawn_time) / WALL_MARK_DURATION)
 }
 
 impl WallMarks {
@@ -81,6 +88,7 @@ impl WallMarks {
                 MAX_WALL_MARKS,
                 &wall_mark_template(),
             ),
+            instances: Vec::with_capacity(MAX_WALL_MARKS),
         }
     }
 
@@ -107,31 +115,26 @@ impl WallMarks {
     /// The marks' alpha at `now`, oldest first.
     #[must_use]
     pub fn alphas(&self, now: f64) -> Vec<f64> {
-        self.marks
-            .iter()
-            .map(|m| WALL_MARK_ALPHA * (1.0 - (now - m.spawn_time) / WALL_MARK_DURATION))
-            .collect()
+        self.marks.iter().map(|m| mark_alpha(m, now)).collect()
     }
 
     pub fn prepare(&mut self, gpu: &Gpu, frame: &EffectFrame) {
         let emissive = self.emissive.unwrap_or(Vec3::ZERO).as_dvec3();
-        let instances: Vec<_> = self
-            .marks
-            .iter()
-            .zip(self.alphas(frame.time))
-            .map(|(m, alpha)| {
-                let (x, y) = (m.axes.0.as_dvec3(), m.axes.1.as_dvec3());
-                let p = m.position;
-                instance5([
-                    [p.x, p.y, p.z, m.size],
-                    [x.x, x.y, x.z, 0.0],
-                    [y.x, y.y, y.z, 0.0],
-                    [emissive.x, emissive.y, emissive.z, alpha.max(0.0)],
-                    [0.0; 4],
-                ])
-            })
-            .collect();
-        self.batch.prepare(gpu, frame, &instances, true);
+        let now = frame.time;
+        self.instances.clear();
+        self.instances.extend(self.marks.iter().map(|m| {
+            let alpha = mark_alpha(m, now);
+            let (x, y) = (m.axes.0.as_dvec3(), m.axes.1.as_dvec3());
+            let p = m.position;
+            instance5([
+                [p.x, p.y, p.z, m.size],
+                [x.x, x.y, x.z, 0.0],
+                [y.x, y.y, y.z, 0.0],
+                [emissive.x, emissive.y, emissive.z, alpha.max(0.0)],
+                [0.0; 4],
+            ])
+        }));
+        self.batch.prepare(gpu, frame, &self.instances, true);
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {

@@ -6,7 +6,7 @@
 //! backend that answers it also reads the lift offsets.
 
 use super::map_entities::{EntityLike, ModelLike, inline_model_index, origin_of};
-use crate::js::{js_max, js_min, js_sign, js_string_to_number, to_int32};
+use crate::js::{js_cos, js_hypot, js_max, js_min, js_sign, js_sin, js_string_to_number, to_int32};
 use crate::server::simulation::types::Vec3;
 
 /// Cooldown for a caller that must never rearm, finite so it still serializes.
@@ -17,12 +17,33 @@ const DEFAULT_DOOR_SOUND: &str = "sounds/movers/door_start.ogg";
 const DEFAULT_PLAT_SOUND: &str = "sounds/movers/elevator_move.ogg";
 const DEFAULT_STOP_SOUND: &str = "sounds/movers/door_stop.ogg";
 
+/// Something that calls a lift: a touch volume, or a `func_button`
+/// (`LiftCaller`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiftTrigger {
     pub min: Vec3,
     pub max: Vec3,
     pub wait: f64,
+    /// A button with `health` fires when it takes damage and ignores
+    /// touch; these are its brushes' boxes at rest, which a direct hit must
+    /// land on.
+    pub shot: Option<Vec<(Vec3, Vec3)>>,
+    /// The button's inline model, which presses in while this caller rests.
+    pub button: Option<LiftButton>,
 }
+
+/// How a `func_button` brush presses in: `push` is the full travel, at
+/// `speed` units a second (`LiftButton`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiftButton {
+    pub model_index: usize,
+    pub push: Vec3,
+    pub speed: f64,
+}
+
+/// Q3-space brush boxes (`mins`, `maxs`) of an inline model, for direct-hit
+/// tests on shootable buttons (`InlineModelBrushBoxes`).
+pub type InlineModelBrushBoxes<'f> = dyn Fn(usize) -> Vec<([f64; 3], [f64; 3])> + 'f;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiftDefinition {
@@ -115,7 +136,11 @@ fn number(value: Option<&str>, fallback: f64) -> f64 {
 
 /// `extractLifts`. BSP plats are authored at the upper stop; simulation
 /// starts one height below.
-pub fn extract_lifts<E: EntityLike, M: ModelLike>(entities: &[E], models: &[M]) -> Vec<LiftDefinition> {
+pub fn extract_lifts<E: EntityLike, M: ModelLike>(
+    entities: &[E],
+    models: &[M],
+    brush_boxes: Option<&InlineModelBrushBoxes<'_>>,
+) -> Vec<LiftDefinition> {
     let mut result = Vec::new();
     for entity in entities {
         let p = |k: &str| entity.property(k);
@@ -165,17 +190,51 @@ pub fn extract_lifts<E: EntityLike, M: ModelLike>(entities: &[E], models: &[M]) 
                 if t("target") != Some(targetname) {
                     continue;
                 }
-                let Some(tm) = inline_model_index(t("model"), false).and_then(|i| models.get(i)) else {
+                let Some(tm_index) = inline_model_index(t("model"), false).filter(|&i| i > 0) else {
                     continue;
                 };
+                let Some(tm) = models.get(tm_index) else { continue };
                 let Some(to) = origin_of(t("origin")) else { continue };
-                let wait = number(t("wait"), if button { 1.0 } else { 0.5 });
+                // A button stays pressed 3 s unless told otherwise, as in
+                // Warsow; a `wait` of 0 also means the default there.
+                let wait = if button {
+                    match number(t("wait"), 3.0) {
+                        0.0 => 3.0,
+                        w => w,
+                    }
+                } else {
+                    number(t("wait"), 0.5)
+                };
                 let (tmin, tmax) = (tm.mins(), tm.maxs());
-                triggers.push(LiftTrigger {
-                    min: Vec3::new(tmin[0] + to[0], tmin[2] + to[2], tmin[1] + to[1]),
-                    max: Vec3::new(tmax[0] + to[0], tmax[2] + to[2], tmax[1] + to[1]),
+                let box_of = |mins: [f64; 3], maxs: [f64; 3]| {
+                    (
+                        Vec3::new(mins[0] + to[0], mins[2] + to[2], mins[1] + to[1]),
+                        Vec3::new(maxs[0] + to[0], maxs[2] + to[2], maxs[1] + to[1]),
+                    )
+                };
+                let (min, max) = box_of(tmin, tmax);
+                let mut caller = LiftTrigger {
+                    min,
+                    max,
                     wait: if once || wait < 0.0 { ONCE } else { js_max(0.1, wait) },
-                });
+                    shot: None,
+                    button: None,
+                };
+                if button {
+                    caller.button = Some(button_travel(tm_index, tmin, tmax, trigger));
+                    // Any nonzero health makes the button shootable, and then
+                    // touch does nothing.
+                    if number(t("health"), 0.0) != 0.0 {
+                        let boxes = brush_boxes.map(|f| f(tm_index)).unwrap_or_default();
+                        let parts = if boxes.is_empty() {
+                            vec![box_of(tmin, tmax)]
+                        } else {
+                            boxes.into_iter().map(|(mins, maxs)| box_of(mins, maxs)).collect()
+                        };
+                        caller.shot = Some(parts);
+                    }
+                }
+                triggers.push(caller);
             }
         }
         let targetname = p("targetname").unwrap_or("");
@@ -206,6 +265,50 @@ pub fn extract_lifts<E: EntityLike, M: ModelLike>(entities: &[E], models: &[M]) 
     result
 }
 
+/// `buttonTravel`: Q3 `func_button` travel along its `angle` (-1 up, -2
+/// down, else a yaw), by the model's size on that axis less `lip` (default
+/// 4), at `speed` (default 40).
+fn button_travel<E: EntityLike>(model_index: usize, mins: [f64; 3], maxs: [f64; 3], entity: &E) -> LiftButton {
+    let to_number = |k: &str| entity.property(k).map_or(f64::NAN, js_string_to_number);
+    let angle = entity.property("angle").map_or(0.0, js_string_to_number);
+    let dir = if angle == -1.0 {
+        [0.0, 0.0, 1.0]
+    } else if angle == -2.0 {
+        [0.0, 0.0, -1.0]
+    } else {
+        let yaw = (if angle.is_finite() { angle } else { 0.0 }) * std::f64::consts::PI / 180.0;
+        [js_cos(yaw), js_sin(yaw), 0.0]
+    };
+    // `lip || 4`: missing, unreadable or 0 is the default.
+    let lip = match to_number("lip") {
+        l if l.is_nan() || l == 0.0 => 4.0,
+        l => l,
+    };
+    let size = [maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]];
+    let distance = js_max(
+        0.0,
+        dir[0].abs() * size[0] + dir[1].abs() * size[1] + dir[2].abs() * size[2] - lip,
+    );
+    let speed = to_number("speed");
+    LiftButton {
+        model_index,
+        push: Vec3::new(dir[0] * distance, dir[2] * distance, dir[1] * distance),
+        speed: if speed > 0.0 { speed } else { 40.0 },
+    }
+}
+
+/// A shot's impact point sits on the brush face, give or take the trace's
+/// 2-unit box.
+const STRIKE_EPSILON: f64 = 3.0;
+
+/// Distance from `p` to the box `min`..`max` moved by `shift`; 0 inside it.
+fn distance_to_box(p: Vec3, min: Vec3, max: Vec3, shift: Vec3) -> f64 {
+    let dx = js_max(js_max(min.x + shift.x - p.x, 0.0), p.x - max.x - shift.x);
+    let dy = js_max(js_max(min.y + shift.y - p.y, 0.0), p.y - max.y - shift.y);
+    let dz = js_max(js_max(min.z + shift.z - p.z, 0.0), p.z - max.z - shift.z);
+    js_hypot(&[dx, dy, dz])
+}
+
 /// The ray a lift asks the collision world for: `(system, start, end,
 /// exclude model or -1, only model or -1)`.
 pub type LiftTraceFn<'f> = dyn FnMut(&LiftSystem, Vec3, Vec3, i64, i64) -> LiftTrace + 'f;
@@ -215,6 +318,12 @@ pub type LiftTraceFn<'f> = dyn FnMut(&LiftSystem, Vec3, Vec3, i64, i64) -> LiftT
 pub struct LiftSystem {
     pub definitions: Vec<LiftDefinition>,
     states: Vec<LiftState>,
+    /// Every `func_button` that calls a lift, once each, for collision and
+    /// rendering.
+    pub buttons: Vec<LiftButton>,
+    /// A button targeting two doors is a caller of both; its press reads
+    /// either. By model: (definition, caller) pairs.
+    button_callers: Vec<(usize, Vec<(usize, usize)>)>,
 }
 
 fn overlaps(p: Vec3, min: Vec3, max: Vec3) -> bool {
@@ -239,7 +348,111 @@ impl LiftSystem {
                 cooldowns: vec![0.0; d.triggers.len()],
             })
             .collect();
-        Self { definitions, states }
+        let mut buttons: Vec<LiftButton> = Vec::new();
+        let mut button_callers: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+        for (i, d) in definitions.iter().enumerate() {
+            for (j, t) in d.triggers.iter().enumerate() {
+                let Some(button) = t.button else { continue };
+                match button_callers.iter_mut().find(|(m, _)| *m == button.model_index) {
+                    Some((_, callers)) => callers.push((i, j)),
+                    None => {
+                        button_callers.push((button.model_index, vec![(i, j)]));
+                        buttons.push(button);
+                    }
+                }
+            }
+        }
+        Self {
+            definitions,
+            states,
+            buttons,
+            button_callers,
+        }
+    }
+
+    /// `buttonOffset`: how far a button is pressed in now, from its
+    /// caller's cooldown: it travels in at its speed and holds until the
+    /// caller rearms. Derived from simulated state, so prediction,
+    /// collision and rendering agree without extra data.
+    #[must_use]
+    pub fn button_offset(&self, model_index: usize) -> Vec3 {
+        let Some((_, callers)) = self.button_callers.iter().find(|(m, _)| *m == model_index) else {
+            return Vec3::new(0.0, 0.0, 0.0);
+        };
+        // The first caller's button: the one the entry was made with.
+        let Some(button) = self.definitions[callers[0].0].triggers[callers[0].1].button else {
+            return Vec3::new(0.0, 0.0, 0.0);
+        };
+        let mut held = -1.0;
+        for &(i, j) in callers {
+            let cooldown = self.states[i].cooldowns[j];
+            if cooldown > 0.0 {
+                held = js_max(held, self.definitions[i].triggers[j].wait - cooldown);
+            }
+        }
+        if held < 0.0 {
+            return Vec3::new(0.0, 0.0, 0.0);
+        }
+        let push = button.push;
+        let length = js_hypot(&[push.x, push.y, push.z]);
+        let fraction = if length > 0.0 {
+            js_min(1.0, held * button.speed / length)
+        } else {
+            1.0
+        };
+        Vec3::new(push.x * fraction, push.y * fraction, push.z * fraction)
+    }
+
+    /// `strike`: damage landed at `point`. A direct hit (`radius` 0) fires
+    /// a shootable button whose brush it is on; a blast fires one whose
+    /// bounds lie within `radius`, as Q3 radius damage reached any entity's
+    /// box. Returns how many lifts were set going.
+    pub fn strike(&mut self, point: Vec3, radius: f64) -> usize {
+        if !(point.x + point.y + point.z).is_finite() {
+            return 0;
+        }
+        let mut fired = 0;
+        for i in 0..self.definitions.len() {
+            for j in 0..self.definitions[i].triggers.len() {
+                let t = &self.definitions[i].triggers[j];
+                let Some(parts) = &t.shot else { continue };
+                if self.states[i].cooldowns[j] > 0.0 {
+                    continue;
+                }
+                let offset = t
+                    .button
+                    .map_or(Vec3::new(0.0, 0.0, 0.0), |b| self.button_offset(b.model_index));
+                let hit = if radius > 0.0 {
+                    distance_to_box(point, t.min, t.max, offset) < radius
+                } else {
+                    parts
+                        .iter()
+                        .any(|&(min, max)| distance_to_box(point, min, max, offset) <= STRIKE_EPSILON)
+                };
+                let wait = t.wait;
+                if !hit {
+                    continue;
+                }
+                self.states[i].cooldowns[j] = wait;
+                self.activate(i);
+                fired += 1;
+            }
+        }
+        fired
+    }
+
+    /// A caller fired: start the lift, reverse a toggle, or hold an open
+    /// door (`activate`).
+    fn activate(&mut self, i: usize) {
+        let d = &self.definitions[i];
+        let s = &mut self.states[i];
+        if d.toggle && matches!(s.phase, LiftPhase::Up | LiftPhase::Top) {
+            s.phase = LiftPhase::Down;
+        } else if matches!(s.phase, LiftPhase::Bottom | LiftPhase::Down) {
+            s.phase = LiftPhase::Up;
+        } else if s.phase == LiftPhase::Top && !d.plat {
+            s.remaining = js_max(0.0, d.wait);
+        }
     }
 
     fn index_of(&self, model_index: usize) -> Option<usize> {
@@ -353,7 +566,10 @@ impl LiftSystem {
                 let cooldown = js_max(0.0, self.states[i].cooldowns[j] - dt);
                 self.states[i].cooldowns[j] = cooldown;
                 let t = &self.definitions[i].triggers[j];
-                if cooldown == 0.0 && actors.iter().any(|a| !a.passive && overlaps(a.position, t.min, t.max)) {
+                if t.shot.is_none()
+                    && cooldown == 0.0
+                    && actors.iter().any(|a| !a.passive && overlaps(a.position, t.min, t.max))
+                {
                     activated = true;
                     self.states[i].cooldowns[j] = t.wait;
                 }
@@ -485,5 +701,192 @@ impl LiftSystem {
             }
         }
         crushes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! SHAG `src/shared/bsp/__tests__/LiftButtons.test.ts`.
+    use super::*;
+
+    struct E(&'static str, Vec<(&'static str, &'static str)>);
+
+    impl EntityLike for E {
+        fn classname(&self) -> &str {
+            self.0
+        }
+        fn property(&self, key: &str) -> Option<&str> {
+            self.1.iter().rev().find(|(k, _)| *k == key).map(|(_, v)| *v)
+        }
+    }
+
+    struct M([f64; 3], [f64; 3]);
+
+    impl ModelLike for M {
+        fn mins(&self) -> [f64; 3] {
+            self.0
+        }
+        fn maxs(&self) -> [f64; 3] {
+            self.1
+        }
+    }
+
+    // Q3 space: a split door like wdm16's techdoor3 (two halves, one going
+    // up and one down) and a button made of two corner panels either side.
+    fn models() -> Vec<M> {
+        vec![
+            M([-4096.0; 3], [4096.0; 3]),
+            M([-64.0, -656.0, -256.0], [128.0, -624.0, -176.0]),
+            M([-64.0, -656.0, -192.0], [128.0, -624.0, -64.0]),
+            M([-106.0, -710.0, -222.0], [170.0, -570.0, -194.0]),
+            M([-106.0, -576.0, -256.0], [-78.0, -568.0, -222.0]),
+        ]
+    }
+
+    fn panels(i: usize) -> Vec<([f64; 3], [f64; 3])> {
+        if i == 3 {
+            vec![
+                ([-106.0, -576.0, -222.0], [-78.0, -570.0, -194.0]),
+                ([142.0, -710.0, -222.0], [170.0, -704.0, -194.0]),
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn door(model: &'static str, angle: &'static str) -> E {
+        E(
+            "func_door",
+            vec![
+                ("model", model),
+                ("angle", angle),
+                ("targetname", "techdoor3"),
+                ("speed", "1500"),
+                ("health", "-1"),
+            ],
+        )
+    }
+
+    fn button(extra: &[(&'static str, &'static str)]) -> E {
+        let mut p = vec![
+            ("model", "*3"),
+            ("target", "techdoor3"),
+            ("angle", "-2"),
+            ("speed", "1000"),
+            ("health", "1"),
+        ];
+        p.extend_from_slice(extra);
+        E("func_button", p)
+    }
+
+    fn make(entities: &[E]) -> LiftSystem {
+        LiftSystem::new(extract_lifts(entities, &models(), Some(&panels)))
+    }
+
+    fn step(lifts: &mut LiftSystem, dt: f64, actors: &mut [LiftActor]) {
+        let mut trace = |_: &LiftSystem, _: Vec3, _: Vec3, _: i64, _: i64| LiftTrace {
+            fraction: 1.0,
+            solid: false,
+            normal_y: 0.0,
+            model_index: -1,
+        };
+        lifts.step(dt, actors, &mut trace);
+    }
+
+    /// Engine space is Q3 (x, z, y).
+    fn at(x: f64, y: f64, z: f64) -> Vec3 {
+        Vec3::new(x, z, y)
+    }
+
+    fn body(x: f64, y: f64, z: f64) -> LiftActor {
+        LiftActor {
+            position: at(x, y, z),
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+            id: None,
+            passive: false,
+        }
+    }
+
+    fn phases(lifts: &LiftSystem) -> Vec<LiftPhase> {
+        lifts.snapshot().iter().map(|s| s.phase).collect()
+    }
+
+    fn halves() -> Vec<E> {
+        vec![door("*1", "-2"), door("*2", "-1")]
+    }
+
+    fn with(mut entities: Vec<E>, extra: E) -> Vec<E> {
+        entities.push(extra);
+        entities
+    }
+
+    #[test]
+    fn a_shootable_button_ignores_touch() {
+        let mut lifts = make(&with(halves(), button(&[])));
+        // Standing in the doorway is inside the button's bounds.
+        for _ in 0..30 {
+            step(&mut lifts, 1.0 / 60.0, &mut [body(32.0, -640.0, -232.0)]);
+        }
+        assert_eq!(phases(&lifts), [LiftPhase::Bottom, LiftPhase::Bottom]);
+    }
+
+    #[test]
+    fn a_shot_on_a_panel_opens_both_halves_and_between_them_does_not() {
+        let mut lifts = make(&with(halves(), button(&[])));
+        assert_eq!(lifts.strike(at(32.0, -640.0, -208.0), 0.0), 0);
+        assert_eq!(lifts.strike(at(-92.0, -569.0, -208.0), 0.0), 2);
+        assert_eq!(phases(&lifts), [LiftPhase::Up, LiftPhase::Up]);
+        // It rests for its default 3 s, so a second shot does nothing.
+        assert_eq!(lifts.strike(at(-92.0, -569.0, -208.0), 0.0), 0);
+    }
+
+    #[test]
+    fn a_blast_reaches_the_buttons_bounds() {
+        let mut lifts = make(&with(halves(), button(&[])));
+        assert_eq!(lifts.strike(at(32.0, -760.0, -208.0), 40.0), 0);
+        assert_eq!(lifts.strike(at(32.0, -740.0, -208.0), 40.0), 2);
+    }
+
+    #[test]
+    fn presses_in_at_its_speed_holds_while_resting_and_comes_back() {
+        let mut lifts = make(&with(halves(), button(&[])));
+        assert_eq!(lifts.buttons.iter().map(|b| b.model_index).collect::<Vec<_>>(), [3]);
+        assert_eq!(lifts.button_offset(3).y, 0.0);
+        lifts.strike(at(155.0, -705.0, -208.0), 0.0);
+        step(&mut lifts, 0.01, &mut []);
+        // 1000 u/s for 10 ms is 10 of its 24 units (28 tall less a 4 lip), downward.
+        assert!((lifts.button_offset(3).y + 10.0).abs() < 1e-6);
+        for _ in 0..60 {
+            step(&mut lifts, 1.0 / 60.0, &mut []);
+        }
+        assert!((lifts.button_offset(3).y + 24.0).abs() < 1e-6);
+        for _ in 0..130 {
+            step(&mut lifts, 1.0 / 60.0, &mut []);
+        }
+        assert_eq!(lifts.button_offset(3).y, 0.0);
+    }
+
+    #[test]
+    fn touch_volumes_and_a_button_without_health_still_open_by_contact() {
+        let touch = E("trigger_multiple", vec![("model", "*4"), ("target", "techdoor3")]);
+        let mut lifts = make(&with(halves(), touch));
+        step(&mut lifts, 1.0 / 60.0, &mut [body(-92.0, -572.0, -240.0)]);
+        assert_eq!(phases(&lifts), [LiftPhase::Up, LiftPhase::Up]);
+        let mut plain = make(&with(halves(), button(&[("health", "0")])));
+        step(&mut plain, 1.0 / 60.0, &mut [body(32.0, -640.0, -232.0)]);
+        assert_eq!(phases(&plain), [LiftPhase::Up, LiftPhase::Up]);
+    }
+
+    #[test]
+    fn restores_a_buttons_press_from_the_serialized_caller_cooldown() {
+        let mut server = make(&with(halves(), button(&[])));
+        server.strike(at(-92.0, -569.0, -208.0), 0.0);
+        for _ in 0..30 {
+            step(&mut server, 1.0 / 60.0, &mut []);
+        }
+        let mut client = make(&with(halves(), button(&[])));
+        client.restore(&server.snapshot());
+        assert!((client.button_offset(3).y - server.button_offset(3).y).abs() < 1e-9);
+        assert!((client.button_offset(3).y + 24.0).abs() < 1e-6);
     }
 }

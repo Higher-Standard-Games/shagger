@@ -400,6 +400,9 @@ pub struct SkyParms {
 pub struct FogParms {
     pub color: [f64; 3],
     pub depth_for_opaque: f64,
+    /// Distance into the fog before it starts (qfusion's fourth value); 0
+    /// when absent.
+    pub clear_dist: f64,
 }
 
 /// `sort`: a number, or a preset name when it does not parse.

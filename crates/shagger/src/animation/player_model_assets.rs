@@ -78,6 +78,9 @@ pub const PLAYER_ANIMATIONS: &[AnimFileConfig] = &[
     optional("dance_1", "dance_1.glb"),
     optional("dance_2", "dance_2.glb"),
     optional("dance_3", "dance_3.glb"),
+    optional("taunt_1", "taunt_1.glb"),
+    optional("taunt_2", "taunt_2.glb"),
+    optional("taunt_3", "taunt_3.glb"),
 ];
 
 /// The clips beside the Vanguard body (`config/player-model-vanguard.json`

@@ -145,6 +145,96 @@ impl MaterialUniform {
     }
 }
 
+/// Where the material uniforms live: a few shared buffers of
+/// [`SLAB_SLOTS`] slots each instead of a buffer a pass, with a copy kept
+/// here, so a frame's changed uniforms (the animated passes, the movers)
+/// reach the GPU in one write a buffer, not one a pass.
+struct UniformSlab {
+    chunks: Vec<SlabChunk>,
+    used: usize,
+}
+
+struct SlabChunk {
+    buffer: wgpu::Buffer,
+    bytes: Vec<u8>,
+    /// The byte range written since the last flush.
+    dirty: Option<std::ops::Range<usize>>,
+}
+
+/// Slots a slab buffer holds.
+const SLAB_SLOTS: usize = 64;
+/// A slot's size: one uniform, at the offset alignment every adapter takes.
+const SLAB_STRIDE: usize = 256;
+const _: () = assert!(std::mem::size_of::<MaterialUniform>() <= SLAB_STRIDE);
+
+/// A pass's place in the slab: its buffer and the slot's byte offset.
+#[derive(Debug, Clone, Copy)]
+struct SlabSlot {
+    chunk: usize,
+    offset: usize,
+}
+
+impl UniformSlab {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            used: 0,
+        }
+    }
+
+    fn alloc(&mut self, device: &wgpu::Device) -> SlabSlot {
+        let (chunk, index) = (self.used / SLAB_SLOTS, self.used % SLAB_SLOTS);
+        if chunk == self.chunks.len() {
+            self.chunks.push(SlabChunk {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("world materials"),
+                    size: (SLAB_SLOTS * SLAB_STRIDE) as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                bytes: vec![0; SLAB_SLOTS * SLAB_STRIDE],
+                dirty: None,
+            });
+        }
+        self.used += 1;
+        SlabSlot {
+            chunk,
+            offset: index * SLAB_STRIDE,
+        }
+    }
+
+    /// The binding a pass's bind group takes for `slot`.
+    fn binding(&self, slot: SlabSlot) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.chunks[slot.chunk].buffer,
+            offset: slot.offset as u64,
+            size: wgpu::BufferSize::new(std::mem::size_of::<MaterialUniform>() as u64),
+        })
+    }
+
+    /// Writes `uniform` into its slot, for the next [`Self::flush`].
+    fn write(&mut self, slot: SlabSlot, uniform: &MaterialUniform) {
+        let chunk = &mut self.chunks[slot.chunk];
+        let bytes = bytemuck::bytes_of(uniform);
+        let range = slot.offset..slot.offset + bytes.len();
+        chunk.bytes[range.clone()].copy_from_slice(bytes);
+        chunk.dirty = Some(match chunk.dirty.take() {
+            Some(d) => d.start.min(range.start)..d.end.max(range.end),
+            None => range,
+        });
+    }
+
+    /// Uploads what changed: one write for each buffer touched.
+    fn flush(&mut self, gpu: &Gpu) {
+        for chunk in &mut self.chunks {
+            if let Some(range) = chunk.dirty.take() {
+                gpu.queue
+                    .write_buffer(&chunk.buffer, range.start as u64, &chunk.bytes[range]);
+            }
+        }
+    }
+}
+
 /// `fogPassKind`: how a pass's blend meets world fog (0 mix, 1 additive,
 /// 2 filter).
 fn fog_pass_kind(blend: Blend) -> f32 {
@@ -255,7 +345,7 @@ struct DrawPass {
     pipeline: usize,
     bind_group: usize,
     uniform: MaterialUniform,
-    buffer: wgpu::Buffer,
+    slot: SlabSlot,
     first_index: u32,
     index_count: u32,
     /// The batch it draws (an index into `WorldGeometry::batches`).
@@ -273,6 +363,8 @@ pub struct WorldRenderer {
     passes: Vec<DrawPass>,
     /// The opaque passes lead `passes`; this many of them.
     opaque_count: usize,
+    /// Where the additive passes start, after the other blended ones.
+    additive_start: usize,
     animations: Vec<PassAnimation>,
     /// `ShaderAnimationSystem.totalTime`.
     total_time: f64,
@@ -295,6 +387,8 @@ pub struct WorldRenderer {
     batch_movers: Vec<Option<usize>>,
     /// Seconds the rotators have turned (`move_movers`).
     mover_time: f64,
+    /// Each mover's matrix this frame, kept between frames for its storage.
+    mover_transforms: Vec<[[f32; 4]; 4]>,
     /// The scene depth soft particles read: its layout, a copy of the main
     /// depth taken between the opaque and blended passes, its size, and
     /// whether this frame reads it.
@@ -303,11 +397,16 @@ pub struct WorldRenderer {
     soft_bind_group: wgpu::BindGroup,
     soft_view: [[f32; 4]; 4],
     soft_params: [f32; 4],
+    /// Whether something besides soft particles reads the scene depth this
+    /// frame (the fog volumes): it is copied without fading soft surfaces.
+    depth_reader: bool,
     /// Which batches hold a soft particle pass.
     soft_batches: Vec<bool>,
+    /// Every pass's material uniform.
+    slab: UniformSlab,
 }
 
-fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
+pub(crate) fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
     let mut levels = vec![image.clone()];
     let mut current = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
         .expect("the pixel count matches the size");
@@ -358,6 +457,9 @@ pub(crate) fn upload_texture(gpu: &Gpu, label: &str, image: &Rgba8Image) -> wgpu
     let fitted = fit_to_device(gpu, image);
     let image = fitted.as_ref().unwrap_or(image);
     let levels = mip_chain(image);
+    if let Some(texture) = super::texture_compression::upload_bc7(gpu, label, &levels) {
+        return texture;
+    }
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
@@ -595,6 +697,8 @@ impl WorldRenderer {
         // pass. Surfaces without companions read a flat normal and no gloss.
         let mut views: HashMap<String, wgpu::TextureView> = HashMap::new();
         let mut found: HashMap<String, String> = HashMap::new();
+        let mut by_candidate: HashMap<String, Option<wgpu::TextureView>> = HashMap::new();
+        let mut uploaded = 0usize;
         const FLAT_NORMAL: &str = "@flat_normal";
         const NO_GLOSS: &str = "@no_gloss";
         const WHITE: &str = "@white";
@@ -628,6 +732,7 @@ impl WorldRenderer {
             cubes.insert(name.clone(), upload_cube(gpu, faces, name));
         }
         let mut texture_bind_groups = Vec::new();
+        let mut slab = UniformSlab::new();
         let mut keys: Vec<PipelineKey> = Vec::new();
         let mut missing = Vec::new();
         let mut opaque = Vec::new();
@@ -666,22 +771,37 @@ impl WorldRenderer {
                     |candidates: &[String], fallback: Option<MissingImage>| -> Option<(String, Option<String>)> {
                         let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
                         if !views.contains_key(&key) {
-                            let hit = candidates.iter().find_map(|c| textures(c).map(|image| (c, image)));
-                            if let Some((candidate, _)) = &hit {
+                            // Candidate lists differ between passes and
+                            // companions, but often end at the same file: decode
+                            // and upload each file once.
+                            let hit = candidates.iter().find_map(|c| {
+                                by_candidate
+                                    .entry(c.clone())
+                                    .or_insert_with(|| {
+                                        textures(c).map(|image| {
+                                            uploaded += 1;
+                                            upload_texture(gpu, c, &image)
+                                                .create_view(&wgpu::TextureViewDescriptor::default())
+                                        })
+                                    })
+                                    .clone()
+                                    .map(|view| (c, view))
+                            });
+                            if let Some((candidate, view)) = hit {
                                 found.insert(key.clone(), strip_texture_extension(candidate).to_owned());
+                                views.insert(key.clone(), view);
+                                return Some((key.clone(), found.get(&key).cloned()));
                             }
-                            let image = match hit {
-                                Some((_, image)) => image,
-                                None => match fallback? {
-                                    MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
-                                    MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
-                                    MissingImage::White => Rgba8Image::white(),
-                                    MissingImage::Untextured => {
-                                        missing.push(batch.texture_name.clone());
-                                        Rgba8Image::white()
-                                    }
-                                },
+                            let image = match fallback? {
+                                MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
+                                MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
+                                MissingImage::White => Rgba8Image::white(),
+                                MissingImage::Untextured => {
+                                    missing.push(batch.texture_name.clone());
+                                    Rgba8Image::white()
+                                }
                             };
+                            uploaded += 1;
                             let view = upload_texture(gpu, &batch.texture_name, &image)
                                 .create_view(&wgpu::TextureViewDescriptor::default());
                             views.insert(key.clone(), view);
@@ -970,19 +1090,14 @@ impl WorldRenderer {
                         model: batch
                             .mover
                             .and_then(|m| geometry.movers.get(m))
-                            .map_or(Mat4::IDENTITY, |m| m.transform(0.0, None))
+                            .map_or(Mat4::IDENTITY, |m| m.transform(0.0, None, None))
                             .to_cols_array_2d(),
                     };
                     let cube = layer
                         .environment
                         .as_ref()
                         .map_or(NO_ENVIRONMENT, |(name, _)| name.as_str());
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("world material"),
-                        size: std::mem::size_of::<MaterialUniform>() as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
+                    let slot = slab.alloc(device);
                     let mut bind_group_for = |key: &str| {
                         texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&batch.texture_name),
@@ -998,7 +1113,7 @@ impl WorldRenderer {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: buffer.as_entire_binding(),
+                                    resource: slab.binding(slot),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
@@ -1047,7 +1162,7 @@ impl WorldRenderer {
                             base_color,
                         }
                     });
-                    gpu.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
+                    slab.write(slot, &uniform);
                     let key = layer.key;
                     let pipeline = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
                         keys.push(key);
@@ -1057,24 +1172,32 @@ impl WorldRenderer {
                         pipeline,
                         bind_group,
                         uniform,
-                        buffer,
+                        slot,
                         first_index: batch.first_index,
                         index_count: batch.index_count,
                         batch: batch_index,
                     };
                     if layer.key.blend != Blend::Opaque {
-                        blended.push((pass, animation));
+                        let additive = matches!(layer.key.blend, Blend::OneOne | Blend::Add);
+                        blended.push((pass, animation, additive));
                     } else {
                         opaque.push((pass, animation));
                     }
                 }
             }
         }
-        let texture_count = views.len() - 3;
+        let texture_count = uploaded;
         let opaque_count = opaque.len();
+        // `BspMeshBuilder`'s alpha indices: blended surfaces 0-999, additive
+        // ones from 1000, so the additive draw last.
+        blended.sort_by_key(|(_, _, additive)| *additive);
+        let additive_start = opaque_count + blended.iter().filter(|(_, _, additive)| !additive).count();
         let mut passes = Vec::new();
         let mut animations = Vec::new();
-        for (pass, animation) in opaque.into_iter().chain(blended) {
+        for (pass, animation) in opaque
+            .into_iter()
+            .chain(blended.into_iter().map(|(pass, animation, _)| (pass, animation)))
+        {
             if let Some(mut animation) = animation {
                 animation.pass = passes.len();
                 animations.push(animation);
@@ -1151,6 +1274,7 @@ impl WorldRenderer {
         };
         let pipelines = keys.iter().map(pipeline).collect();
 
+        slab.flush(gpu);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("world vertices"),
             contents: bytemuck::cast_slice(&geometry.vertices),
@@ -1171,6 +1295,7 @@ impl WorldRenderer {
             missing,
             passes,
             opaque_count,
+            additive_start,
             animations,
             total_time: 0.0,
             noise_seed: 0x9e37_79b9_7f4a_7c15,
@@ -1190,12 +1315,15 @@ impl WorldRenderer {
             movers: geometry.movers.clone(),
             batch_movers: geometry.batches.iter().map(|b| b.mover).collect(),
             mover_time: 0.0,
+            mover_transforms: Vec::with_capacity(geometry.movers.len()),
             soft_batches,
             soft_layout,
             soft_depth: None,
             soft_bind_group,
             soft_view: Mat4::IDENTITY.to_cols_array_2d(),
             soft_params: [1.0, 1.0, Q3_SOFT_FADE_RATE, 0.0],
+            depth_reader: false,
+            slab,
         }
     }
 
@@ -1216,17 +1344,48 @@ impl WorldRenderer {
     pub fn set_soft_particles(&mut self, gpu: &Gpu, view: Mat4, near: f32, far: f32, size: (u32, u32), enabled: bool) {
         self.soft_view = view.to_cols_array_2d();
         self.soft_params = [near, far, Q3_SOFT_FADE_RATE, f32::from(u8::from(enabled))];
-        if enabled && self.soft_depth.as_ref().is_none_or(|(_, s)| *s != size) {
+        if (enabled || self.depth_reader) && self.soft_depth.as_ref().is_none_or(|(_, s)| *s != size) {
             let texture = soft_depth_texture(gpu, size);
             self.soft_bind_group = soft_depth_bind_group(gpu, &self.soft_layout, &texture);
             self.soft_depth = Some((texture, size));
         }
     }
 
+    /// Whether the next frame's scene depth is read by something besides
+    /// soft particles (the fog volumes). Call before
+    /// [`Self::set_soft_particles`], which makes the copy.
+    pub fn set_scene_depth_reader(&mut self, reading: bool) {
+        self.depth_reader = reading;
+    }
+
+    /// Whether this frame's scene depth is copied (soft particles or another
+    /// reader), so [`Self::scene_depth`] holds it after the opaque pass.
+    #[must_use]
+    pub fn scene_depth_copied(&self) -> bool {
+        self.soft_depth.is_some() && (self.soft_params[3] > 0.5 || self.depth_reader)
+    }
+
+    /// The scene depth copy's layout: one `texture_depth_2d` at binding 0.
+    #[must_use]
+    pub fn scene_depth_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.soft_layout
+    }
+
+    /// The scene depth copied after the opaque pass, as
+    /// [`Self::scene_depth_layout`] binds it.
+    #[must_use]
+    pub fn scene_depth(&self) -> &wgpu::BindGroup {
+        &self.soft_bind_group
+    }
+
     /// Copies the main depth for soft particles after the opaque pass, when
     /// this frame reads it.
     pub fn capture_soft_depth(&self, encoder: &mut wgpu::CommandEncoder, depth: &wgpu::Texture) {
-        let Some((copy, (width, height))) = self.soft_depth.as_ref().filter(|_| self.soft_params[3] > 0.5) else {
+        let Some((copy, (width, height))) = self
+            .soft_depth
+            .as_ref()
+            .filter(|_| self.soft_params[3] > 0.5 || self.depth_reader)
+        else {
             return;
         };
         let extent = wgpu::Extent3d {
@@ -1310,33 +1469,47 @@ impl WorldRenderer {
                 color[3] = evaluate_wave_func(wave, total, &mut rng).clamp(0.0, 1.0) as f32;
             }
             pass.uniform.color = color;
-            gpu.queue
-                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+            self.slab.write(pass.slot, &pass.uniform);
         }
+        self.slab.flush(gpu);
     }
 
     /// Moves the movers' batches by `delta_seconds`: the rotators turn
-    /// (`handleFuncRotating`'s `mesh.rotate` each frame) and each lift
-    /// stands where `travel(model_index)`, the lift system's travel for its
-    /// model, puts it, or at rest without one (`handleLift`).
-    pub fn move_movers(&mut self, gpu: &Gpu, delta_seconds: f64, travel: impl Fn(usize) -> Option<f64>) {
+    /// (`handleFuncRotating`'s `mesh.rotate` each frame), each lift stands
+    /// where `travel(model_index)`, the lift system's travel for its model,
+    /// puts it, or at rest without one (`handleLift`), and each button is
+    /// pressed in by `press(model_index)` (`handleButton`).
+    pub fn move_movers(
+        &mut self,
+        gpu: &Gpu,
+        delta_seconds: f64,
+        travel: impl Fn(usize) -> Option<f64>,
+        press: impl Fn(usize) -> Option<[f64; 3]>,
+    ) {
         if self.movers.is_empty() {
             return;
         }
         self.mover_time += delta_seconds;
-        let transforms: Vec<[[f32; 4]; 4]> = self
-            .movers
-            .iter()
-            .map(|m| m.transform(self.mover_time, travel(m.model_index)).to_cols_array_2d())
-            .collect();
+        let time = self.mover_time;
+        self.mover_transforms.clear();
+        self.mover_transforms.extend(self.movers.iter().map(|m| {
+            m.transform(time, travel(m.model_index), press(m.model_index))
+                .to_cols_array_2d()
+        }));
         for pass in &mut self.passes {
             let Some(mover) = self.batch_movers.get(pass.batch).copied().flatten() else {
                 continue;
             };
-            pass.uniform.model = transforms[mover];
-            gpu.queue
-                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+            // A lift at rest or a button not pressed keeps its matrix: no
+            // upload for it.
+            let model = self.mover_transforms[mover];
+            if pass.uniform.model == model {
+                continue;
+            }
+            pass.uniform.model = model;
+            self.slab.write(pass.slot, &pass.uniform);
         }
+        self.slab.flush(gpu);
     }
 
     /// The brush models that move ([`Self::move_movers`]).
@@ -1419,6 +1592,18 @@ impl WorldRenderer {
     /// draw after every opaque surface (the world's and the models').
     pub fn draw_visible_blended(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
         self.draw_passes(pass, visible, self.opaque_count..self.passes.len());
+    }
+
+    /// The blended passes that are not additive (alpha indices 0-999).
+    pub fn draw_visible_alpha_blended(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, self.opaque_count..self.additive_start);
+    }
+
+    /// The additive passes (alpha indices from 1000), which draw over
+    /// whatever sits between them and the other blended ones (map
+    /// particles, `PARTICLE_ALPHA_INDEX`).
+    pub fn draw_visible_additive(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool]) {
+        self.draw_passes(pass, visible, self.additive_start..self.passes.len());
     }
 
     fn draw_passes(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[bool], range: std::ops::Range<usize>) {

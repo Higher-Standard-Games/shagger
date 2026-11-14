@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use shagger_shared::js::{is_js_whitespace, js_parse_float, js_string_to_number};
+use shagger_shared::js::{is_js_whitespace, js_max, js_min, js_parse_float, js_string_to_number};
 
 use super::q3_shader_types::{
     AlphaFunc, AlphaGen, AlphaGenType, AnimMap, BlendFactor, Condition, CullMode, DEFAULT_SKY_HEIGHT, DeformType,
@@ -529,9 +529,22 @@ fn parse_shader_body(name: &str, tokens: &Tokens, start: usize) -> (Q3Shader, us
                     depth_for_opaque = or(pf(tokens, pos), 512.0);
                     pos += 1;
                 }
+                // qfusion: under 0.1 means 128.
+                if depth_for_opaque <= 0.1 {
+                    depth_for_opaque = 128.0;
+                }
+                // Optional clear distance (qfusion): no fog for this far into
+                // the volume, kept at least 128 short of opaque.
+                let mut clear_dist = 0.0;
+                if let Some(value) = tok(tokens, pos).map(js_string_to_number).filter(|v| v.is_finite()) {
+                    clear_dist = value;
+                    pos += 1;
+                }
+                let clear_dist = js_max(0.0, js_min(clear_dist, depth_for_opaque - 128.0));
                 shader.fog_parms = Some(FogParms {
                     color: rgb,
                     depth_for_opaque,
+                    clear_dist,
                 });
             }
             "skyparms" => {

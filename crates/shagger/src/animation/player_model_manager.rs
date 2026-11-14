@@ -28,8 +28,9 @@
 //!   clip's speed ([`PlayerModel::set_upper_body_share`]);
 //! - an upper-body stance, the blade's, which masks locomotion out of the
 //!   upper body ([`PlayerModel::set_upper_body_stance`]);
-//! - a one-shot ([`PlayerModel::play_once`]): `blade_slash` on the upper
-//!   body only, any other clip on the whole body with locomotion stopped;
+//! - a one-shot ([`PlayerModel::play_once`]): `blade_slash` and the taunts
+//!   on the upper body only, any other clip on the whole body with
+//!   locomotion stopped;
 //! - the aim pitch's spine bend ([`PlayerAimPose`]), after the clips.
 //!
 //! The outline proxy, the powerup glow and pose stepping (LOD) are not ported.
@@ -51,8 +52,15 @@ use crate::loader::model::gltf_model::{GltfModel, NodeTransform, Skeleton};
 /// The gameplay hull's height (`PLAYER_HEIGHT`).
 pub const PLAYER_HEIGHT: f32 = 64.0;
 
-/// The victory dances, each optional (`DANCE_ANIMS`).
-pub const DANCE_ANIMS: [&str; 3] = ["dance_1", "dance_2", "dance_3"];
+/// Taunts: played over the upper body after a kill, and among the victory
+/// clips (`TAUNT_ANIMS`).
+pub const TAUNT_ANIMS: [&str; 3] = ["taunt_1", "taunt_2", "taunt_3"];
+/// The clips the post-game winner showcase picks one of at random: dances
+/// and taunts (`VICTORY_ANIMS`).
+pub const VICTORY_ANIMS: [&str; 6] = ["dance_1", "dance_2", "dance_3", "taunt_1", "taunt_2", "taunt_3"];
+/// One-shots that play on the spine, arms and head while the legs keep
+/// their locomotion (`UPPER_BODY_ONE_SHOTS`).
+const UPPER_BODY_ONE_SHOTS: [&str; 4] = ["blade_slash", "taunt_1", "taunt_2", "taunt_3"];
 /// The clip the blade's stance loops (`BLADE_STANCE`).
 pub const BLADE_STANCE: &str = "blade_idle";
 
@@ -139,7 +147,7 @@ pub struct OneShotLayer {
     pub frame: f64,
     pub speed_ratio: f64,
     pub base_speed_ratio: f64,
-    /// The blade swing: only the upper body, over running legs.
+    /// The blade swing or a taunt: only the upper body, over running legs.
     pub upper_body_only: bool,
     /// On the frame the clip ends: the channel whose animatable ended
     /// first. It writes its last key and ends the clip
@@ -542,14 +550,14 @@ impl PlayerModel {
         instance.upper_masked = masked;
     }
 
-    /// `playOnce`: an exclusive one-shot, or for `blade_slash` a
-    /// spine-and-arms overlay over the running legs.
+    /// `playOnce`: an exclusive one-shot, or for the blade swing and the
+    /// taunts a spine-and-arms overlay over the running legs.
     pub fn play_once(&self, instance: &mut PlayerModelInstance, name: &str, speed_ratio: f64) -> bool {
         let Some(clip) = self.anim_index(name) else {
             return false;
         };
         self.stop_one_shot(instance, false);
-        let upper_body_only = name == "blade_slash" && self.upper_body.iter().any(|&u| u);
+        let upper_body_only = UPPER_BODY_ONE_SHOTS.contains(&name) && self.upper_body.iter().any(|&u| u);
         let anim = &self.anims[clip];
         if !anim
             .channels
@@ -582,6 +590,12 @@ impl PlayerModel {
     #[must_use]
     pub fn is_full_body_one_shot_playing(&self, instance: &PlayerModelInstance) -> bool {
         instance.one_shot.as_ref().is_some_and(|o| !o.upper_body_only)
+    }
+
+    /// `activeOneShot`: the name of the one-shot playing, if any.
+    #[must_use]
+    pub fn active_one_shot<'a>(&'a self, instance: &PlayerModelInstance) -> Option<&'a str> {
+        instance.one_shot.as_ref().map(|o| self.anims[o.clip].name.as_str())
     }
 
     /// `isOneShotPlaying`.

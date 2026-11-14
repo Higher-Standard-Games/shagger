@@ -259,7 +259,12 @@ struct PipelineKey {
 /// The pipelines one draw of `material` takes, in draw order: an opaque
 /// outlined mesh draws its outline colour, itself, then the outline into
 /// depth; a blended mesh with separate culling draws its back faces first.
-fn pipeline_keys(material: &GpuMaterial, mirrored: bool, skinned: bool, outlined: bool) -> Vec<PipelineKey> {
+fn pipeline_keys(
+    material: &GpuMaterial,
+    mirrored: bool,
+    skinned: bool,
+    outlined: bool,
+) -> impl Iterator<Item = PipelineKey> + use<> {
     let key = PipelineKey {
         blend: material.blend,
         cull: if material.two_sided { Cull::None } else { Cull::Back },
@@ -270,36 +275,45 @@ fn pipeline_keys(material: &GpuMaterial, mirrored: bool, skinned: bool, outlined
         skinned,
         pass: PassKind::Color,
     };
-    if material.blend == BlendKind::Opaque {
+    // At most three passes a draw: a fixed array, no allocation per draw.
+    let (keys, count) = if material.blend == BlendKind::Opaque {
         if outlined {
-            vec![
+            (
+                [
+                    PipelineKey {
+                        pass: PassKind::Outline,
+                        ..key
+                    },
+                    key,
+                    PipelineKey {
+                        pass: PassKind::OutlineDepth,
+                        ..key
+                    },
+                ],
+                3,
+            )
+        } else {
+            ([key; 3], 1)
+        }
+    } else if material.separate_culling {
+        (
+            [
                 PipelineKey {
-                    pass: PassKind::Outline,
+                    cull: Cull::Front,
+                    ..key
+                },
+                PipelineKey {
+                    cull: Cull::Back,
                     ..key
                 },
                 key,
-                PipelineKey {
-                    pass: PassKind::OutlineDepth,
-                    ..key
-                },
-            ]
-        } else {
-            vec![key]
-        }
-    } else if material.separate_culling {
-        vec![
-            PipelineKey {
-                cull: Cull::Front,
-                ..key
-            },
-            PipelineKey {
-                cull: Cull::Back,
-                ..key
-            },
-        ]
+            ],
+            2,
+        )
     } else {
-        vec![key]
-    }
+        ([key; 3], 1)
+    };
+    keys.into_iter().take(count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -440,6 +454,11 @@ pub struct ModelRenderer {
     /// A normal map that leaves the normal as it is.
     flat_normal: wgpu::TextureView,
     models: Vec<GpuModel>,
+    /// Decoded and uploaded images by their encoded bytes: the same weapon or
+    /// player model uploads more than once (several bots, a pickup and the
+    /// hand weapon), and its images are decoded and stored once. Models are
+    /// never removed, so this holds nothing the models do not.
+    images: HashMap<Vec<u8>, Option<wgpu::TextureView>>,
     lights: Vec<ModelLight>,
     dynamic: DynamicLightBlock,
     /// World fog, from the next `prepare`.
@@ -456,6 +475,8 @@ pub struct ModelRenderer {
     opaque_scratch: Vec<(ModelDraw, PipelineKey)>,
     blended_scratch: Vec<(ModelDraw, PipelineKey, f32, usize)>,
     upload_scratch: Vec<u8>,
+    /// [`Self::update_vertices`]' vertices, kept for their storage.
+    vertex_scratch: Vec<ModelVertex>,
     /// Diffuse BRDF: false Lambert, true Burley.
     burley: bool,
 }
@@ -638,6 +659,7 @@ impl ModelRenderer {
             white,
             flat_normal,
             models: Vec::new(),
+            images: HashMap::new(),
             lights: Vec::new(),
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
@@ -647,6 +669,7 @@ impl ModelRenderer {
             opaque_scratch: Vec::new(),
             blended_scratch: Vec::new(),
             upload_scratch: Vec::new(),
+            vertex_scratch: Vec::new(),
             burley: false,
         }
     }
@@ -710,21 +733,26 @@ impl ModelRenderer {
                 if views.contains_key(&image) {
                     continue;
                 }
-                if let Some(decoded) = model
-                    .images
-                    .get(image)
-                    .and_then(|img| decode_image(&img.name, &img.bytes))
-                {
-                    let texture = upload_texture(
-                        gpu,
-                        &model.images[image].name,
-                        &Rgba8Image {
-                            width: decoded.width,
-                            height: decoded.height,
-                            pixels: decoded.pixels,
-                        },
-                    );
-                    views.insert(image, texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                let Some(img) = model.images.get(image) else {
+                    continue;
+                };
+                let view = match self.images.get(&img.bytes) {
+                    Some(view) => view.clone(),
+                    None => {
+                        let view = decode_image(&img.name, &img.bytes).map(|decoded| {
+                            let image = Rgba8Image {
+                                width: decoded.width,
+                                height: decoded.height,
+                                pixels: decoded.pixels,
+                            };
+                            upload_texture(gpu, &img.name, &image).create_view(&wgpu::TextureViewDescriptor::default())
+                        });
+                        self.images.insert(img.bytes.clone(), view.clone());
+                        view
+                    }
+                };
+                if let Some(view) = view {
+                    views.insert(image, view);
                 }
             }
             let view = m.base_color_image.and_then(|i| views.get(&i)).unwrap_or(&self.white);
@@ -916,16 +944,15 @@ impl ModelRenderer {
         else {
             return;
         };
-        let vertices: Vec<ModelVertex> = positions
-            .iter()
-            .enumerate()
-            .map(|(i, &position)| ModelVertex {
-                position,
-                normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-                uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-            })
-            .collect();
-        let bytes: &[u8] = bytemuck::cast_slice(&vertices);
+        // The trails stream every frame: one buffer reused for them all.
+        let vertices = &mut self.vertex_scratch;
+        vertices.clear();
+        vertices.extend(positions.iter().enumerate().map(|(i, &position)| ModelVertex {
+            position,
+            normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+            uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+        }));
+        let bytes: &[u8] = bytemuck::cast_slice(vertices);
         if bytes.len() as u64 <= p.vertex.size() {
             gpu.queue.write_buffer(&p.vertex, 0, bytes);
         }
@@ -1206,13 +1233,10 @@ impl ModelRenderer {
             let outlined = draw.outline.is_some_and(|o| o.width > 0.0);
             let keys = pipeline_keys(material, mirrored, skinned, outlined);
             if material.blend == BlendKind::Opaque {
-                opaque.extend(keys.into_iter().map(|key| (*draw, key)));
+                opaque.extend(keys.map(|key| (*draw, key)));
             } else {
                 let distance = draw.world.transform_point3(primitive.bounds_center).distance(eye);
-                blended.extend(
-                    keys.into_iter()
-                        .map(|key| (*draw, key, distance, primitive.creation_order)),
-                );
+                blended.extend(keys.map(|key| (*draw, key, distance, primitive.creation_order)));
             }
         }
         blended.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.3.cmp(&b.3)));
@@ -1299,9 +1323,9 @@ impl ModelRenderer {
         }
         self.upload_scratch = bytes;
         if !joints.is_empty() {
-            let flat: Vec<[f32; 16]> = joints.iter().map(Mat4::to_cols_array).collect();
+            // `Mat4` is 16 column-major `f32`s: the palette uploads as it is.
             gpu.queue
-                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(&flat));
+                .write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(joints));
         }
     }
 

@@ -71,6 +71,10 @@ struct Device {
     reopen_at: Instant,
     /// The wait after the next failed look.
     reopen_wait: Duration,
+    /// A look for a device under way, off the frame's thread: a failed open
+    /// costs milliseconds (the sound system reads its configuration each
+    /// time), a hitch every retry on a machine with no sound card.
+    probe: Option<std::thread::JoinHandle<bool>>,
     /// What must still reach the mixer (streams, stops, volumes) when the
     /// queue was full or there was no device. A one-shot that cannot play
     /// now is dropped instead: late, it would be wrong.
@@ -233,6 +237,7 @@ impl AudioV2Sfx {
             output: Some(output),
             reopen_at: Instant::now(),
             reopen_wait: REOPEN_EVERY,
+            probe: None,
             pending: VecDeque::new(),
         }))))
     }
@@ -248,6 +253,7 @@ impl AudioV2Sfx {
                 rate: FALLBACK_RATE,
                 reopen_at: Instant::now() + REOPEN_EVERY,
                 reopen_wait: REOPEN_EVERY * 2,
+                probe: None,
                 pending: VecDeque::new(),
             })))
         })
@@ -278,7 +284,24 @@ impl AudioV2Sfx {
                 device.reopen_wait = REOPEN_EVERY;
             }
         }
-        if device.output.is_none() && Instant::now() >= device.reopen_at {
+        // Due for a look: a thread probes, and only a device it found is
+        // opened here.
+        if device.output.is_none() && device.probe.is_none() && Instant::now() >= device.reopen_at {
+            let rate = device.rate;
+            device.probe = std::thread::Builder::new()
+                .name("audio probe".into())
+                .spawn(move || DeviceOutput::probe(Some(rate)))
+                .ok();
+        }
+        let found = match &device.probe {
+            Some(probe) if probe.is_finished() => device.probe.take().and_then(|p| p.join().ok()),
+            _ => None,
+        };
+        if found == Some(false) {
+            device.reopen_at = Instant::now() + device.reopen_wait;
+            device.reopen_wait = (device.reopen_wait * 2).min(REOPEN_MAX);
+        }
+        if device.output.is_none() && found == Some(true) {
             match DeviceOutput::open(Some(device.rate)) {
                 Ok(output) => {
                     if output.sample_rate() != device.rate {
@@ -664,6 +687,7 @@ mod tests {
             rate: FALLBACK_RATE,
             reopen_at: Instant::now(),
             reopen_wait: REOPEN_EVERY,
+            probe: None,
             pending: VecDeque::new(),
         };
         let buffer = Arc::new(decode_sound(&wav(), 48000).unwrap());
