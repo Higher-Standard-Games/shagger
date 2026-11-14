@@ -24,6 +24,15 @@ use super::raised_key::{Accent, KeyFace, KeyLook, KeyText, KeyTextLayout, Raised
 use crate::lobby::lobby_client::LobbyClient;
 use crate::lobby::types::LobbyIn;
 
+/// The bot skill presets the lobby accepts (`lobby:invite_bot`), easiest
+/// first: the id, and its name in the menu.
+const BOT_LEVELS: [(&str, &str); 4] = [
+    ("easy", "Easy"),
+    ("medium", "Medium"),
+    ("hard", "Hard"),
+    ("insane", "Insane"),
+];
+
 /// How long an unanswered bot invite holds the key down.
 const BOT_INVITE_TIMEOUT: Duration = Duration::from_secs(9);
 /// How long a flash note and a key's changed hint stay.
@@ -107,6 +116,8 @@ pub struct MatchLobbyView {
     invite_bot_pending: Option<Instant>,
     /// Quick play: bots still to add before this player readies up; 0 when off.
     auto_fill_bots: usize,
+    /// The skill menu beside Add bot is open.
+    bot_menu: bool,
     /// A note beside the Add bot key, such as "Lobby changed to private".
     flash: Option<(String, Instant)>,
     /// A key's hint changed for a moment: Add bot's "No bots available",
@@ -224,6 +235,7 @@ impl MatchLobbyView {
             active_match_id,
             local_player_id: local_player_id.map(str::to_owned),
             invite_bot_pending: None,
+            bot_menu: false,
             auto_fill_bots: 0,
             flash: None,
             bot_note: None,
@@ -456,14 +468,15 @@ impl MatchLobbyView {
         client.set_ready(&self.lobby_id, ready);
     }
 
-    /// `requestBot`.
-    fn request_bot(&mut self, client: &LobbyClient) {
+    /// `requestBot`: at `difficulty` (a preset), or without one at the
+    /// server's choice for the inviter.
+    fn request_bot(&mut self, client: &LobbyClient, difficulty: Option<&str>) {
         if self.phase == Phase::Starting || self.invite_bot_pending.is_some() || self.players.len() >= self.max_players
         {
             return;
         }
         self.invite_bot_pending = Some(Instant::now());
-        client.invite_bot(&self.lobby_id, None);
+        client.invite_bot(&self.lobby_id, difficulty);
     }
 
     /// Quick play's next step: another bot while too few are seated, then ready up.
@@ -476,7 +489,7 @@ impl MatchLobbyView {
             return;
         }
         if self.bot_count() < self.auto_fill_bots && self.players.len() < self.max_players {
-            self.request_bot(client);
+            self.request_bot(client, None);
             return;
         }
         // Bots ready up on their own, so this player readies last: earlier,
@@ -1610,6 +1623,90 @@ impl MatchLobbyView {
         }
     }
 
+    /// `match-lobby__bot-menu`: the skill menu, opening upwards from
+    /// `bottom_left` over the room; the preset picked, if one was. A press
+    /// outside it and the arrow (`caret`), or Esc, closes it.
+    fn bot_level_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        bottom_left: Pos2,
+        caret: Rect,
+        style: &RoomStyle<'_>,
+    ) -> Option<&'static str> {
+        let (pad, item_pad, size) = (8.0, vec2(16.0, 10.0), 16.0);
+        let painter = ui.painter().clone();
+        let names: Vec<_> = BOT_LEVELS
+            .iter()
+            .map(|(_, name)| {
+                text(
+                    &painter,
+                    &name.to_uppercase(),
+                    size,
+                    style.display.clone(),
+                    ink(1.0),
+                    size * 0.1,
+                )
+            })
+            .collect();
+        let widest = names.iter().map(|g| g.size().x).fold(0.0, f32::max);
+        let item_h = size + item_pad.y * 2.0;
+        let width = (widest + item_pad.x * 2.0 + pad * 2.0).max(180.0);
+        let height = item_h * BOT_LEVELS.len() as f32 + pad * 2.0;
+        let menu = Rect::from_min_size(bottom_left - vec2(0.0, height), vec2(width, height));
+        let id = egui::Id::NULL.with(("match-lobby", "bot-menu"));
+        let mut picked = None;
+        let area = egui::Area::new(id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.min)
+            .show(ui.ctx(), |ui| {
+                let painter = ui.painter().clone();
+                let slant = |r: Rect| {
+                    vec![
+                        r.left_top() + vec2(10.0, 0.0),
+                        r.right_top(),
+                        r.right_bottom() - vec2(10.0, 0.0),
+                        r.left_bottom(),
+                    ]
+                };
+                painter.add(Shape::convex_polygon(
+                    slant(menu.translate(vec2(6.0, 6.0))),
+                    ink(0.6),
+                    Stroke::NONE,
+                ));
+                painter.add(Shape::convex_polygon(slant(menu), cream(), Stroke::NONE));
+                for (i, ((level, _), name)) in BOT_LEVELS.iter().zip(names).enumerate() {
+                    let r = Rect::from_min_size(
+                        pos2(menu.left() + pad, menu.top() + pad + i as f32 * item_h),
+                        vec2(width - pad * 2.0, item_h),
+                    );
+                    let response = ui.interact(r, id.with(i), egui::Sense::click());
+                    let color = if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        painter.rect_filled(r, 0.0, ink(1.0));
+                        cream()
+                    } else {
+                        ink(1.0)
+                    };
+                    painter.galley(
+                        pos2(r.left() + item_pad.x, r.center().y - name.size().y / 2.0),
+                        name,
+                        color,
+                    );
+                    if response.clicked() {
+                        picked = Some(*level);
+                    }
+                }
+                ui.allocate_rect(menu, egui::Sense::hover());
+            });
+        let outside = ui
+            .input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !caret.contains(p)))
+            && !area.response.contains_pointer();
+        if picked.is_none() && (outside || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+            self.bot_menu = false;
+        }
+        picked
+    }
+
     /// `match-lobby__actions`: Leave, Add bot, Switch and Shuffle, Rejoin, Ready.
     #[allow(clippy::too_many_arguments)]
     fn actions(
@@ -1642,7 +1739,8 @@ impl MatchLobbyView {
                    look: KeyLook,
                    hover: Option<(KeyLook, f32)>,
                    disabled: bool,
-                   lead: f32| {
+                   lead: f32,
+                   cut_px: Option<f32>| {
             let lg = text(
                 painter,
                 &label.to_uppercase(),
@@ -1661,9 +1759,14 @@ impl MatchLobbyView {
             );
             let w = (lg.size().x + lead).max(hg.size().x) + pad.0 + pad.1 + 8.0;
             let r = Rect::from_min_size(pos2(*x, act_top), vec2(w, s.act_h));
-            let mut key = RaisedKey::new(("room-act", id), r, look).disabled(disabled);
+            // `--key-cut` in pixels rather than of the width.
+            let cut = |look: KeyLook| match cut_px {
+                Some(c) => KeyLook { cut: c / w, ..look },
+                None => look,
+            };
+            let mut key = RaisedKey::new(("room-act", id), r, cut(look)).disabled(disabled);
             if let Some((h, p)) = hover {
-                key = key.hover(h, p);
+                key = key.hover(cut(h), p);
             }
             let face = key.show(ui);
             // The label stands `lead` in, past a drawn mark; the hint does not.
@@ -1710,6 +1813,7 @@ impl MatchLobbyView {
             Some((leave_hover, -0.35)),
             false,
             arrow,
+            None,
         );
         // `←`, drawn: the face's font may not have the arrow.
         {
@@ -1731,6 +1835,10 @@ impl MatchLobbyView {
         let bot_disabled = starting || self.invite_bot_pending.is_some() || full || self.bot_note.is_some();
         let cream_act = KeyLook::cream().depth(act_depth);
         let bot_hint = self.bot_hint();
+        // Add bot and the skill arrow lean by the same fixed amount, as one
+        // split key (the usual 3% would leave the narrow arrow upright).
+        let key_cut = 5.0;
+        let bot_left = x;
         let bot = act(
             ui,
             &mut x,
@@ -1741,9 +1849,47 @@ impl MatchLobbyView {
             None,
             bot_disabled,
             0.0,
+            Some(key_cut),
         );
         if bot.clicked {
-            self.request_bot(client);
+            self.request_bot(client, None);
+        }
+        // The arrow starts where Add bot's slanted edge ends, over its side.
+        let caret_left = x - (act_depth * 0.75 + 2.0 + gap) - key_cut + 2.0;
+        let caret_pad = clamp_css(12.0, style.window_width * 0.01, 18.0);
+        let caret_w = caret_pad * 2.0 + 16.0;
+        let caret_rect = Rect::from_min_size(pos2(caret_left, act_top), vec2(caret_w, s.act_h));
+        let caret_look = KeyLook {
+            cut: key_cut / caret_w,
+            ..cream_act.clone()
+        };
+        let caret = RaisedKey::new(("room-act", "bot-level"), caret_rect, caret_look)
+            .disabled(bot_disabled)
+            .show(ui);
+        {
+            // `▾`, drawn: the face's font may not have it.
+            let c = caret.rect.center();
+            let (hw, hh) = (7.0, 5.0);
+            painter.add(Shape::convex_polygon(
+                vec![
+                    pos2(c.x - hw, c.y - hh * 0.6),
+                    pos2(c.x + hw, c.y - hh * 0.6),
+                    pos2(c.x, c.y + hh * 1.4),
+                ],
+                caret.text,
+                Stroke::NONE,
+            ));
+        }
+        x = caret_left + caret_w + act_depth * 0.75 + 2.0 + gap;
+        if bot_disabled {
+            self.bot_menu = false;
+        } else if caret.clicked {
+            self.bot_menu = !self.bot_menu;
+        } else if self.bot_menu
+            && let Some(level) = self.bot_level_menu(ui, pos2(bot_left, act_top - 10.0), caret.rect, style)
+        {
+            self.bot_menu = false;
+            self.request_bot(client, Some(level));
         }
         let flash_at = pos2(x - gap + 14.0, bot.rect.center().y);
 
@@ -1765,6 +1911,7 @@ impl MatchLobbyView {
                 None,
                 starting,
                 0.0,
+                None,
             );
             if switch.clicked {
                 client.switch_team(&self.lobby_id);
@@ -1784,6 +1931,7 @@ impl MatchLobbyView {
                 None,
                 starting || self.shuffle_sent,
                 0.0,
+                None,
             );
             if shuffle.clicked {
                 client.vote_shuffle(&self.lobby_id);
@@ -1919,6 +2067,7 @@ impl MatchLobbyView {
                     None,
                     !style.online,
                     0.0,
+                    None,
                 );
                 if rejoin.clicked {
                     self.recover_note = Some("Checking seat…".into());
