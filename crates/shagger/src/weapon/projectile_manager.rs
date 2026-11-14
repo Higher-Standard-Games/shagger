@@ -21,7 +21,7 @@ use crate::loader::shader::q3_shader_registry::Q3ShaderRegistry;
 use crate::loader::texture::resolve_and_load_texture;
 use crate::rendering::gpu::Gpu;
 use crate::rendering::model_renderer::{ModelDraw, ModelHandle, ModelMaterialMode, ModelRenderer};
-use crate::weapon::effect_geometry::unlit_trail_ribbon_positions;
+use crate::weapon::effect_geometry::unlit_trail_ribbon_positions_into;
 
 /// `_md3Correction`: MD3 projectiles face +Y in Quake axes, a -90° turn
 /// about Y.
@@ -262,6 +262,11 @@ pub struct ProjectileTrail {
     model: Option<ModelHandle>,
     /// Each ribbon's normals and UVs as built; updates move only positions.
     built: Vec<RibbonAttributes>,
+    /// The four paths, the arc lengths and a ribbon's positions, kept
+    /// between frames for their storage: a trail streams every frame.
+    paths: [Vec<DVec3>; 4],
+    arc: Vec<f64>,
+    positions: Vec<[f32; 3]>,
 }
 
 impl ProjectileTrail {
@@ -305,43 +310,8 @@ impl ProjectileTrail {
     /// the trail.
     #[must_use]
     pub fn paths(&self, camera: Option<DVec3>) -> [Vec<DVec3>; 4] {
-        let points = &self.points;
-        let n = points.len();
         let mut paths: [Vec<DVec3>; 4] = Default::default();
-        if n < 2 {
-            return paths;
-        }
-        let mut arc = vec![0.0; n];
-        for i in 1..n {
-            arc[i] = arc[i - 1] + points[i].distance(points[i - 1]);
-        }
-        let total = arc[n - 1];
-        for (i, &p) in points.iter().enumerate() {
-            let tangent = normalized(if i < n - 1 {
-                points[i + 1] - p
-            } else {
-                p - points[i - 1]
-            });
-            let mut perp = DVec3::ZERO;
-            if let Some(camera) = camera {
-                perp = tangent.cross(camera - p);
-            }
-            if perp.length_squared() < 0.001 {
-                perp = tangent.cross(DVec3::Y);
-            }
-            if perp.length_squared() < 0.001 {
-                // Vector3.Forward() in a left-handed scene.
-                perp = tangent.cross(DVec3::Z);
-            }
-            let perp = normalized(perp);
-            let t = if total > 0.001 { arc[i] / total } else { 0.0 };
-            let width = TRAIL_WIDTH * t;
-            let perp_cross = normalized(tangent.cross(perp));
-            paths[0].push(p + perp * width);
-            paths[1].push(p - perp * width);
-            paths[2].push(p + perp_cross * width);
-            paths[3].push(p - perp_cross * width);
-        }
+        trail_paths(&self.points, camera, &mut paths, &mut Vec::new());
         paths
     }
 
@@ -349,7 +319,19 @@ impl ProjectileTrail {
     /// streams their positions after. `light_color` is the definition's,
     /// the trail's colour (`trailMaterialFor`).
     pub fn update(&mut self, gpu: &Gpu, models: &mut ModelRenderer, camera: Option<DVec3>, light_color: Option<Vec3>) {
-        let [a, b, c, d] = self.paths(camera);
+        let mut paths = std::mem::take(&mut self.paths);
+        trail_paths(&self.points, camera, &mut paths, &mut self.arc);
+        self.update_ribbons(gpu, models, &paths, light_color);
+        self.paths = paths;
+    }
+
+    fn update_ribbons(
+        &mut self,
+        gpu: &Gpu,
+        models: &mut ModelRenderer,
+        [a, b, c, d]: &[Vec<DVec3>; 4],
+        light_color: Option<Vec3>,
+    ) {
         if a.is_empty() {
             return;
         }
@@ -357,9 +339,9 @@ impl ProjectileTrail {
         match self.model {
             Some(model) => {
                 for (i, (p, q)) in ribbons.iter().enumerate() {
-                    let positions = unlit_trail_ribbon_positions(p, q);
+                    unlit_trail_ribbon_positions_into(p, q, &mut self.positions);
                     let built = &self.built[i];
-                    models.update_vertices(gpu, model, i, &positions, &built.0, &built.1);
+                    models.update_vertices(gpu, model, i, &self.positions, &built.0, &built.1);
                 }
             }
             None => {
@@ -390,6 +372,49 @@ impl ProjectileTrail {
                 out.push(ModelDraw::new(model, i, Mat4::IDENTITY));
             }
         }
+    }
+}
+
+/// [`ProjectileTrail::paths`] into `paths`, with `arc` for the arc lengths.
+fn trail_paths(points: &[DVec3], camera: Option<DVec3>, paths: &mut [Vec<DVec3>; 4], arc: &mut Vec<f64>) {
+    for path in paths.iter_mut() {
+        path.clear();
+    }
+    let n = points.len();
+    if n < 2 {
+        return;
+    }
+    arc.clear();
+    arc.resize(n, 0.0);
+    for i in 1..n {
+        arc[i] = arc[i - 1] + points[i].distance(points[i - 1]);
+    }
+    let total = arc[n - 1];
+    for (i, &p) in points.iter().enumerate() {
+        let tangent = normalized(if i < n - 1 {
+            points[i + 1] - p
+        } else {
+            p - points[i - 1]
+        });
+        let mut perp = DVec3::ZERO;
+        if let Some(camera) = camera {
+            perp = tangent.cross(camera - p);
+        }
+        if perp.length_squared() < 0.001 {
+            perp = tangent.cross(DVec3::Y);
+        }
+        if perp.length_squared() < 0.001 {
+            // Vector3.Forward() in a left-handed scene.
+            perp = tangent.cross(DVec3::Z);
+        }
+        let perp = normalized(perp);
+        let t = if total > 0.001 { arc[i] / total } else { 0.0 };
+        let width = TRAIL_WIDTH * t;
+        let perp_cross = normalized(tangent.cross(perp));
+        paths[0].push(p + perp * width);
+        paths[1].push(p - perp * width);
+        paths[2].push(p + perp_cross * width);
+        paths[3].push(p - perp_cross * width);
     }
 }
 

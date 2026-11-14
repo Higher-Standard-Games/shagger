@@ -257,18 +257,18 @@ impl Emitter {
         let dt = js_min(0.25, js_max(0.0, (now - self.last) / 1000.0));
         self.last = now;
         let plan = &self.plan;
-        for i in (0..self.sprites.len()).rev() {
-            let s = &mut self.sprites[i];
+        // One pass that keeps the order, not a `remove` per spent sprite.
+        self.sprites.retain_mut(|s| {
             s.age += dt;
             if s.age >= plan.life {
-                self.sprites.remove(i);
-                continue;
+                return false;
             }
             if plan.gravity {
                 s.velocity.y -= GRAVITY_ACCEL * dt;
             }
             s.position += s.velocity * dt;
-        }
+            true
+        });
         let interval = 1000.0 / plan.rate;
         // Out of range it rests; coming back, it picks up from now rather
         // than catching up.

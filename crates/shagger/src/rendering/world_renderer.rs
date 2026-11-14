@@ -297,6 +297,8 @@ pub struct WorldRenderer {
     batch_movers: Vec<Option<usize>>,
     /// Seconds the rotators have turned (`move_movers`).
     mover_time: f64,
+    /// Each mover's matrix this frame, kept between frames for its storage.
+    mover_transforms: Vec<[[f32; 4]; 4]>,
     /// The scene depth soft particles read: its layout, a copy of the main
     /// depth taken between the opaque and blended passes, its size, and
     /// whether this frame reads it.
@@ -1204,6 +1206,7 @@ impl WorldRenderer {
             movers: geometry.movers.clone(),
             batch_movers: geometry.batches.iter().map(|b| b.mover).collect(),
             mover_time: 0.0,
+            mover_transforms: Vec::with_capacity(geometry.movers.len()),
             soft_batches,
             soft_layout,
             soft_depth: None,
@@ -1377,19 +1380,23 @@ impl WorldRenderer {
             return;
         }
         self.mover_time += delta_seconds;
-        let transforms: Vec<[[f32; 4]; 4]> = self
-            .movers
-            .iter()
-            .map(|m| {
-                m.transform(self.mover_time, travel(m.model_index), press(m.model_index))
-                    .to_cols_array_2d()
-            })
-            .collect();
+        let time = self.mover_time;
+        self.mover_transforms.clear();
+        self.mover_transforms.extend(self.movers.iter().map(|m| {
+            m.transform(time, travel(m.model_index), press(m.model_index))
+                .to_cols_array_2d()
+        }));
         for pass in &mut self.passes {
             let Some(mover) = self.batch_movers.get(pass.batch).copied().flatten() else {
                 continue;
             };
-            pass.uniform.model = transforms[mover];
+            // A lift at rest or a button not pressed keeps its matrix: no
+            // upload for it.
+            let model = self.mover_transforms[mover];
+            if pass.uniform.model == model {
+                continue;
+            }
+            pass.uniform.model = model;
             gpu.queue
                 .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
         }

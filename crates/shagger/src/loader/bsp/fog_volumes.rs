@@ -562,7 +562,7 @@ impl FogVolumes {
     pub fn any_in_view(&self, view_proj: Mat4) -> bool {
         self.drawn.iter().any(|d| {
             let [lo, hi] = d.bounds;
-            let corners = (0..8).map(|i| {
+            let clips: [Vec4; 8] = std::array::from_fn(|i| {
                 let p = DVec3::new(
                     if i & 1 == 0 { lo.x } else { hi.x },
                     if i & 2 == 0 { lo.y } else { hi.y },
@@ -570,7 +570,6 @@ impl FogVolumes {
                 );
                 view_proj * Vec4::new(p.x as f32, p.y as f32, p.z as f32, 1.0)
             });
-            let clips: Vec<Vec4> = corners.collect();
             // Outside when every corner is beyond one clip plane.
             let out = |f: &dyn Fn(&Vec4) -> bool| clips.iter().all(f);
             !(out(&|c| c.x < -c.w)

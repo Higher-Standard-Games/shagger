@@ -346,6 +346,13 @@ impl EffectQuadBatch {
 
     /// Writes the frame's uniforms and, when `dirty`, the live instances.
     pub fn prepare(&mut self, gpu: &Gpu, frame: &EffectFrame, instances: &[EffectInstance], dirty: bool) {
+        let live = &instances[..instances.len().min(self.capacity)];
+        self.count = live.len() as u32;
+        // Nothing to draw: [`Self::draw`] records nothing, so the camera
+        // need not be uploaded (most batches are empty most frames).
+        if live.is_empty() {
+            return;
+        }
         let c = frame.camera_position;
         let globals = Globals {
             view_proj: frame.view_proj.to_cols_array_2d(),
@@ -361,11 +368,9 @@ impl EffectQuadBatch {
             fog: frame.fog,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let live = &instances[..instances.len().min(self.capacity)];
-        if dirty && !live.is_empty() {
+        if dirty {
             gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(live));
         }
-        self.count = live.len() as u32;
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {

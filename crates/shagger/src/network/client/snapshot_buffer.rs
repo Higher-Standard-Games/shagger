@@ -10,7 +10,7 @@
 //! `cl_timenudge` cvars itself; here the caller passes the clock (ms) to
 //! each call that reads it and sets the two cvars as fields.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 
 /// One entity as the buffer interpolates it for a frame, in Babylon's
 /// space (y up) with the yaw Babylon turns the body by.
@@ -101,17 +101,18 @@ struct Frame {
 
 #[derive(Debug, Clone)]
 pub struct SnapshotBuffer {
-    buffer: Vec<BufferedSnapshot>,
+    /// Oldest first; full ones drop from the front (`shift`).
+    buffer: VecDeque<BufferedSnapshot>,
     /// Base interpolation delay in ms (auto-adjusts to jitter).
     interp_delay: f64,
     /// `cl_interp`: a manual delay in ms, 0 for automatic.
     pub cl_interp: f64,
     /// `cl_timenudge`: render time nudge in ms.
     pub cl_timenudge: f64,
-    transit_samples: Vec<f64>,
+    transit_samples: VecDeque<f64>,
     transit: f64,
     last_receive_time: f64,
-    jitter_samples: Vec<f64>,
+    jitter_samples: VecDeque<f64>,
     frame: Option<Frame>,
     /// While the match is paused: the newest snapshot is where everything stands.
     held: bool,
@@ -127,14 +128,14 @@ impl Default for SnapshotBuffer {
 impl SnapshotBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::new(),
+            buffer: VecDeque::new(),
             interp_delay: DEFAULT_INTERP_DELAY_MS,
             cl_interp: 0.0,
             cl_timenudge: 0.0,
-            transit_samples: Vec::new(),
+            transit_samples: VecDeque::new(),
             transit: 0.0,
             last_receive_time: 0.0,
-            jitter_samples: Vec::new(),
+            jitter_samples: VecDeque::new(),
             frame: None,
             held: false,
             last_tick: None,
@@ -177,9 +178,9 @@ impl SnapshotBuffer {
 
         if self.last_receive_time > 0.0 {
             let interval = now - self.last_receive_time;
-            self.jitter_samples.push(interval);
+            self.jitter_samples.push_back(interval);
             if self.jitter_samples.len() > MAX_JITTER_SAMPLES {
-                self.jitter_samples.remove(0);
+                self.jitter_samples.pop_front();
             }
             self.update_interp_delay();
         }
@@ -188,21 +189,21 @@ impl SnapshotBuffer {
         if let Some(server) = server_local_time
             && (server - now).abs() < MAX_CLOCK_DRIFT_MS
         {
-            self.transit_samples.push(now - server);
+            self.transit_samples.push_back(now - server);
             if self.transit_samples.len() > MAX_JITTER_SAMPLES {
-                self.transit_samples.remove(0);
+                self.transit_samples.pop_front();
             }
             self.transit = self.transit_samples.iter().copied().fold(f64::INFINITY, f64::min);
         }
 
-        self.buffer.push(BufferedSnapshot {
+        self.buffer.push_back(BufferedSnapshot {
             receive_time: now,
             tick,
             entities,
             server_local_time,
         });
         while self.buffer.len() > MAX_BUFFER_SIZE {
-            self.buffer.remove(0);
+            self.buffer.pop_front();
         }
         // Indices into the buffer moved.
         self.frame = None;
@@ -259,7 +260,7 @@ impl SnapshotBuffer {
             self.interp_delay
         });
         let time = now - delay + self.cl_timenudge;
-        match self.buffer.last() {
+        match self.buffer.back() {
             Some(newest) if self.held => time.min(self.snap_time(newest)),
             _ => time,
         }
@@ -331,12 +332,13 @@ impl SnapshotBuffer {
         }
     }
 
-    /// All entity ids in the most recent snapshot.
-    pub fn latest_entity_ids(&self) -> HashSet<&str> {
+    /// All entity ids in the most recent snapshot, in no order, without
+    /// collecting them.
+    pub fn latest_entity_ids(&self) -> impl Iterator<Item = &str> {
         self.buffer
-            .last()
-            .map(|latest| latest.entities.keys().map(String::as_str).collect())
-            .unwrap_or_default()
+            .back()
+            .into_iter()
+            .flat_map(|latest| latest.entities.keys().map(String::as_str))
     }
 
     /// The current interpolation delay in ms.
@@ -352,8 +354,7 @@ impl SnapshotBuffer {
     /// browser; a window regaining focus here).
     pub fn flush(&mut self) {
         if self.buffer.len() > 1 {
-            let last = self.buffer.pop().expect("non-empty");
-            self.buffer = vec![last];
+            self.buffer.drain(..self.buffer.len() - 1);
         }
         self.jitter_samples.clear();
         self.last_receive_time = 0.0;
@@ -470,7 +471,7 @@ mod tests {
     fn empty_and_single() {
         let mut b = SnapshotBuffer::new();
         assert!(b.sample(0.0, "p", None).is_none());
-        assert!(b.latest_entity_ids().is_empty());
+        assert!(b.latest_entity_ids().next().is_none());
         b.push(1000.0, 1, one("e1", entity(100.0, 50.0, -200.0)), None);
         let s = b.sample(1000.0, "e1", None).unwrap();
         assert_eq!((s.x, s.y, s.z), (100.0, 50.0, -200.0));
