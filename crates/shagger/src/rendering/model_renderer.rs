@@ -454,6 +454,11 @@ pub struct ModelRenderer {
     /// A normal map that leaves the normal as it is.
     flat_normal: wgpu::TextureView,
     models: Vec<GpuModel>,
+    /// Decoded and uploaded images by their encoded bytes: the same weapon or
+    /// player model uploads more than once (several bots, a pickup and the
+    /// hand weapon), and its images are decoded and stored once. Models are
+    /// never removed, so this holds nothing the models do not.
+    images: HashMap<Vec<u8>, Option<wgpu::TextureView>>,
     lights: Vec<ModelLight>,
     dynamic: DynamicLightBlock,
     /// World fog, from the next `prepare`.
@@ -654,6 +659,7 @@ impl ModelRenderer {
             white,
             flat_normal,
             models: Vec::new(),
+            images: HashMap::new(),
             lights: Vec::new(),
             dynamic: DynamicLightBlock::default(),
             fog: FogUniforms::default(),
@@ -727,21 +733,26 @@ impl ModelRenderer {
                 if views.contains_key(&image) {
                     continue;
                 }
-                if let Some(decoded) = model
-                    .images
-                    .get(image)
-                    .and_then(|img| decode_image(&img.name, &img.bytes))
-                {
-                    let texture = upload_texture(
-                        gpu,
-                        &model.images[image].name,
-                        &Rgba8Image {
-                            width: decoded.width,
-                            height: decoded.height,
-                            pixels: decoded.pixels,
-                        },
-                    );
-                    views.insert(image, texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                let Some(img) = model.images.get(image) else {
+                    continue;
+                };
+                let view = match self.images.get(&img.bytes) {
+                    Some(view) => view.clone(),
+                    None => {
+                        let view = decode_image(&img.name, &img.bytes).map(|decoded| {
+                            let image = Rgba8Image {
+                                width: decoded.width,
+                                height: decoded.height,
+                                pixels: decoded.pixels,
+                            };
+                            upload_texture(gpu, &img.name, &image).create_view(&wgpu::TextureViewDescriptor::default())
+                        });
+                        self.images.insert(img.bytes.clone(), view.clone());
+                        view
+                    }
+                };
+                if let Some(view) = view {
+                    views.insert(image, view);
                 }
             }
             let view = m.base_color_image.and_then(|i| views.get(&i)).unwrap_or(&self.white);

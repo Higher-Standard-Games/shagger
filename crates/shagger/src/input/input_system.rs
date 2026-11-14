@@ -288,10 +288,16 @@ impl InputSystem {
 
     /// `updateActionStates`: each action of the active context from the raw state.
     pub fn update(&mut self) {
+        // Nothing below reads the states, so each is written as it is found.
+        let mut states = std::mem::take(&mut self.states);
+        self.update_states(&mut states);
+        self.states = states;
+    }
+
+    fn update_states(&self, states: &mut [(String, ActionState)]) {
         let Some(context) = self.context(self.active_context()) else {
             return;
         };
-        let mut next = Vec::new();
         for id in &context.actions {
             if self.action(id).is_none() {
                 continue;
@@ -326,18 +332,12 @@ impl InputSystem {
             pressed |= self.virtual_pressed.contains(id);
             released |= self.virtual_released.contains(id);
             let released = !active && (released || self.pending_releases.contains(id));
-            next.push((
-                id.clone(),
-                ActionState {
+            if let Some((_, s)) = states.iter_mut().find(|(other, _)| other == id) {
+                *s = ActionState {
                     active,
                     pressed,
                     released,
-                },
-            ));
-        }
-        for (id, state) in next {
-            if let Some((_, s)) = self.states.iter_mut().find(|(other, _)| *other == id) {
-                *s = state;
+                };
             }
         }
     }

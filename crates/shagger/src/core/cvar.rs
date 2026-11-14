@@ -277,12 +277,23 @@ impl Cvars {
         self.developer_locked && name.eq_ignore_ascii_case("developer")
     }
 
+    /// The index slot of `name`, case-insensitively. Code reads cvars by
+    /// their lowercase names many times a frame, so those skip the copy.
+    fn slot(&self, name: &str) -> Option<usize> {
+        let slot = if name.bytes().any(|b| !b.is_ascii() || b.is_ascii_uppercase()) {
+            self.index.get(&name.to_lowercase())
+        } else {
+            self.index.get(name)
+        };
+        slot.copied()
+    }
+
     fn find(&self, name: &str) -> Option<&CvarInstance> {
-        self.index.get(&name.to_lowercase()).map(|&i| &self.cvars[i])
+        self.slot(name).map(|i| &self.cvars[i])
     }
 
     fn find_mut(&mut self, name: &str) -> Option<&mut CvarInstance> {
-        self.index.get(&name.to_lowercase()).map(|&i| &mut self.cvars[i])
+        self.slot(name).map(|i| &mut self.cvars[i])
     }
 
     fn insert(&mut self, cvar: CvarInstance) {

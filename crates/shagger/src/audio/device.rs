@@ -59,6 +59,17 @@ fn choose_config(device: &cpal::Device, rate: Option<u32>) -> Result<cpal::Suppo
 }
 
 impl DeviceOutput {
+    /// Whether a default output device is there and offers a config,
+    /// without opening a stream. The slow part of a failed [`Self::open`]
+    /// (the sound system's configuration, read afresh each time), safe on
+    /// any thread.
+    #[must_use]
+    pub fn probe(rate: Option<u32>) -> bool {
+        cpal::default_host()
+            .default_output_device()
+            .is_some_and(|device| choose_config(&device, rate).is_ok())
+    }
+
     /// Opens the default output device, at `rate` when it can play it.
     ///
     /// # Errors

@@ -145,6 +145,96 @@ impl MaterialUniform {
     }
 }
 
+/// Where the material uniforms live: a few shared buffers of
+/// [`SLAB_SLOTS`] slots each instead of a buffer a pass, with a copy kept
+/// here, so a frame's changed uniforms (the animated passes, the movers)
+/// reach the GPU in one write a buffer, not one a pass.
+struct UniformSlab {
+    chunks: Vec<SlabChunk>,
+    used: usize,
+}
+
+struct SlabChunk {
+    buffer: wgpu::Buffer,
+    bytes: Vec<u8>,
+    /// The byte range written since the last flush.
+    dirty: Option<std::ops::Range<usize>>,
+}
+
+/// Slots a slab buffer holds.
+const SLAB_SLOTS: usize = 64;
+/// A slot's size: one uniform, at the offset alignment every adapter takes.
+const SLAB_STRIDE: usize = 256;
+const _: () = assert!(std::mem::size_of::<MaterialUniform>() <= SLAB_STRIDE);
+
+/// A pass's place in the slab: its buffer and the slot's byte offset.
+#[derive(Debug, Clone, Copy)]
+struct SlabSlot {
+    chunk: usize,
+    offset: usize,
+}
+
+impl UniformSlab {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            used: 0,
+        }
+    }
+
+    fn alloc(&mut self, device: &wgpu::Device) -> SlabSlot {
+        let (chunk, index) = (self.used / SLAB_SLOTS, self.used % SLAB_SLOTS);
+        if chunk == self.chunks.len() {
+            self.chunks.push(SlabChunk {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("world materials"),
+                    size: (SLAB_SLOTS * SLAB_STRIDE) as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                bytes: vec![0; SLAB_SLOTS * SLAB_STRIDE],
+                dirty: None,
+            });
+        }
+        self.used += 1;
+        SlabSlot {
+            chunk,
+            offset: index * SLAB_STRIDE,
+        }
+    }
+
+    /// The binding a pass's bind group takes for `slot`.
+    fn binding(&self, slot: SlabSlot) -> wgpu::BindingResource<'_> {
+        wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: &self.chunks[slot.chunk].buffer,
+            offset: slot.offset as u64,
+            size: wgpu::BufferSize::new(std::mem::size_of::<MaterialUniform>() as u64),
+        })
+    }
+
+    /// Writes `uniform` into its slot, for the next [`Self::flush`].
+    fn write(&mut self, slot: SlabSlot, uniform: &MaterialUniform) {
+        let chunk = &mut self.chunks[slot.chunk];
+        let bytes = bytemuck::bytes_of(uniform);
+        let range = slot.offset..slot.offset + bytes.len();
+        chunk.bytes[range.clone()].copy_from_slice(bytes);
+        chunk.dirty = Some(match chunk.dirty.take() {
+            Some(d) => d.start.min(range.start)..d.end.max(range.end),
+            None => range,
+        });
+    }
+
+    /// Uploads what changed: one write for each buffer touched.
+    fn flush(&mut self, gpu: &Gpu) {
+        for chunk in &mut self.chunks {
+            if let Some(range) = chunk.dirty.take() {
+                gpu.queue
+                    .write_buffer(&chunk.buffer, range.start as u64, &chunk.bytes[range]);
+            }
+        }
+    }
+}
+
 /// `fogPassKind`: how a pass's blend meets world fog (0 mix, 1 additive,
 /// 2 filter).
 fn fog_pass_kind(blend: Blend) -> f32 {
@@ -255,7 +345,7 @@ struct DrawPass {
     pipeline: usize,
     bind_group: usize,
     uniform: MaterialUniform,
-    buffer: wgpu::Buffer,
+    slot: SlabSlot,
     first_index: u32,
     index_count: u32,
     /// The batch it draws (an index into `WorldGeometry::batches`).
@@ -312,6 +402,8 @@ pub struct WorldRenderer {
     depth_reader: bool,
     /// Which batches hold a soft particle pass.
     soft_batches: Vec<bool>,
+    /// Every pass's material uniform.
+    slab: UniformSlab,
 }
 
 fn mip_chain(image: &Rgba8Image) -> Vec<Rgba8Image> {
@@ -602,6 +694,8 @@ impl WorldRenderer {
         // pass. Surfaces without companions read a flat normal and no gloss.
         let mut views: HashMap<String, wgpu::TextureView> = HashMap::new();
         let mut found: HashMap<String, String> = HashMap::new();
+        let mut by_candidate: HashMap<String, Option<wgpu::TextureView>> = HashMap::new();
+        let mut uploaded = 0usize;
         const FLAT_NORMAL: &str = "@flat_normal";
         const NO_GLOSS: &str = "@no_gloss";
         const WHITE: &str = "@white";
@@ -635,6 +729,7 @@ impl WorldRenderer {
             cubes.insert(name.clone(), upload_cube(gpu, faces, name));
         }
         let mut texture_bind_groups = Vec::new();
+        let mut slab = UniformSlab::new();
         let mut keys: Vec<PipelineKey> = Vec::new();
         let mut missing = Vec::new();
         let mut opaque = Vec::new();
@@ -673,22 +768,37 @@ impl WorldRenderer {
                     |candidates: &[String], fallback: Option<MissingImage>| -> Option<(String, Option<String>)> {
                         let key = format!("{}|{fallback:?}", candidates.join("|").to_lowercase());
                         if !views.contains_key(&key) {
-                            let hit = candidates.iter().find_map(|c| textures(c).map(|image| (c, image)));
-                            if let Some((candidate, _)) = &hit {
+                            // Candidate lists differ between passes and
+                            // companions, but often end at the same file: decode
+                            // and upload each file once.
+                            let hit = candidates.iter().find_map(|c| {
+                                by_candidate
+                                    .entry(c.clone())
+                                    .or_insert_with(|| {
+                                        textures(c).map(|image| {
+                                            uploaded += 1;
+                                            upload_texture(gpu, c, &image)
+                                                .create_view(&wgpu::TextureViewDescriptor::default())
+                                        })
+                                    })
+                                    .clone()
+                                    .map(|view| (c, view))
+                            });
+                            if let Some((candidate, view)) = hit {
                                 found.insert(key.clone(), strip_texture_extension(candidate).to_owned());
+                                views.insert(key.clone(), view);
+                                return Some((key.clone(), found.get(&key).cloned()));
                             }
-                            let image = match hit {
-                                Some((_, image)) => image,
-                                None => match fallback? {
-                                    MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
-                                    MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
-                                    MissingImage::White => Rgba8Image::white(),
-                                    MissingImage::Untextured => {
-                                        missing.push(batch.texture_name.clone());
-                                        Rgba8Image::white()
-                                    }
-                                },
+                            let image = match fallback? {
+                                MissingImage::RadialGradient => Rgba8Image::radial_gradient(),
+                                MissingImage::Black => Rgba8Image::solid([0, 0, 0, 255]),
+                                MissingImage::White => Rgba8Image::white(),
+                                MissingImage::Untextured => {
+                                    missing.push(batch.texture_name.clone());
+                                    Rgba8Image::white()
+                                }
                             };
+                            uploaded += 1;
                             let view = upload_texture(gpu, &batch.texture_name, &image)
                                 .create_view(&wgpu::TextureViewDescriptor::default());
                             views.insert(key.clone(), view);
@@ -984,12 +1094,7 @@ impl WorldRenderer {
                         .environment
                         .as_ref()
                         .map_or(NO_ENVIRONMENT, |(name, _)| name.as_str());
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("world material"),
-                        size: std::mem::size_of::<MaterialUniform>() as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
+                    let slot = slab.alloc(device);
                     let mut bind_group_for = |key: &str| {
                         texture_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&batch.texture_name),
@@ -1005,7 +1110,7 @@ impl WorldRenderer {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: buffer.as_entire_binding(),
+                                    resource: slab.binding(slot),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
@@ -1054,7 +1159,7 @@ impl WorldRenderer {
                             base_color,
                         }
                     });
-                    gpu.queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
+                    slab.write(slot, &uniform);
                     let key = layer.key;
                     let pipeline = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
                         keys.push(key);
@@ -1064,7 +1169,7 @@ impl WorldRenderer {
                         pipeline,
                         bind_group,
                         uniform,
-                        buffer,
+                        slot,
                         first_index: batch.first_index,
                         index_count: batch.index_count,
                         batch: batch_index,
@@ -1078,7 +1183,7 @@ impl WorldRenderer {
                 }
             }
         }
-        let texture_count = views.len() - 3;
+        let texture_count = uploaded;
         let opaque_count = opaque.len();
         // `BspMeshBuilder`'s alpha indices: blended surfaces 0-999, additive
         // ones from 1000, so the additive draw last.
@@ -1166,6 +1271,7 @@ impl WorldRenderer {
         };
         let pipelines = keys.iter().map(pipeline).collect();
 
+        slab.flush(gpu);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("world vertices"),
             contents: bytemuck::cast_slice(&geometry.vertices),
@@ -1214,6 +1320,7 @@ impl WorldRenderer {
             soft_view: Mat4::IDENTITY.to_cols_array_2d(),
             soft_params: [1.0, 1.0, Q3_SOFT_FADE_RATE, 0.0],
             depth_reader: false,
+            slab,
         }
     }
 
@@ -1359,9 +1466,9 @@ impl WorldRenderer {
                 color[3] = evaluate_wave_func(wave, total, &mut rng).clamp(0.0, 1.0) as f32;
             }
             pass.uniform.color = color;
-            gpu.queue
-                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+            self.slab.write(pass.slot, &pass.uniform);
         }
+        self.slab.flush(gpu);
     }
 
     /// Moves the movers' batches by `delta_seconds`: the rotators turn
@@ -1397,9 +1504,9 @@ impl WorldRenderer {
                 continue;
             }
             pass.uniform.model = model;
-            gpu.queue
-                .write_buffer(&pass.buffer, 0, bytemuck::bytes_of(&pass.uniform));
+            self.slab.write(pass.slot, &pass.uniform);
         }
+        self.slab.flush(gpu);
     }
 
     /// The brush models that move ([`Self::move_movers`]).

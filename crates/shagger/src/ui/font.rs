@@ -11,6 +11,13 @@ pub struct Font {
     data: Vec<u8>,
     offset: u32,
     key: CacheKey,
+    /// The glyph of each ASCII character, and every glyph's advance in
+    /// font units with the units per em, read once: the HUD lays out its
+    /// text every frame, and each lookup through `FontRef` parses the
+    /// font's tables again.
+    ascii: [u16; 128],
+    advances: Vec<f32>,
+    units_per_em: f32,
 }
 
 /// One glyph drawn at a size: coverage rows and where they sit against the
@@ -27,11 +34,22 @@ pub struct GlyphBitmap {
 impl Font {
     /// The first font in a file.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self, String> {
-        let (offset, key) = {
-            let font = FontRef::from_index(&data, 0).ok_or("not a font")?;
-            (font.offset, font.key)
-        };
-        Ok(Self { data, offset, key })
+        let font = FontRef::from_index(&data, 0).ok_or("not a font")?;
+        let (offset, key) = (font.offset, font.key);
+        let charmap = font.charmap();
+        let ascii = std::array::from_fn(|i| charmap.map(i as u32));
+        // Unscaled (a scale of 1): `advance` scales them as swash does.
+        let metrics = font.glyph_metrics(&[]);
+        let advances = (0..metrics.glyph_count()).map(|g| metrics.advance_width(g)).collect();
+        let units_per_em = f32::from(metrics.units_per_em());
+        Ok(Self {
+            data,
+            offset,
+            key,
+            ascii,
+            advances,
+            units_per_em,
+        })
     }
 
     fn font(&self) -> FontRef<'_> {
@@ -45,13 +63,20 @@ impl Font {
     /// The glyph for a character (0 when the font has none).
     #[must_use]
     pub fn glyph(&self, ch: char) -> u16 {
-        self.font().charmap().map(ch)
+        match self.ascii.get(ch as usize) {
+            Some(&glyph) => glyph,
+            None => self.font().charmap().map(ch),
+        }
     }
 
     /// How far the pen moves after `glyph` at `size` pixels to the em.
     #[must_use]
     pub fn advance(&self, glyph: u16, size: f32) -> f32 {
-        self.font().glyph_metrics(&[]).scale(size).advance_width(glyph)
+        match self.advances.get(usize::from(glyph)) {
+            // swash's own sum: the units times `ppem / units_per_em`.
+            Some(&units) if self.units_per_em != 0.0 => units * (size / self.units_per_em),
+            _ => self.font().glyph_metrics(&[]).scale(size).advance_width(glyph),
+        }
     }
 
     /// Ascent and descent (both positive) at `size`.
@@ -81,5 +106,28 @@ impl Font {
             height: image.placement.height,
             coverage: image.data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tables read once give what swash gives each time
+    /// (`SHAGGER_TEST_FONT`, a TrueType file).
+    #[test]
+    fn cached_glyphs_and_advances_match_swash() {
+        let Ok(path) = std::env::var("SHAGGER_TEST_FONT") else {
+            return;
+        };
+        let font = Font::from_bytes(std::fs::read(path).unwrap()).unwrap();
+        for ch in (0u8..128).map(char::from).chain(['é', 'ä', '€', '·']) {
+            let glyph = font.glyph(ch);
+            assert_eq!(glyph, font.font().charmap().map(ch), "{ch:?}");
+            for size in [9.0, 13.0, 16.0, 21.5, 32.0, 77.0] {
+                let swash = font.font().glyph_metrics(&[]).scale(size).advance_width(glyph);
+                assert_eq!(font.advance(glyph, size).to_bits(), swash.to_bits(), "{ch:?} at {size}");
+            }
+        }
     }
 }
