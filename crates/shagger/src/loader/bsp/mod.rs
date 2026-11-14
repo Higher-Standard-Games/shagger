@@ -3,6 +3,7 @@
 pub mod ambient_entity_handlers;
 pub mod bsp_lighting_profile;
 pub mod bsp_loader;
+pub mod fog_volumes;
 pub mod light_grid_sampling;
 pub mod liquid_classifier;
 pub mod map_particles;

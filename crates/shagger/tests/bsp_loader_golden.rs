@@ -288,7 +288,7 @@ fn full(file: &bsp::BspFile) -> Value {
                     obj(vec![
                         ("name", text(&e.name)),
                         ("brushIndex", num(e.brush_index)),
-                        ("unknown", num(e.unknown)),
+                        ("visibleSide", num(e.visible_side)),
                     ])
                 })
                 .collect(),

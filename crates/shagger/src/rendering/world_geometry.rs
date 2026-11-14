@@ -508,7 +508,19 @@ pub fn static_brush_models(bsp: &BspFile) -> Vec<usize> {
 #[must_use]
 pub fn build_world_geometry(
     bsp: &BspFile,
+    material_passes: impl FnMut(&str, &ResolveMaterialOptions) -> Vec<ResolvedMaterialProps>,
+) -> WorldGeometry {
+    build_world_geometry_with(bsp, material_passes, |_| false)
+}
+
+/// [`build_world_geometry`], leaving out the faces whose shader
+/// `fog_volume` names: a fog brush's surface is drawn by its fog volume
+/// (`FogVolumes`), not as a face.
+#[must_use]
+pub fn build_world_geometry_with(
+    bsp: &BspFile,
     mut material_passes: impl FnMut(&str, &ResolveMaterialOptions) -> Vec<ResolvedMaterialProps>,
+    fog_volume: impl Fn(&str) -> bool,
 ) -> WorldGeometry {
     let profile = bsp_lighting_profile(bsp);
     let stride = if profile.deluxe { 2 } else { 1 };
@@ -571,6 +583,9 @@ pub fn build_world_geometry(
             continue;
         }
         let texture = &bsp.common.textures[face.texture_index as usize];
+        if fog_volume(&texture.name) {
+            continue;
+        }
         let passes = passes_by_texture.entry(face.texture_index).or_insert_with(|| {
             let mut passes = material_passes(&texture.name, &options);
             if passes.is_empty() {

@@ -220,7 +220,9 @@ pub struct BspFace {
 pub struct BspEffect {
     pub name: String,
     pub brush_index: i32,
-    pub unknown: i32,
+    /// Fog: the brush side (0-based within the brush) its surface is drawn
+    /// on, or -1 when none is.
+    pub visible_side: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,7 +767,7 @@ impl<'a> Loader<'a> {
                 BspEffect {
                     name: name64(&l.0[at..]),
                     brush_index: l.i32(at + 64),
-                    unknown: l.i32(at + 68),
+                    visible_side: l.i32(at + 68),
                 }
             })
             .collect())

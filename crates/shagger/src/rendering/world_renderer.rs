@@ -305,6 +305,9 @@ pub struct WorldRenderer {
     soft_bind_group: wgpu::BindGroup,
     soft_view: [[f32; 4]; 4],
     soft_params: [f32; 4],
+    /// Whether something besides soft particles reads the scene depth this
+    /// frame (the fog volumes): it is copied without fading soft surfaces.
+    depth_reader: bool,
     /// Which batches hold a soft particle pass.
     soft_batches: Vec<bool>,
 }
@@ -1207,6 +1210,7 @@ impl WorldRenderer {
             soft_bind_group,
             soft_view: Mat4::IDENTITY.to_cols_array_2d(),
             soft_params: [1.0, 1.0, Q3_SOFT_FADE_RATE, 0.0],
+            depth_reader: false,
         }
     }
 
@@ -1227,17 +1231,48 @@ impl WorldRenderer {
     pub fn set_soft_particles(&mut self, gpu: &Gpu, view: Mat4, near: f32, far: f32, size: (u32, u32), enabled: bool) {
         self.soft_view = view.to_cols_array_2d();
         self.soft_params = [near, far, Q3_SOFT_FADE_RATE, f32::from(u8::from(enabled))];
-        if enabled && self.soft_depth.as_ref().is_none_or(|(_, s)| *s != size) {
+        if (enabled || self.depth_reader) && self.soft_depth.as_ref().is_none_or(|(_, s)| *s != size) {
             let texture = soft_depth_texture(gpu, size);
             self.soft_bind_group = soft_depth_bind_group(gpu, &self.soft_layout, &texture);
             self.soft_depth = Some((texture, size));
         }
     }
 
+    /// Whether the next frame's scene depth is read by something besides
+    /// soft particles (the fog volumes). Call before
+    /// [`Self::set_soft_particles`], which makes the copy.
+    pub fn set_scene_depth_reader(&mut self, reading: bool) {
+        self.depth_reader = reading;
+    }
+
+    /// Whether this frame's scene depth is copied (soft particles or another
+    /// reader), so [`Self::scene_depth`] holds it after the opaque pass.
+    #[must_use]
+    pub fn scene_depth_copied(&self) -> bool {
+        self.soft_depth.is_some() && (self.soft_params[3] > 0.5 || self.depth_reader)
+    }
+
+    /// The scene depth copy's layout: one `texture_depth_2d` at binding 0.
+    #[must_use]
+    pub fn scene_depth_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.soft_layout
+    }
+
+    /// The scene depth copied after the opaque pass, as
+    /// [`Self::scene_depth_layout`] binds it.
+    #[must_use]
+    pub fn scene_depth(&self) -> &wgpu::BindGroup {
+        &self.soft_bind_group
+    }
+
     /// Copies the main depth for soft particles after the opaque pass, when
     /// this frame reads it.
     pub fn capture_soft_depth(&self, encoder: &mut wgpu::CommandEncoder, depth: &wgpu::Texture) {
-        let Some((copy, (width, height))) = self.soft_depth.as_ref().filter(|_| self.soft_params[3] > 0.5) else {
+        let Some((copy, (width, height))) = self
+            .soft_depth
+            .as_ref()
+            .filter(|_| self.soft_params[3] > 0.5 || self.depth_reader)
+        else {
             return;
         };
         let extent = wgpu::Extent3d {
