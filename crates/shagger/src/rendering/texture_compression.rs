@@ -101,7 +101,7 @@ fn compress(gpu: &Gpu, label: &str, levels: &[Rgba8Image]) -> Option<wgpu::Textu
         );
     }
     // Opaque textures spend no bits on alpha.
-    let opaque = base.pixels.chunks_exact(4).all(|p| p[3] == 255);
+    let opaque = base.pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255);
     let settings = if opaque {
         BC7Settings::opaque_basic()
     } else {
@@ -246,9 +246,9 @@ mod tests {
             return;
         }
         let mut base = level(128, 64);
-        for (i, p) in base.pixels.chunks_exact_mut(4).enumerate() {
+        for (i, p) in base.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (x, y) = ((i % 128) as u8, (i / 128) as u8);
-            p.copy_from_slice(&[x * 2, y * 4, 128, 255]);
+            *p = [x * 2, y * 4, 128, 255];
         }
         let chain = super::super::world_renderer::mip_chain(&base);
         let texture = compress(&gpu, "test", &chain).expect("compressed");
@@ -292,11 +292,15 @@ mod tests {
             &bytes[..16],
             &mut texels,
         );
-        for (got, want) in texels.chunks_exact(4).zip(
+        for (got, want) in texels.as_chunks::<4>().0.iter().zip(
             base.pixels
-                .chunks_exact(4 * 128)
+                .as_chunks::<4>()
+                .0
+                .as_chunks::<128>()
+                .0
+                .iter()
                 .take(4)
-                .flat_map(|row| row[..16].chunks_exact(4)),
+                .flat_map(|row| &row[..4]),
         ) {
             for c in 0..3 {
                 assert!(got[c].abs_diff(want[c]) <= 8, "{got:?} against {want:?}");
