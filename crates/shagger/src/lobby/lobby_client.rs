@@ -167,6 +167,24 @@ impl LobbyClient {
         ));
     }
 
+    /// Asks for a private room set up for a campaign mission; it answers
+    /// with `lobby:created`.
+    pub fn create_campaign_lobby(&self, mission_id: &str, gametype: &str) {
+        self.send(&message(
+            "lobby:create",
+            &[
+                ("gametype", s(gametype)),
+                ("visibility", s("private")),
+                ("campaign", s(mission_id)),
+            ],
+        ));
+    }
+
+    /// Asks for this account's campaign; it answers with `campaign:state`.
+    pub fn request_campaign(&self) {
+        self.send(&message("campaign:get", &[]));
+    }
+
     pub fn join_lobby(&self, lobby_id: &str, invite_token: Option<&str>) {
         self.send(&message(
             "lobby:join",

@@ -114,7 +114,7 @@ pub struct MatchLobbyView {
     pub active_match_id: Option<String>,
     local_player_id: Option<String>,
     invite_bot_pending: Option<Instant>,
-    /// Quick play: bots still to add before this player readies up; 0 when off.
+    /// Quick play: bots still to add; 0 when off. The player readies up themselves.
     auto_fill_bots: usize,
     /// The skill menu beside Add bot is open.
     bot_menu: bool,
@@ -479,7 +479,8 @@ impl MatchLobbyView {
         client.invite_bot(&self.lobby_id, difficulty);
     }
 
-    /// Quick play's next step: another bot while too few are seated, then ready up.
+    /// Quick play's next step: another bot while too few are seated. The
+    /// player readies up themselves.
     fn continue_auto_fill(&mut self, client: &LobbyClient) {
         if self.auto_fill_bots == 0 {
             return;
@@ -492,12 +493,7 @@ impl MatchLobbyView {
             self.request_bot(client, None);
             return;
         }
-        // Bots ready up on their own, so this player readies last: earlier,
-        // the room could start as soon as it reached its minimum, short of bots.
         self.auto_fill_bots = 0;
-        if !self.local_ready {
-            self.set_ready(true, client);
-        }
     }
 
     /// The status slab's phase: `searching`, `ready` or `starting`.
@@ -2507,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_play_adds_its_bots_one_at_a_time_then_readies() {
+    fn quick_play_adds_its_bots_one_at_a_time_and_leaves_ready_to_the_player() {
         // Nothing listens there: the client queues and drops what it sends.
         let client = LobbyClient::connect("ws://127.0.0.1:9");
         let mut view = MatchLobbyView::new(&room(), Some("me"), 2, 0, &client);
@@ -2519,8 +2515,8 @@ mod tests {
         assert!(!view.local_ready);
         view.handle(&joined("b2"), &client);
         assert_eq!(view.bot_count(), 2);
-        assert!(view.local_ready);
-        assert_eq!(view.status(), "0 players still to ready up.");
+        assert_eq!(view.auto_fill_bots, 0);
+        assert!(!view.local_ready);
     }
 
     #[test]

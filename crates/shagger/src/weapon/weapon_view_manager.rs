@@ -436,6 +436,12 @@ pub struct WeaponView {
     pub clock: f64,
     pub slash: WeaponSlash,
     pub charge: WeaponCharge,
+    /// The weapon is new in hand and its first update has not run
+    /// (`chargeWeaponDef` differing from `currentWeaponDef`).
+    charge_unseen: bool,
+    /// Aim held through a weapon switch: it charges nothing until let go,
+    /// as on the server (`aimHeldOver`).
+    aim_held_over: bool,
     /// The barrel sub-models' motion (`WeaponBarrels`), in the order the
     /// caller loaded them.
     pub barrels: Vec<BarrelSpin>,
@@ -496,6 +502,8 @@ impl WeaponView {
             clock: 0.0,
             slash: WeaponSlash::default(),
             charge: WeaponCharge::default(),
+            charge_unseen: true,
+            aim_held_over: false,
             barrels: Vec::new(),
             charge_outline: None,
             reload_anim: WeaponReloadAnim::default(),
@@ -715,8 +723,17 @@ impl WeaponView {
 
         self.apply_gun_size();
 
-        // The blade's charge: aiming a melee weapon holds its charge.
-        let charging = input.aiming && self.def.is_some_and(|d| d.melee);
+        // The blade's charge: aiming a melee weapon holds its charge. Aim
+        // held through a switch charges nothing until it is let go and
+        // pressed again.
+        if self.charge_unseen {
+            self.charge_unseen = false;
+            self.aim_held_over = input.aiming;
+        }
+        if !input.aiming {
+            self.aim_held_over = false;
+        }
+        let charging = input.aiming && !self.aim_held_over && self.def.is_some_and(|d| d.melee);
         let charge_time = self
             .def
             .and_then(|d| d.charge_time)
@@ -960,6 +977,11 @@ mod tests {
             aiming: true,
             ..ViewModelInput::default()
         };
+        // Aim held through the switch to the blade charges nothing until
+        // it is let go.
+        blade.update(&hold);
+        assert!(blade.charge_outline.is_none());
+        blade.update(&ViewModelInput { aiming: false, ..hold });
         blade.update(&hold);
         assert!(blade.charge_outline.is_some());
         for _ in 0..120 {

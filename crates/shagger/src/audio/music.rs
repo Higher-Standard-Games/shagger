@@ -91,10 +91,16 @@ struct TrackDecoder {
     position: f64,
     pending: Vec<f32>,
     done: bool,
+    /// The file again, for a track that loops on itself: decoding runs on
+    /// from its end into its start, without a gap.
+    looped: Option<Vec<u8>>,
+    /// Audio came out since the last restart: a loop that yields none ends.
+    heard: bool,
 }
 
 impl TrackDecoder {
-    fn new(bytes: Vec<u8>, rate: u32) -> Result<Self, String> {
+    fn new(bytes: Vec<u8>, rate: u32, looped: bool) -> Result<Self, String> {
+        let again = looped.then(|| bytes.clone());
         let mut decoder = Self {
             decoder: rmp3::DecoderOwned::new(bytes),
             rate,
@@ -103,9 +109,12 @@ impl TrackDecoder {
             position: 0.0,
             pending: Vec::new(),
             done: false,
+            looped: None,
+            heard: false,
         };
         // A file that yields no audio is not a track.
         decoder.decode_more();
+        decoder.looped = again;
         if decoder.done && decoder.pending.is_empty() {
             return Err("not an MP3".into());
         }
@@ -122,6 +131,7 @@ impl TrackDecoder {
                         continue;
                     }
                     self.source_rate = audio.sample_rate();
+                    self.heard = true;
                     for chunk in audio.samples().chunks_exact(channels) {
                         let l = f32::from(chunk[0]) / 32768.0;
                         let r = if channels > 1 { f32::from(chunk[1]) / 32768.0 } else { l };
@@ -133,6 +143,11 @@ impl TrackDecoder {
                     }
                 }
                 Some(rmp3::Frame::Other(_)) => {}
+                None if self.heard && self.looped.is_some() => {
+                    let again = self.looped.clone().unwrap_or_default();
+                    self.decoder = rmp3::DecoderOwned::new(again);
+                    self.heard = false;
+                }
                 None => {
                     self.resample(true);
                     self.done = true;
@@ -241,6 +256,17 @@ struct Track {
     feeder: Feeder,
 }
 
+/// A playlist put aside by `switch_playlist` (`parked`): the track it was
+/// on, fading out then paused where it was, to carry on from there.
+struct Parked {
+    name: String,
+    playlist: Playlist,
+    track_index: usize,
+    track: Option<Track>,
+    /// Still fading out; paused once silent.
+    fading: bool,
+}
+
 /// The fade `setInterval`s' period, and how much each tick moves.
 const FADE_TICK: f64 = 0.05;
 const FADE_STEP: f32 = 0.02;
@@ -259,6 +285,8 @@ pub struct MusicPlayer {
     playing_playlist: bool,
     track_index: usize,
     failed_attempts: usize,
+    /// Playlists put aside by `switch_playlist`.
+    parked: Vec<Parked>,
     /// `Math.random` for the shuffle.
     rng: MathRandom,
 }
@@ -285,6 +313,7 @@ impl MusicPlayer {
             playing_playlist: false,
             track_index: 0,
             failed_attempts: 0,
+            parked: Vec::new(),
             rng: MathRandom::from_entropy(),
         }
     }
@@ -405,14 +434,12 @@ impl MusicPlayer {
         if name.is_some() && self.playlist_name.as_deref() == name && self.playing_playlist {
             return;
         }
-        self.stop_music(audio, false);
-        if playlist.shuffle {
-            // Fisher-Yates, as `shufflePlaylist`.
-            for i in (1..playlist.tracks.len()).rev() {
-                let j = (self.random() * (i + 1) as f64) as usize;
-                playlist.tracks.swap(i, j);
-            }
+        // Started afresh, a playlist put aside earlier is not carried on.
+        if let Some(name) = name {
+            self.discard_parked(audio, name);
         }
+        self.stop_music(audio, false);
+        self.shuffle(&mut playlist);
         self.playlist = Some(playlist);
         self.playlist_name = name.map(str::to_owned);
         self.track_index = 0;
@@ -420,6 +447,108 @@ impl MusicPlayer {
         if self.music_enabled {
             self.play_current_track(audio, fetch, true);
         }
+    }
+
+    /// Fisher-Yates, as `shufflePlaylist`, when the playlist asks for it.
+    fn shuffle(&mut self, playlist: &mut Playlist) {
+        if playlist.shuffle {
+            for i in (1..playlist.tracks.len()).rev() {
+                let j = (self.random() * (i + 1) as f64) as usize;
+                playlist.tracks.swap(i, j);
+            }
+        }
+    }
+
+    /// `switchPlaylist`: crosses over to another playlist, putting this one
+    /// aside where it is. The playing track fades out and pauses, and the
+    /// other playlist fades in: from where it was paused if it was put
+    /// aside before, from its start if not. `playlist` is read only when
+    /// the other was not put aside.
+    pub fn switch_playlist(
+        &mut self,
+        audio: &mut AudioV2Sfx,
+        fetch: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+        playlist: Option<Playlist>,
+        name: &str,
+    ) {
+        if self.playlist_name.as_deref() == Some(name) && self.playing_playlist {
+            return;
+        }
+        let resumed = self
+            .parked
+            .iter()
+            .position(|p| p.name == name)
+            .map(|at| self.parked.remove(at));
+        let Some(mut playlist) = resumed.as_ref().map(|p| p.playlist.clone()).or(playlist) else {
+            return;
+        };
+        self.park_current(audio);
+        let audible = self.music_enabled && !self.is_playlist_muted(name);
+        self.playlist_name = Some(name.to_owned());
+        self.playing_playlist = true;
+        if let Some(resumed) = resumed {
+            self.playlist = Some(playlist);
+            self.track_index = resumed.track_index;
+            match resumed.track {
+                Some(mut track) if audible => {
+                    track.volume = 0.0;
+                    audio.set_voice_volume(track.id, 0.0);
+                    audio.set_stream_paused(track.id, false);
+                    self.current = Some(track);
+                    self.fading_in = true;
+                    self.fade_clock = 0.0;
+                }
+                Some(track) => audio.stop_voice(track.id),
+                None if audible => self.play_current_track(audio, fetch, true),
+                None => {}
+            }
+            return;
+        }
+        self.shuffle(&mut playlist);
+        self.playlist = Some(playlist);
+        self.track_index = 0;
+        if audible {
+            self.play_current_track(audio, fetch, true);
+        }
+    }
+
+    /// `parkCurrent`: puts the current playlist aside, its track fading out
+    /// to pause where it is.
+    fn park_current(&mut self, audio: &mut AudioV2Sfx) {
+        if let Some(old) = self.fading_out.take() {
+            audio.stop_voice(old.id);
+        }
+        self.fading_in = false;
+        let track = self.current.take();
+        let (Some(playlist), Some(name)) = (self.playlist.take(), self.playlist_name.take()) else {
+            if let Some(track) = track {
+                audio.stop_voice(track.id);
+            }
+            return;
+        };
+        self.discard_parked(audio, &name);
+        self.parked.push(Parked {
+            name,
+            playlist,
+            track_index: self.track_index,
+            fading: track.is_some(),
+            track,
+        });
+    }
+
+    /// `discardParked`: forgets a playlist put aside, and frees its track.
+    fn discard_parked(&mut self, audio: &mut AudioV2Sfx, name: &str) {
+        if let Some(at) = self.parked.iter().position(|p| p.name == name)
+            && let Some(track) = self.parked.remove(at).track
+        {
+            audio.stop_voice(track.id);
+        }
+    }
+
+    /// The name of a playlist put aside, for tests.
+    #[must_use]
+    pub fn is_parked(&self, name: &str) -> bool {
+        self.parked.iter().any(|p| p.name == name)
     }
 
     /// `stopPlaylist`.
@@ -449,7 +578,9 @@ impl MusicPlayer {
     /// Starts `fetch`ed track bytes on the music bus.
     fn start_track(&mut self, audio: &mut AudioV2Sfx, bytes: Vec<u8>, fade_in: bool) -> bool {
         let rate = audio.sample_rate();
-        let Ok(mut decoder) = TrackDecoder::new(bytes, rate) else {
+        // A looping playlist of one song loops the song itself, without a gap.
+        let looped = self.playlist.as_ref().is_some_and(|p| p.tracks.len() == 1 && p.looped);
+        let Ok(mut decoder) = TrackDecoder::new(bytes, rate, looped) else {
             return false;
         };
         // A second of music ahead.
@@ -574,7 +705,7 @@ impl MusicPlayer {
     /// The fades' ticks, and the next track when one ends. Call every
     /// frame.
     pub fn update(&mut self, audio: &mut AudioV2Sfx, fetch: &mut dyn FnMut(&str) -> Option<Vec<u8>>, dt: f64) {
-        if self.fading_in || self.fading_out.is_some() {
+        if self.fading_in || self.fading_out.is_some() || self.parked.iter().any(|p| p.fading) {
             self.fade_clock += dt;
             while self.fade_clock >= FADE_TICK {
                 self.fade_clock -= FADE_TICK;
@@ -615,6 +746,21 @@ impl MusicPlayer {
                 audio.set_voice_volume(track.id, track.volume);
             } else {
                 self.fading_in = false;
+            }
+        }
+        for parked in self.parked.iter_mut().filter(|p| p.fading) {
+            let Some(track) = &mut parked.track else {
+                parked.fading = false;
+                continue;
+            };
+            if track.volume > FADE_STEP {
+                track.volume -= FADE_STEP;
+                audio.set_voice_volume(track.id, track.volume);
+            } else {
+                track.volume = 0.0;
+                audio.set_voice_volume(track.id, 0.0);
+                audio.set_stream_paused(track.id, true);
+                parked.fading = false;
             }
         }
         if let Some(old) = &mut self.fading_out {
@@ -700,6 +846,30 @@ mod real_track {
     use super::*;
 
     #[test]
+    fn a_switched_playlist_is_put_aside_and_carried_on() {
+        let mut audio = AudioV2Sfx::offline(48000);
+        let mut music = MusicPlayer::new();
+        let mut fetch = |_: &str| None;
+        let menu = Playlist::parse(r#"{"tracks":[{"file":"m.mp3"},{"file":"n.mp3"}]}"#).unwrap();
+        let campaign = Playlist::parse(r#"{"tracks":[{"file":"c.mp3"}]}"#).unwrap();
+        music.start_playlist(&mut audio, &mut fetch, menu, Some("menu"));
+        music.switch_playlist(&mut audio, &mut fetch, Some(campaign), "campaign");
+        assert_eq!(music.current_playlist_name(), Some("campaign"));
+        assert!(music.is_parked("menu"));
+        // Back: the menu's playlist comes back without being read again.
+        music.switch_playlist(&mut audio, &mut fetch, None, "menu");
+        assert_eq!(music.current_playlist_name(), Some("menu"));
+        assert!(music.is_parked("campaign") && !music.is_parked("menu"));
+        // Started afresh, a playlist put aside is forgotten.
+        let campaign = Playlist::parse(r#"{"tracks":[{"file":"c.mp3"}]}"#).unwrap();
+        music.start_playlist(&mut audio, &mut fetch, campaign, Some("campaign"));
+        assert!(!music.is_parked("campaign"));
+        // A playlist neither given nor put aside changes nothing.
+        music.switch_playlist(&mut audio, &mut fetch, None, "other");
+        assert_eq!(music.current_playlist_name(), Some("campaign"));
+    }
+
+    #[test]
     fn plays_a_real_track_when_given_one() {
         let Ok(path) = std::env::var("SHAGGER_TEST_MP3") else {
             return;
@@ -725,7 +895,10 @@ mod real_track {
 
         // About two seconds of it, in a playlist that plays once: it ends
         // and the playlist is over.
-        let short = bytes[..40_000].to_vec();
+        // Cut at a frame's end: rmp3 reads past a frame cut short.
+        let mut frames = rmp3::Decoder::new(&bytes);
+        while frames.position() < 40_000 && frames.skip().is_some() {}
+        let short = bytes[..frames.position()].to_vec();
         let playlist = Playlist::parse(r#"{"loop":false,"tracks":[{"file":"s.mp3"}]}"#).unwrap();
         let mut fetch = |p: &str| (p == "s.mp3").then(|| short.clone());
         music.start_playlist(&mut audio, &mut fetch, playlist, Some("s"));
@@ -735,5 +908,20 @@ mod real_track {
             audio.render(&mut out);
         }
         assert!(!music.has_music() && !music.is_playlist_playing());
+
+        // The same in a looping playlist of one song: the song runs on into
+        // itself, the one stream never ending, and never silent for long.
+        let playlist = Playlist::parse(r#"{"tracks":[{"file":"s.mp3"}]}"#).unwrap();
+        music.start_playlist(&mut audio, &mut fetch, playlist, Some("l"));
+        let mut quiet = 0;
+        for _ in 0..300 {
+            music.update(&mut audio, &mut fetch, 0.02);
+            out.fill(0.0);
+            audio.render(&mut out);
+            let peak = out.iter().fold(0.0f32, |p, s| p.max(s.abs()));
+            quiet = if peak < 1e-4 { quiet + 1 } else { 0 };
+            assert!(quiet < 5, "a gap in the loop");
+        }
+        assert!(music.has_music());
     }
 }
