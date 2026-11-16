@@ -486,7 +486,7 @@ const { gzipSync } = await import("node:zlib");
 
 function demoFile() {
   const e = new BinaryEncoder();
-  const version = pick([1, 2, 3, 4, 5, 6, 6, 6, 7, 7, 0, 8]);
+  const version = pick([1, 2, 3, 4, 5, 6, 6, 6, 7, 7, 0, 9, 8, 8]);
   for (const b of chance(0.03) ? [0x53, 0x48, 0x41, 0x48] : [0x53, 0x48, 0x41, 0x47]) e.writeUint8(b);
   e.writeUint8(version);
   e.writeString(pick(["washoi_dm2", "maps/WDM7.bsp", "日本", ""]));
@@ -497,6 +497,7 @@ function demoFile() {
   e.writeUint32(int(0x1_0000_0000));
   if (version >= 2) e.writeString(pick(["", "m_123", "é", "550e8400-e29b-41d4-a716-446655440000"]));
   if (version >= 4) e.writeUint8(pick([0, 1, 1, 0, 2]));
+  if (version >= 8) e.writeString(pick(["", "cartel_contract", "siege_breaker"]));
   const players = int(4);
   e.writeUint8(players);
   for (let i = 0; i < players; i++) {
@@ -589,7 +590,7 @@ function demoVectors() {
       const h = reader.readHeader();
       return {
         version: h.version, map: h.map, gametype: h.gametype, tickRate: h.tickRate, snapshotRate: h.snapshotRate,
-        startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null,
+        startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null, campaign: h.campaign ?? null,
         players: h.players.map((p) => [p.playerId, p.name, p.team, p.accountId === undefined ? null : num(p.accountId)]),
       };
     });
@@ -629,7 +630,7 @@ if (demoDir && (await import("node:fs")).existsSync(demoDir)) {
     const reader = new DemoReader(readFileSync(resolve(dir, file)));
     const h = reader.readHeader();
     const header = { version: h.version, map: h.map, gametype: h.gametype, tickRate: h.tickRate, snapshotRate: h.snapshotRate,
-      startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null,
+      startTime: num(h.startTime), matchId: h.matchId ?? null, private: h.private ?? null, campaign: h.campaign ?? null,
       players: h.players.map((p) => [p.playerId, p.name, p.team, p.accountId === undefined ? null : num(p.accountId)]) };
     const index = reader.readIndex();
     const frames = reader.readAllFrames().map((f) => ({

@@ -83,6 +83,7 @@ fn demos_read_like_shag() {
                 ("startTime", num(h.start_time)),
                 ("matchId", opt(h.match_id.clone().map(Value::String))),
                 ("private", opt(h.private.map(Value::Bool))),
+                ("campaign", opt(h.campaign.clone().map(Value::String))),
                 (
                     "players",
                     Value::Array(
