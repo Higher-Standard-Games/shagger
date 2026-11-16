@@ -127,6 +127,107 @@ pub struct AuthError {
     pub retry_after_sec: Option<u32>,
 }
 
+// ── Campaign ──
+
+/// `CampaignModels`: the models a campaign match draws each side with, by
+/// model id.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+pub struct CampaignModels {
+    pub ally: String,
+    pub enemy: String,
+}
+
+/// `CampaignBotInfo`: one of a mission's bots.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignBotInfo {
+    pub name: String,
+    /// Bot preset: easy, medium, hard, insane.
+    #[serde(default)]
+    pub difficulty: String,
+    /// `ally` or `enemy`; free-for-all bots are all enemies.
+    #[serde(default)]
+    pub side: String,
+    /// This bot's model, when it is not its side's (a mixed crew).
+    pub model: Option<String>,
+    /// How much bigger than a player this bot is drawn and hit; absent is 1.
+    pub scale: Option<f64>,
+}
+
+/// `CampaignMissionInfo`: one operation, as the lobby runs it.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignMissionInfo {
+    /// Stable id; progress is stored by it.
+    pub id: String,
+    /// Play order, from 1.
+    pub number: u32,
+    pub map: String,
+    #[serde(default)]
+    pub map_title: String,
+    pub gametype: String,
+    #[serde(default)]
+    pub bots: Vec<CampaignBotInfo>,
+    #[serde(default)]
+    pub models: CampaignModels,
+    /// S&D: `attack`, the players attack every round.
+    pub side: Option<String>,
+}
+
+/// `CampaignClear`: one mission an account has cleared, with its best clear.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignClear {
+    pub mission_id: String,
+    /// First clear, ms since the epoch.
+    #[serde(default)]
+    pub cleared_at: f64,
+    /// Shortest winning match, in ms.
+    #[serde(default)]
+    pub best_time_ms: f64,
+    /// Most frags in a winning match.
+    #[serde(default)]
+    pub best_frags: i64,
+}
+
+/// `CampaignProgress` (`campaign:state`): the campaign and an account's
+/// progress in it.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignProgress {
+    /// Missions in all, written or not; the ones past `missions` are not
+    /// playable yet.
+    #[serde(default)]
+    pub length: u32,
+    #[serde(default)]
+    pub missions: Vec<CampaignMissionInfo>,
+    #[serde(default)]
+    pub clears: Vec<CampaignClear>,
+    /// The highest mission number this account may play.
+    #[serde(default)]
+    pub unlocked_through: u32,
+    /// When this account first finished every mission.
+    pub completed_at: Option<f64>,
+}
+
+/// `LobbyCampaignInfo`: what a campaign room is playing.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LobbyCampaignInfo {
+    pub mission_id: String,
+    #[serde(default)]
+    pub models: CampaignModels,
+    /// Bots drawn with a model of their own, by name.
+    #[serde(default)]
+    pub bot_models: std::collections::BTreeMap<String, String>,
+    /// Bots drawn bigger than a player, by name.
+    #[serde(default)]
+    pub bot_scales: std::collections::BTreeMap<String, f64>,
+    /// Bots slime and lava do not hurt, by name.
+    #[serde(default)]
+    pub slime_immune: Vec<String>,
+}
+
 /// Go to this game server; the ticket is this player's single-use seat.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +237,9 @@ pub struct LobbyConnect {
     pub map: String,
     pub gametype: String,
     pub admission_ticket: Option<String>,
+    /// A campaign match: its mission and the models to draw.
+    #[serde(default)]
+    pub campaign: Option<Box<LobbyCampaignInfo>>,
 }
 
 /// A message from the lobby.
@@ -149,6 +253,8 @@ pub enum LobbyIn {
     /// `lobby:created`, which is also the full room state on every join.
     RoomState(Value),
     LobbyError(String),
+    /// `campaign:state`: the campaign and this account's progress.
+    CampaignState(Box<CampaignProgress>),
     /// Any other message, by its `type`.
     Other {
         kind: String,
@@ -172,6 +278,7 @@ impl LobbyIn {
                 "chat:message" => Self::Chat(serde_json::from_value(m.clone()).ok()?),
                 "lobby:created" => Self::RoomState(m.get("lobby")?.clone()),
                 "lobby:error" => Self::LobbyError(m.get("error")?.as_str()?.to_owned()),
+                "campaign:state" => Self::CampaignState(Box::new(serde_json::from_value(m.clone()).ok()?)),
                 _ => return None,
             })
         };
@@ -209,6 +316,34 @@ mod tests {
             r#"{"type":"matches:update","matches":[{"id":"l1","gametype":"ffa","gametypeName":"FFA","map":"washoi_dm7","mapDisplayName":"DM7","players":["a"],"playerCount":1,"maxPlayers":8,"state":"playing","startedAt":1,"serverUrl":"ws://x:7777"}]}"#,
         );
         assert!(matches!(&m, Some(LobbyIn::MatchesUpdate(v)) if v[0].server_url.as_deref() == Some("ws://x:7777")));
+
+        let campaign = LobbyIn::parse(
+            r#"{"type":"lobby:connect","serverUrl":"ws://x:7777","map":"washoi_amphi2","gametype":"amphi",
+                "campaign":{"missionId":"cartel-contract","models":{"ally":"robot","enemy":"cartel"},"botScales":{"Boss":1.6}}}"#,
+        );
+        let Some(LobbyIn::Connect(c)) = campaign else {
+            panic!("{campaign:?}");
+        };
+        let info = c.campaign.unwrap();
+        assert_eq!(
+            (info.mission_id.as_str(), info.models.enemy.as_str()),
+            ("cartel-contract", "cartel")
+        );
+        assert_eq!(info.bot_scales.get("Boss"), Some(&1.6));
+
+        let state = LobbyIn::parse(
+            r#"{"type":"campaign:state","length":8,"unlockedThrough":2,
+                "missions":[{"id":"cartel-contract","number":1,"map":"washoi_amphi2","mapTitle":"Amphi 2","gametype":"amphi",
+                  "bots":[{"name":"King","difficulty":"hard","side":"enemy"}],"models":{"ally":"robot","enemy":"cartel"}}],
+                "clears":[{"missionId":"cartel-contract","clearedAt":1,"bestTimeMs":2,"bestFrags":12}]}"#,
+        );
+        let Some(LobbyIn::CampaignState(state)) = state else {
+            panic!("{state:?}");
+        };
+        assert_eq!(
+            (state.length, state.unlocked_through, state.clears[0].best_frags),
+            (8, 2, 12)
+        );
 
         // Unknown and malformed-but-typed messages keep their JSON.
         assert!(

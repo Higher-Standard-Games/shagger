@@ -126,6 +126,7 @@ fn header(v: &Value) -> DemoHeader {
         start_time: 0.0,
         match_id: None,
         private: None,
+        campaign: None,
         players: arr(v.get("players").expect("players"))
             .iter()
             .map(|p| DemoPlayerInfo {

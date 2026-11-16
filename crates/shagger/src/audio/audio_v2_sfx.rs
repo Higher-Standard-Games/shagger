@@ -619,6 +619,11 @@ impl AudioV2Sfx {
         self.send(Command::SetVoiceVolume(id, volume));
     }
 
+    /// Holds a music stream where it is, or carries it on.
+    pub fn set_stream_paused(&mut self, id: VoiceId, paused: bool) {
+        self.send(Command::SetStreamPaused(id, paused));
+    }
+
     pub fn stop_voice(&mut self, id: VoiceId) {
         self.send(Command::Stop(id));
     }

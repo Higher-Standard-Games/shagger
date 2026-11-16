@@ -105,6 +105,9 @@ pub enum Command {
         volume: f32,
     },
     Stop(VoiceId),
+    /// A music stream holds where it is, or carries on (`HTMLAudioElement`'s
+    /// `pause` and `play`): a paused stream takes nothing from its queue.
+    SetStreamPaused(VoiceId, bool),
     SetVoiceVolume(VoiceId, f32),
     /// A placed voice moves (`SfxLoop.setPosition`).
     SetVoicePosition(VoiceId, DVec3),
@@ -186,6 +189,7 @@ struct StreamVoice {
     id: VoiceId,
     samples: rtrb::Consumer<f32>,
     gain: Ramp,
+    paused: bool,
 }
 
 pub struct Mixer {
@@ -264,6 +268,7 @@ impl Mixer {
                         id,
                         samples,
                         gain: Ramp::new(volume.max(0.0)),
+                        paused: false,
                     });
                 } else {
                     self.retire(samples);
@@ -274,6 +279,11 @@ impl Mixer {
                 if let Some(at) = self.streams.iter().position(|v| v.id == id) {
                     let stream = self.streams.remove(at);
                     self.retire(stream.samples);
+                }
+            }
+            Command::SetStreamPaused(id, paused) => {
+                if let Some(v) = self.streams.iter_mut().find(|v| v.id == id) {
+                    v.paused = paused;
                 }
             }
             Command::SetVoiceVolume(id, volume) => {
@@ -439,7 +449,7 @@ impl Mixer {
             }
         }
         let music = &self.bus_gains[MUSIC_BUS];
-        for stream in &mut self.streams {
+        for stream in self.streams.iter_mut().filter(|s| !s.paused) {
             for f in 0..frames {
                 let gain = stream.gain.next() * music[f];
                 if stream.samples.slots() < 2 {
@@ -586,6 +596,29 @@ mod tests {
         assert!(!producer.is_abandoned());
         drop(mixer.take_retired().unwrap());
         assert!(producer.is_abandoned());
+    }
+
+    #[test]
+    fn a_paused_stream_holds_its_place() {
+        let mut mixer = Mixer::new(48000);
+        let (mut producer, consumer) = rtrb::RingBuffer::new(16);
+        for s in [0.5, -0.5, 0.25, -0.25] {
+            producer.push(s).unwrap();
+        }
+        mixer.apply(Command::PlayStream {
+            id: 3,
+            samples: consumer,
+            volume: 1.0,
+        });
+        mixer.apply(Command::SetStreamPaused(3, true));
+        let mut out = vec![0.0; 2];
+        mixer.render(&mut out);
+        assert_eq!(out, [0.0; 2]);
+        assert_eq!(producer.slots(), 12);
+        mixer.apply(Command::SetStreamPaused(3, false));
+        mixer.render(&mut out);
+        assert!((out[0] - 0.5).abs() < 0.01);
+        assert_eq!(producer.slots(), 14);
     }
 
     #[test]

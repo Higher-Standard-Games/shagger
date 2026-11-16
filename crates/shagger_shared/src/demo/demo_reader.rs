@@ -5,10 +5,11 @@
 //! little-endian, the whole file optionally gzip:
 //!
 //! ```text
-//! "SHAG" version:u8 (1..=7)
+//! "SHAG" version:u8 (1..=8)
 //! map:str gametype:str tickRate:u8 snapshotRate:u8 startTimeHigh:u32 startTimeLow:u32
 //! v2+: matchId:str
 //! v4+: visibility:u8 (0 public, 1 private)
+//! v8+: campaign:str (the campaign mission, empty for none)
 //! playerCount:u8, then per player: playerId:str name:str team:str [v2+: accountId:str]
 //! frames: tick:u32 frameLen:u32 raw-snapshot[frameLen] [v3+: inputLen:u32 inputs[inputLen]]
 //! index: frameCount:u32, then frameCount × (tick:u32 offset:u32)
@@ -69,7 +70,7 @@ impl std::error::Error for DemoError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemoHeader {
-    /// Format version, 1 to 7.
+    /// Format version, 1 to 8.
     pub version: u8,
     pub map: String,
     /// Gametype (duel, ffa, tdm, and so on).
@@ -82,6 +83,8 @@ pub struct DemoHeader {
     pub match_id: Option<String>,
     /// Version 4+: lobby visibility. `None` for older demos.
     pub private: Option<bool>,
+    /// Version 8+: the campaign mission a campaign match played. `None` otherwise.
+    pub campaign: Option<String>,
     pub players: Vec<DemoPlayerInfo>,
 }
 
@@ -224,8 +227,9 @@ impl DemoReader {
         let version = u8_at(data, offset)?;
         offset += 1;
         // v6 retains v5's layout and adds optional bomb brush state in match
-        // JSON; v7 adds an optional look byte to each player's snapshot record.
-        if !(1..=7).contains(&version) {
+        // JSON; v7 adds an optional look byte to each player's snapshot record;
+        // v8 adds the campaign mission to the header.
+        if !(1..=8).contains(&version) {
             return Err(DemoError::UnsupportedVersion(version));
         }
         let (map, n) = read_string(data, offset)?;
@@ -256,6 +260,12 @@ impl DemoReader {
                 return Err(DemoError::InvalidVisibility);
             }
             private = Some(visibility == 1);
+        }
+        let mut campaign = None;
+        if version >= 8 {
+            let (value, n) = read_string(data, offset)?;
+            offset += n;
+            campaign = (!value.is_empty()).then_some(value);
         }
 
         let count = u8_at(data, offset)?;
@@ -294,6 +304,7 @@ impl DemoReader {
             start_time,
             match_id,
             private,
+            campaign,
             players,
         })
     }

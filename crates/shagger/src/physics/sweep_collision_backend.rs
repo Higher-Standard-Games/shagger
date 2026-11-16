@@ -147,6 +147,10 @@ pub struct SweepCollisionBackend {
     lift_faces: HashSet<i64>,
     ladder_brushes: Vec<usize>,
     face_collision: Vec<Option<FaceCollisionGeometry>>,
+    /// Patch collision of each switchable brush model, by model index, in the
+    /// model's own space: apart from `face_collision`, so the world walk never
+    /// meets them, and they collide only while their model is enabled.
+    brush_model_patches: HashMap<usize, Vec<(usize, FaceCollisionGeometry)>>,
     clip_brush_indices: Vec<usize>,
     brush_visits: Vec<u32>,
     face_visits: Vec<u32>,
@@ -290,6 +294,7 @@ impl SweepCollisionBackend {
             lift_faces,
             ladder_brushes: Vec::new(),
             face_collision: Vec::new(),
+            brush_model_patches: HashMap::new(),
             clip_brush_indices: Vec::new(),
             brush_visits: vec![0; brushes],
             face_visits: vec![0; faces],
@@ -523,24 +528,51 @@ impl SweepCollisionBackend {
 
     fn process_faces(&mut self) {
         let mut out = vec![None; self.bsp.faces.len()];
-        for (i, face) in self.bsp.faces.iter().enumerate() {
+        for (i, slot) in out.iter_mut().enumerate() {
             if self.lift_faces.contains(&(i as i64)) || self.brush_model_faces.contains(&(i as i64)) {
                 continue;
             }
-            if face.face_type != 2 {
-                continue;
-            }
-            let Some(texture) = get(&self.bsp.textures, face.texture_index) else {
-                continue;
-            };
-            if texture.content_flags & (content::SOLID | content::PLAYERCLIP) == 0 {
-                continue;
-            }
-            if let Some(mesh) = build_patch(&self.bsp.vertices, face, 5) {
-                out[i] = Some(Self::build_facets(mesh, &mut self.stats));
-            }
+            *slot = self.build_patch_collision(i);
         }
         self.face_collision = out;
+        // A switchable model's patches are as solid as its brushes: the
+        // machinery at a bomb site is mostly patches around a thin clip column.
+        self.brush_model_patches.clear();
+        let models: Vec<usize> = self
+            .brush_models
+            .iter()
+            .flat_map(|m| m.definitions.iter().map(|d| d.model_index))
+            .collect();
+        for model_index in models {
+            let model = self.bsp.models[model_index];
+            let patches: Vec<(usize, FaceCollisionGeometry)> = range(model.first_face, model.num_faces)
+                .filter_map(|i| {
+                    let i = idx(i)?;
+                    Some((i, self.build_patch_collision(i)?))
+                })
+                .collect();
+            if !patches.is_empty() {
+                self.brush_model_patches.insert(model_index, patches);
+            }
+        }
+    }
+
+    /// `buildPatchCollision`: collision facets for one face, or `None` where
+    /// it carries none. Planar and triangle-soup surfaces have independent
+    /// authored brushes; only solid or playerclip patches need facets
+    /// generated from their control points.
+    fn build_patch_collision(&mut self, face_index: usize) -> Option<FaceCollisionGeometry> {
+        let face = self.bsp.faces.get(face_index)?;
+        if face.face_type != 2 {
+            return None;
+        }
+        let texture = get(&self.bsp.textures, face.texture_index)?;
+        if texture.content_flags & (content::SOLID | content::PLAYERCLIP) == 0 {
+            return None;
+        }
+        // Higher tessellation (5) matches the visual mesh and prevents holes.
+        let mesh = build_patch(&self.bsp.vertices, face, 5)?;
+        Some(Self::build_facets(mesh, &mut self.stats))
     }
 
     fn build_facets(mesh: PatchCollisionMesh, stats: &mut CollisionStats) -> FaceCollisionGeometry {
@@ -692,6 +724,13 @@ impl SweepCollisionBackend {
                 state.end = [q3_end[0] - origin.x, q3_end[1] - origin.z, q3_end[2] - origin.y];
                 let model = self.bsp.models[model_index];
                 self.trace_model_brushes(&model, &mut state);
+                if let Some(patches) = self.brush_model_patches.remove(&model_index) {
+                    let bounds = Self::swept_bounds(&state);
+                    for (face_index, mesh) in &patches {
+                        self.trace_face(*face_index, mesh, &bounds, &mut state);
+                    }
+                    self.brush_model_patches.insert(model_index, patches);
+                }
             }
         }
         if let Some(lifts) = lifts {
