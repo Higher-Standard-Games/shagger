@@ -1,6 +1,6 @@
 # Collision and physics
 
-> Behaviour: SHAG's [Physics system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/physics-system.md) and [Movement system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/movement-system.md). The sweep, the slide and step moves, contents and triggers are the same, bit for bit (RUST.md 6 and 19).
+> Behaviour: SHAG's [Physics system](https://shag.dev/guides/physics-system.html) and [Movement system](https://shag.dev/guides/movement-system.html). The sweep, the slide and step moves, contents and triggers are the same, bit for bit (RUST.md 6 and 19).
 
 Source: `crates/shagger_shared/src/collision/`, `crates/shagger_shared/src/bsp/`, `crates/shagger/src/physics/`, `crates/shagger/src/movement/`.
 

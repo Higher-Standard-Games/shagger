@@ -5,7 +5,7 @@
 | [Golden vectors](./golden-vectors.md) | Proving a port gives the TypeScript's results, bit for bit |
 | [Parser fuzzing](#parser-fuzzing) | Proving the parsers of downloaded and network data never panic |
 
-SHAG's CLI, server and headless tools ([SHAG Tools](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/tools/index.md)) stay in TypeScript. Run them from a SHAG checkout; the native client talks to the servers they start.
+SHAG's CLI, server and headless tools ([SHAG Tools](https://shag.dev/tools/)) stay in TypeScript. Run them from a SHAG checkout; the native client talks to the servers they start.
 
 ## Parser fuzzing
 

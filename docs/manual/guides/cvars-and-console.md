@@ -1,6 +1,6 @@
 # Cvars and console
 
-> Behaviour: SHAG's [Cvar system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/cvar-system.md) and [Console system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/console-system.md). The validation, clamping, listing and `exportConfig`/`execConfig` rules are the same.
+> Behaviour: SHAG's [Cvar system](https://shag.dev/guides/cvar-system.html) and [Console system](https://shag.dev/guides/console-system.html). The validation, clamping, listing and `exportConfig`/`execConfig` rules are the same.
 
 Source: `crates/shagger/src/core/cvar.rs`, `crates/shagger/src/console/`, `crates/shagger/src/debug/debug_console.rs`.
 

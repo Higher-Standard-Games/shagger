@@ -1,6 +1,6 @@
 # Viewport and weapons
 
-> Behaviour: SHAG's [Camera system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/camera-system.md), [Viewport effects](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/viewport-effects.md) and [Weapon system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/weapon-system.md). The effects, their cvars and their curves are the same.
+> Behaviour: SHAG's [Camera system](https://shag.dev/guides/camera-system.html), [Viewport effects](https://shag.dev/guides/viewport-effects.html) and [Weapon system](https://shag.dev/guides/weapon-system.html). The effects, their cvars and their curves are the same.
 
 Source: `crates/shagger/src/camera/`, `crates/shagger/src/viewport/`, `crates/shagger/src/weapon/`.
 

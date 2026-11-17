@@ -1,6 +1,6 @@
 # Packages and maps
 
-> Behaviour: SHAG's [PK3 filesystem](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/pk3-filesystem.md), [BSP system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/bsp-system.md), [Shader system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/shader-system.md) and [Skybox system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/skybox-system.md). Package order, path matching, the published index's rules, the BSP lumps and the shader keywords are the same.
+> Behaviour: SHAG's [PK3 filesystem](https://shag.dev/guides/pk3-filesystem.html), [BSP system](https://shag.dev/guides/bsp-system.html), [Shader system](https://shag.dev/guides/shader-system.html) and [Skybox system](https://shag.dev/guides/skybox-system.html). Package order, path matching, the published index's rules, the BSP lumps and the shader keywords are the same.
 
 Source: `crates/shagger/src/loader/`.
 
