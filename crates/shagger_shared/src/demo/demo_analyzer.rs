@@ -220,6 +220,9 @@ fn facing_cone() -> f64 {
 /// of the killer breaks the chain.
 const SEQUENCE_PAIR_SECONDS: f64 = 5.0;
 const SEQUENCE_TRIPLE_SECONDS: f64 = 10.0;
+/// The longest a chain runs, first frag to last: a spree that keeps up
+/// longer goes on as a new chain.
+const SEQUENCE_MAX_SECONDS: f64 = 30.0;
 /// A chain whose frags all land within this is one multi-kill; a longer one
 /// is a frag sequence.
 const MULTI_KILL_SPAN_SECONDS: f64 = 3.0;
@@ -735,10 +738,12 @@ fn group_frag_chains(
     let pair = SEQUENCE_PAIR_SECONDS * tick_rate;
     let triple = SEQUENCE_TRIPLE_SECONDS * tick_rate;
     let span = MULTI_KILL_SPAN_SECONDS * tick_rate;
+    let longest = SEQUENCE_MAX_SECONDS * tick_rate;
+    // A death on the frag's own tick counts: a trade ends the chain there.
     let died_between = |player: &str, from: i64, to: i64| {
         deaths
             .get(player)
-            .is_some_and(|d| d.iter().any(|&t| t > from && t < to))
+            .is_some_and(|d| d.iter().any(|&t| t >= from && t < to))
     };
     let mut by_player: Vec<(String, Vec<HighlightCandidate>)> = Vec::new();
     for f in frags {
@@ -773,6 +778,9 @@ fn group_frag_chains(
                     break;
                 }
                 if died_between(killer, previous, tick) {
+                    break;
+                }
+                if (tick - player_frags[i].peak_tick) as f64 > longest {
                     break;
                 }
                 j += 1;
