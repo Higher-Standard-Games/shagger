@@ -1,6 +1,6 @@
 # Contributing
 
-The short form of these rules is in [`AGENTS.md`](../../../AGENTS.md). Read wash-fps-rust's [`docs/research/RUST.md`](https://github.com/Higher-Standard-Games/wash-fps-rust/blob/main/docs/research/RUST.md) before a structural change: it is the plan, and it is updated when a decision changes.
+The short form of these rules is in [`AGENTS.md`](https://github.com/Higher-Standard-Games/shagger/blob/main/AGENTS.md). Read wash-fps-rust's [`docs/research/RUST.md`](https://github.com/Higher-Standard-Games/wash-fps-rust/blob/main/docs/research/RUST.md) before a structural change: it is the plan, and it is updated when a decision changes.
 
 ## Porting rules
 
@@ -37,7 +37,7 @@ The workspace lints deny `unsafe_code` and warn on all of clippy's default lints
 
 ## Licences
 
-- Everything is MIT ([`LICENSE`](../../../LICENSE)), except the two below.
+- Everything is MIT ([`LICENSE`](https://github.com/Higher-Standard-Games/shagger/blob/main/LICENSE)), except the two below.
 - **Babylon.js code** goes in `crates/shagger/src/babylon/` and nowhere else, under the Apache License 2.0 (`LICENSE` and `NOTICE` in that folder). Each file starts with an Apache-2.0 header naming the Babylon file and version it came from, and the changes made, and is listed in `NOTICE`. The rest of SHAGGER may call into it but never copies from it (RUST.md 21.1).
 - **`crates/shagger_shared/src/fdlibm.rs`** is V8's `Math.sin`, `Math.cos` and `Math.atan2`, ported from Sun's fdlibm, under fdlibm's permissive notice, kept at the top of the file.
 - **Dependencies** must carry a licence on the allow-list in `deny.toml` (MIT, Apache-2.0, the BSD licences, ISC, Zlib, Unicode-3.0, BSL-1.0, CC0-1.0 and CDLA-Permissive-2.0 for the Mozilla roots). `cargo deny check` enforces it, along with the advisory database. When a crate's licence does not fit, look for another: audio decoding uses lewton rather than symphonia (MPL-2.0), and music uses rmp3 rather than the `minimp3` crate (RUSTSEC-2025-0044).

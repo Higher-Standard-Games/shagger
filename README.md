@@ -10,7 +10,8 @@ The plan, its findings and the milestones are in wash-fps-rust's
 The manual is in [`docs/manual/`](docs/manual/index.md): building and testing,
 the crates and their API, the native backends and where the port differs from
 SHAG. What the engine does is documented once, in SHAG's own manual, and each
-SHAGGER guide links to the SHAG page it ports.
+SHAGGER guide links to the SHAG page it ports. `npm install && npm run docs:dev`
+serves it locally with VitePress.
 
 ## Crates
 

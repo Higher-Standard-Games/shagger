@@ -33,6 +33,6 @@ On Linux, install ALSA's and udev's development packages first (see [Getting sta
 ## Other references
 
 - The plan, its findings and the milestones are in wash-fps-rust's [`docs/research/RUST.md`](https://github.com/Higher-Standard-Games/wash-fps-rust/blob/main/docs/research/RUST.md). Section numbers in this manual and in the source refer to it.
-- The rules for agents are in [`AGENTS.md`](../../AGENTS.md).
+- The rules for agents are in [`AGENTS.md`](https://github.com/Higher-Standard-Games/shagger/blob/main/AGENTS.md).
 
-SHAGGER is released under the [MIT License](../../LICENSE), except for the Babylon.js ports in `crates/shagger/src/babylon/`, which are Apache-2.0 (see [Contributing](./contributing/index.md#licences)).
+SHAGGER is released under the [MIT License](https://github.com/Higher-Standard-Games/shagger/blob/main/LICENSE), except for the Babylon.js ports in `crates/shagger/src/babylon/`, which are Apache-2.0 (see [Contributing](./contributing/index.md#licences)).

@@ -58,6 +58,18 @@ shagger_shared = { path = "../shagger/crates/shagger_shared" }
 
 The patch also rewrites the game's `Cargo.lock`. Do not commit that change: land the engine change in shagger first, then move the game's pin to the merged commit with the patch set aside, so the lock file names the git revision.
 
+## Reading this manual locally
+
+The manual reads on GitHub as it is. To serve it as a site with search, as SHAG's is, use VitePress (Node 18 or later):
+
+```sh
+npm install
+npm run docs:dev      # http://localhost:5173
+npm run docs:build    # writes dist-docs/, and fails on a dead link
+```
+
+Node is only for the manual and the golden vectors; the engine builds with Cargo alone.
+
 ## Next
 
 - [Project structure](./project-structure.md): where each SHAG folder landed.
