@@ -7,6 +7,11 @@ the native Washoi client, is built on it, as wash-fps is built on SHAG.
 The plan, its findings and the milestones are in wash-fps-rust's
 `docs/research/RUST.md`. Section numbers below refer to it.
 
+The manual is in [`docs/manual/`](docs/manual/index.md): building and testing,
+the crates and their API, the native backends and where the port differs from
+SHAG. What the engine does is documented once, in SHAG's own manual, and each
+SHAGGER guide links to the SHAG page it ports.
+
 ## Crates
 
 | Crate | SHAG counterpart | Rule |
