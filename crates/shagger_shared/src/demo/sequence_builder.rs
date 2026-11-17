@@ -664,10 +664,18 @@ fn build_sequence_scene(h: &HighlightCandidate, scene: usize, tick_rate: f64) ->
         shots.push(chase(h.start_tick, runs[0].start, 0, false));
     }
     for (r, run) in runs.iter().enumerate() {
-        let mut keyframes = Vec::new();
+        let mut keyframes: Vec<SpeedKeyframe> = Vec::new();
+        // A beat of slow motion round each frag; frags closer than that
+        // share one.
+        let mut slow_until = i64::MIN;
         for &i in &run.kills {
-            keyframes.push(key(kills[i].tick - t(0.1), 0.5, ramp));
-            keyframes.push(key(kills[i].tick + t(0.35), 1.0, ramp));
+            let from = kills[i].tick - t(0.1);
+            let until = kills[i].tick + t(0.35);
+            match keyframes.last_mut() {
+                Some(release) if from <= slow_until => release.tick = until,
+                _ => keyframes.extend([key(from, 0.5, ramp), key(until, 1.0, ramp)]),
+            }
+            slow_until = until;
         }
         let mut eyes = segment(
             h,
