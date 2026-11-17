@@ -1,0 +1,14 @@
+{
+  "name": "shagger-docs",
+  "private": true,
+  "type": "module",
+  "description": "The SHAGGER manual (docs/manual), served with VitePress. The engine itself builds with Cargo.",
+  "scripts": {
+    "docs:dev": "vitepress dev docs/manual",
+    "docs:build": "vitepress build docs/manual",
+    "docs:preview": "vitepress preview docs/manual"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}
