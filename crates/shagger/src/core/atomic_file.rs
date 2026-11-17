@@ -13,6 +13,55 @@ use std::time::{Duration, Instant};
 /// # Errors
 /// The folder could not be made, or the write or rename failed.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_whole(path, bytes, false)
+}
+
+/// [`write_atomic`] for a secret, such as the player's account key: on Unix
+/// the file is readable and writable by its owner only (0600), where the
+/// process's umask would usually leave it readable by every user of the
+/// machine. Windows keeps the user profile's own permissions, which other
+/// users cannot read.
+///
+/// # Errors
+/// As [`write_atomic`].
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_whole(path, bytes, true)
+}
+
+/// Makes `path` readable by its owner only, on Unix, if anyone else can read
+/// it now: for a secret written before [`write_atomic_private`] existed.
+/// Does nothing elsewhere, or when the file is missing.
+pub fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+fn create_part(part: &Path, private: bool) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        // `mode` applies only to a file it creates: a part file left by a
+        // crash would keep its own.
+        let _ = std::fs::remove_file(part);
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    options.open(part)
+}
+
+fn write_whole(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     if let Some(dir) = path.parent()
         && !dir.as_os_str().is_empty()
     {
@@ -23,10 +72,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut part = path.as_os_str().to_os_string();
     part.push(format!(".{}.part", std::process::id()));
     let part = std::path::PathBuf::from(part);
-    let mut file = std::fs::File::create(&part)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
+    let written = create_part(&part, private).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if let Err(e) = written {
+        // A full disk or a refused write leaves no part file behind.
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     // Windows refuses to replace a file another program holds open for a
     // moment (a virus scanner, a sync client): access denied (5) or a
     // sharing violation (32). Try again a few times there; elsewhere a
@@ -38,6 +92,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             Err(e) if busy(&e) && tries < 5 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(20 * tries));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
             }
             done => return done,
         }
@@ -141,6 +199,36 @@ mod tests {
                 .join(format!("cvars.json.{}.part", std::process::id()))
                 .exists()
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_is_written_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("shagger-atomic-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("lobby-key");
+        write_atomic(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_to_owner(&path);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_file(&path).unwrap();
+        write_atomic_private(&path, b"key").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"key");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_part_file() {
+        let dir = std::env::temp_dir().join(format!("shagger-atomic-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The target is a folder, so the rename fails.
+        let path = dir.join("taken");
+        std::fs::create_dir_all(path.join("inside")).unwrap();
+        assert!(write_atomic(&path, b"x").is_err());
+        assert!(!dir.join(format!("taken.{}.part", std::process::id())).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

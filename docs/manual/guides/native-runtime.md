@@ -18,6 +18,8 @@ A game started from its icon has no terminal, so what it prints would be lost. `
 
 `write_atomic_later` does the same on a writer thread, so the caller never waits for the disk: a slider sets its cvar every frame, and a flush can take tens of milliseconds. A newer write to the same path replaces one not yet started. Call `flush_pending(limit)` before the process exits. The cvar file is saved this way.
 
+`write_atomic_private` is the same for a secret, such as the player's account key: on Unix the file is created readable and writable by its owner only (0600), where the usual umask would leave it readable by every user of the machine. `restrict_to_owner(path)` tightens a file written before that. A failed write removes its part file.
+
 ## Bounded joins
 
 A network worker can be stuck in a name lookup the operating system will not cut short (an offline machine, a captive portal). Joining it from a `Drop` on the game thread would freeze the window for as long. `core::join::join_within(thread, limit)` waits up to `limit`, then leaves the thread to end on its own. The game and lobby connections use it when they are dropped, with a limit of 1.5 seconds.
@@ -27,3 +29,5 @@ A network worker can be stuck in a name lookup the operating system will not cut
 `wss://` connections to the lobby and game servers, and HTTPS downloads, go through rustls with the `ring` provider. The client trusts the Mozilla roots bundled by `webpki-roots`, so it behaves the same on every machine, whatever the system's certificate store holds.
 
 Like Node's `NODE_EXTRA_CA_CERTS`, the PEM certificates in the file named by `SSL_CERT_FILE` are trusted as well, for networks that re-sign TLS through a proxy of their own. A file that cannot be read adds nothing, and the bundled roots still apply.
+
+HTTP(S) downloads (`network::client::http_fetch`) follow at most ten redirects, and never from `https://` to plain `http://`, so packages and updates arrive over TLS or not at all. `HttpFetch::start_at_most` refuses a body past a size as soon as it passes it, so a wrong or hostile server cannot fill the memory.
