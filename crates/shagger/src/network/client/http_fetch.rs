@@ -52,12 +52,20 @@ impl HttpFetch {
     /// `total` how long it may take.
     #[must_use]
     pub fn start(url: &str, idle: Duration, total: Duration) -> Self {
+        Self::start_at_most(url, idle, total, None)
+    }
+
+    /// [`Self::start`], refusing a body longer than `max` bytes as soon as it
+    /// passes it ([`FetchError::TooLarge`]), so a wrong or hostile server
+    /// cannot fill the memory.
+    #[must_use]
+    pub fn start_at_most(url: &str, idle: Duration, total: Duration, max: Option<u64>) -> Self {
         let (tx, events) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let url = url.to_owned();
         let stop = cancel.clone();
         thread::spawn(move || {
-            let result = fetch(&url, idle, total, &stop, &mut |received, length| {
+            let result = fetch_at_most(&url, idle, total, max, &stop, &mut |received, length| {
                 let _ = tx.send(FetchEvent::Progress {
                     received,
                     total: length,
@@ -122,6 +130,22 @@ pub fn fetch(
 /// `Content-Length` must not make the allocation itself fail.
 const MAX_RESERVE: u64 = 64 * 1024 * 1024;
 
+/// Redirects as the browser follows them (ten at most), except that an
+/// `https://` address never hands the transfer to a plain `http://` one: the
+/// game, its packages and its updates are fetched over TLS or not at all.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let downgrade = attempt.url().scheme() != "https" && attempt.previous().iter().any(|u| u.scheme() == "https");
+        if downgrade {
+            attempt.error("refused a redirect from https to http")
+        } else if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 /// [`fetch`], refusing a body longer than `max` bytes (a package whose size
 /// the index gives) as soon as it passes it.
 ///
@@ -145,6 +169,7 @@ pub fn fetch_at_most(
             .tls_backend_preconfigured((*tls::config()).clone())
             .read_timeout(idle)
             .connect_timeout(idle)
+            .redirect(redirect_policy())
             .build()
             .map_err(|e| FetchError::Network(e.to_string()))?;
         let started = tokio::time::Instant::now();
@@ -214,6 +239,35 @@ mod tests {
             let _ = stream.write_all(body);
         });
         format!("http://{addr}/file")
+    }
+
+    /// A one-request server that redirects to `to`.
+    fn redirect_to(to: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let head =
+                format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(head.as_bytes());
+        });
+        format!("http://{addr}/moved")
+    }
+
+    #[test]
+    fn a_redirect_is_followed() {
+        let never = AtomicBool::new(false);
+        let bytes = fetch(
+            &redirect_to(serve("200 OK", b"moved here")),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            &never,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(bytes, b"moved here");
     }
 
     #[test]
