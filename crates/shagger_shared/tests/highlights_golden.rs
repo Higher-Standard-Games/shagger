@@ -17,7 +17,7 @@ use shagger_shared::net::game_state::{Entity, GameState, MovementState, PlayerSt
 enum Event {
     CombatState(String, f64),
     Award(String, String),
-    Death(String, String, String, Vec3),
+    Death(String, String, String, String, Vec3),
     Other,
 }
 
@@ -32,10 +32,11 @@ impl HighlightEvent for Event {
                 player_id: player,
                 award_type: award,
             },
-            Self::Death(victim, killer, weapon, at) => AnalyzerEvent::Death {
+            Self::Death(victim, killer, weapon, kill_weapon, at) => AnalyzerEvent::Death {
                 entity_id: victim,
                 killer_id: killer,
                 weapon_id: weapon,
+                kill_weapon,
                 at: *at,
             },
             Self::Other => AnalyzerEvent::Other,
@@ -100,6 +101,7 @@ fn frame(v: &Value) -> DemoFrame<Event> {
                 text(ev, "entityId"),
                 text(ev, "killerId"),
                 text(ev, "weaponId"),
+                text(ev, "killWeapon"),
                 Vec3::new(
                     n(ev.get("x").unwrap()),
                     n(ev.get("y").unwrap()),
@@ -184,7 +186,32 @@ fn highlight(h: &HighlightCandidate) -> Value {
             h.path.as_ref().map_or(Value::Null, |p| {
                 Value::Array(
                     p.iter()
-                        .map(|p| Value::Array(vec![int(p.tick), num(p.x), num(p.y), num(p.z)]))
+                        .map(|p| {
+                            Value::Array(vec![
+                                int(p.tick),
+                                num(p.x),
+                                num(p.y),
+                                num(p.z),
+                                p.yaw.map_or(Value::Null, num),
+                            ])
+                        })
+                        .collect(),
+                )
+            }),
+        ),
+        (
+            "kills",
+            h.kills.as_ref().map_or(Value::Null, |k| {
+                Value::Array(
+                    k.iter()
+                        .map(|k| {
+                            Value::Array(vec![
+                                int(k.tick),
+                                Value::String(k.victim_player.clone()),
+                                opt_vec(k.victim_pos),
+                                opt_vec(k.killer_pos),
+                            ])
+                        })
                         .collect(),
                 )
             }),
@@ -267,13 +294,28 @@ fn highlight_reels_match_shag() {
                 *w.get("cameraTarget").unwrap(),
                 "{at}"
             );
+            assert_eq!(
+                opt_str(seg.victim_target.as_ref()),
+                *w.get("victimTarget").unwrap(),
+                "{at}"
+            );
             assert_eq!(num(seg.playback_speed), *w.get("playbackSpeed").unwrap(), "{at}");
             let keys: Vec<Value> = seg
                 .speed_keyframes
                 .iter()
-                .map(|k| Value::Array(vec![int(k.tick), num(k.speed)]))
+                .map(|k| Value::Array(vec![int(k.tick), num(k.speed), k.ramp.map_or(Value::Null, int)]))
                 .collect();
             assert_eq!(&keys[..], arr(w.get("speedKeyframes").unwrap()), "{at}");
+            let freeze = seg.freeze.as_ref().map_or(Value::Null, |z| {
+                Value::Array(vec![int(z.tick), num(z.ms), Value::String(z.caption.clone())])
+            });
+            assert_eq!(freeze, *w.get("freeze").unwrap(), "{at}");
+            let stamps: Vec<Value> = seg
+                .stamps
+                .iter()
+                .map(|st| Value::Array(vec![int(st.tick), Value::String(st.text.clone())]))
+                .collect();
+            assert_eq!(&stamps[..], arr(w.get("stamps").unwrap()), "{at}");
             let index = n(w.get("highlight").unwrap()) as usize;
             assert_eq!(seg.highlight, analysis.highlights[index], "{at}");
             assert_eq!(Some(seg.is_replay), w.get("isReplay").and_then(Value::as_bool), "{at}");

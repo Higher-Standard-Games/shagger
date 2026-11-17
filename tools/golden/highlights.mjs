@@ -64,6 +64,8 @@ function scenario(index) {
   const header = { tickRate, players: players.filter((p) => p.inHeader).map((p) => ({ playerId: p.raw, name: p.name })) };
   const frames = [];
   let firstKill = true;
+  // A player on a run keeps fragging, so frag sequences turn up
+  let streak = null;
   for (let n = 0; n < ticks; n++) {
     const tick = firstTick + n;
     if (int(40) === 0) continue; // a dropped frame
@@ -132,9 +134,12 @@ function scenario(index) {
     if (int(25) === 0) entities.push({ id: `proj_${int(9)}`, transform: { position: { x: 1, y: 2, z: 3 }, pitch: 0, yaw: 0 }, velocity: null, movement: null });
     // Kills: someone alive kills someone else alive, sometimes from beyond the frame
     const alive = players.filter((p) => p.dead === 0);
-    if (alive.length >= 2 && int(Math.max(4, Math.round(rate * 4))) === 0) {
+    const chance = streak && streak.dead === 0 ? Math.round(rate * 1.5) : Math.round(rate * 4);
+    if (alive.length >= 2 && int(Math.max(4, chance)) === 0) {
       const flying = alive.filter((p) => p.mode === "rocket" && p.phase > 3);
-      const killer = flying.length && int(2) === 0 ? pick(flying) : pick(alive);
+      const killer =
+        streak && streak.dead === 0 && int(3) !== 0 ? streak : flying.length && int(2) === 0 ? pick(flying) : pick(alive);
+      streak = int(4) === 0 ? null : killer;
       const victim = pick(alive.filter((p) => p !== killer));
       const killerId = int(20) === 0 ? "" : int(20) === 0 ? `player_${victim.raw}` : `player_${killer.raw}`;
       if (int(3) === 0) events.push({ type: "combat_state", entityId: killerId, health: pick([100, 25, 10, 0, 60]) });
@@ -149,11 +154,13 @@ function scenario(index) {
         const last = entities.find((e) => e.id === `player_${victim.raw}`);
         if (last?.transform) last.transform.yaw = Math.atan2(killer.pos.x - victim.pos.x, killer.pos.z - victim.pos.z) || 0;
       }
+      const WEAPONS = ["rocket", "rail", "", "shotgun", "rlauncher", "glauncher", "blade", "melee", "explosion"];
       events.push({
         type: "death",
         entityId: `player_${victim.raw}`,
         killerId,
-        weaponId: pick(["rocket", "rail", "", "shotgun"]),
+        weaponId: pick(WEAPONS),
+        ...(int(3) === 0 ? { killWeapon: pick(WEAPONS) } : {}),
         x: victim.pos.x,
         y: victim.pos.y,
         z: victim.pos.z,
@@ -223,7 +230,8 @@ function highlight(h) {
     killerVelocity: vec(h.killerVelocity),
     killerYaw: h.killerYaw === undefined ? null : bits(h.killerYaw),
     victimFacedKiller: h.victimFacedKiller ?? null,
-    path: h.path ? h.path.map((p) => [p.tick, bits(p.x), bits(p.y), bits(p.z)]) : null,
+    path: h.path ? h.path.map((p) => [p.tick, bits(p.x), bits(p.y), bits(p.z), p.yaw === undefined ? null : bits(p.yaw)]) : null,
+    kills: h.kills ? h.kills.map((k) => [k.tick, k.victimPlayer, vec(k.victimPos), vec(k.killerPos)]) : null,
   };
 }
 
@@ -250,8 +258,11 @@ for (let i = 0; i < 32; i++) {
       durationMs: bits(seg.durationMs),
       cameraPreset: seg.cameraPreset,
       cameraTarget: seg.cameraTarget ?? null,
+      victimTarget: seg.victimTarget ?? null,
       playbackSpeed: bits(seg.playbackSpeed),
-      speedKeyframes: (seg.speedKeyframes ?? []).map((k) => [k.tick, bits(k.speed)]),
+      speedKeyframes: (seg.speedKeyframes ?? []).map((k) => [k.tick, bits(k.speed), k.ramp ?? null]),
+      freeze: seg.freeze ? [seg.freeze.tick, bits(seg.freeze.ms), seg.freeze.caption] : null,
+      stamps: (seg.stamps ?? []).map((st) => [st.tick, st.text]),
       highlight: analysis.highlights.indexOf(seg.highlight),
       isReplay: seg.isReplay,
       segmentIndex: seg.segmentIndex,
@@ -296,4 +307,7 @@ const tags = new Map();
 for (const v of vectors) for (const h of v.analysis.highlights) for (const t of h.tags) tags.set(t, (tags.get(t) ?? 0) + 1);
 const presets = new Map();
 for (const v of vectors) for (const s of v.reel.segments) presets.set(s.cameraPreset, (presets.get(s.cameraPreset) ?? 0) + 1);
-console.error("highlights:", [...kinds], [...tags], [...presets]);
+const transitions = new Map();
+for (const v of vectors) for (const s of v.reel.segments) transitions.set(s.transitionIn, (transitions.get(s.transitionIn) ?? 0) + 1);
+const freezes = vectors.reduce((n, v) => n + v.reel.segments.filter((s) => s.freeze).length, 0);
+console.error("highlights:", [...kinds], [...tags], [...presets], [...transitions], "freezes", freezes);

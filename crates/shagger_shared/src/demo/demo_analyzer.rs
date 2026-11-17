@@ -1,6 +1,6 @@
 //! Port of SHAG `src/shared/demo/DemoAnalyzer.ts`: finds the highlights in a
-//! demo (frags, multi-kills, airborne frags, movement runs) and scores them
-//! for the highlight reel.
+//! demo (frags, multi-kills, frag sequences, airborne frags, movement runs)
+//! and scores them for the highlight reel.
 //!
 //! The TypeScript reads its game's events by name (`death`, `award`,
 //! `combat_state`); here the game's event type says which of those an event
@@ -18,6 +18,7 @@ use crate::net::game_state::{OrderedMap, Vec3};
 pub enum HighlightType {
     Frag,
     MultiKill,
+    FragSequence,
     AirborneFrag,
     StreakKill,
     FirstBlood,
@@ -30,6 +31,7 @@ impl HighlightType {
         match self {
             Self::Frag => "frag",
             Self::MultiKill => "multi_kill",
+            Self::FragSequence => "frag_sequence",
             Self::AirborneFrag => "airborne_frag",
             Self::StreakKill => "streak_kill",
             Self::FirstBlood => "first_blood",
@@ -43,6 +45,8 @@ impl HighlightType {
 pub enum HighlightTag {
     Airborne,
     RocketJump,
+    AirRocket,
+    Blade,
     LowHp,
     CloseRange,
     LongRange,
@@ -66,6 +70,8 @@ impl HighlightTag {
         match self {
             Self::Airborne => "airborne",
             Self::RocketJump => "rocket_jump",
+            Self::AirRocket => "air_rocket",
+            Self::Blade => "blade",
             Self::LowHp => "low_hp",
             Self::CloseRange => "close_range",
             Self::LongRange => "long_range",
@@ -90,24 +96,36 @@ impl HighlightTag {
         match self {
             Self::Airborne | Self::FirstBlood => 1.5,
             Self::RocketJump => 1.8,
+            Self::AirRocket => 1.9,
+            Self::Blade | Self::Unstoppable => 1.6,
             Self::LowHp | Self::TrickJump | Self::WallJump => 1.3,
             Self::CloseRange | Self::Revenge | Self::Slide => 1.1,
             Self::LongRange | Self::OnFire | Self::HighSpeed | Self::HeightGain | Self::BunnyHop => 1.2,
             // Handled separately through the kill count.
             Self::MultiKill => 1.0,
             Self::Raging => 1.4,
-            Self::Unstoppable => 1.6,
         }
     }
 }
 
-/// A point of a movement highlight's route.
+/// `RouteSample`: a point of a player's route.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathPoint {
     pub tick: i64,
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    /// Where they looked, where the recording has it.
+    pub yaw: Option<f64>,
+}
+
+/// `KillMoment`: one frag inside a grouped highlight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KillMoment {
+    pub tick: i64,
+    pub victim_player: String,
+    pub victim_pos: Option<Vec3>,
+    pub killer_pos: Option<Vec3>,
 }
 
 /// `HighlightCandidate`.
@@ -123,6 +141,8 @@ pub struct HighlightCandidate {
     pub primary_player_name: String,
     pub victim_player: Option<String>,
     pub victim_player_name: Option<String>,
+    /// The weapon that made the frag (`rlauncher`, `blade`, …); older
+    /// recordings give only its kind of damage (`explosion`, `melee`, …).
     pub weapon_id: Option<String>,
     pub kill_count: Option<u32>,
     pub tags: Vec<HighlightTag>,
@@ -133,8 +153,11 @@ pub struct HighlightCandidate {
     pub killer_yaw: Option<f64>,
     /// The victim was looking at the killer when the frag landed.
     pub victim_faced_killer: Option<bool>,
-    /// A movement highlight's route, sampled about every 0.1 s.
+    /// The player's route, sampled about every 0.1 s, for a camera that
+    /// follows it: a movement run, or the killer through a frag sequence.
     pub path: Option<Vec<PathPoint>>,
+    /// Each frag of a multi-kill or frag sequence, in order.
+    pub kills: Option<Vec<KillMoment>>,
 }
 
 impl HighlightCandidate {
@@ -169,11 +192,13 @@ pub enum AnalyzerEvent<'a> {
         player_id: &'a str,
         award_type: &'a str,
     },
-    /// `death`, with the victim's position.
+    /// `death`, with the victim's position. The analyzer reads the weapon
+    /// as `killWeapon || weaponId`: `kill_weapon` where it is not empty.
     Death {
         entity_id: &'a str,
         killer_id: &'a str,
         weapon_id: &'a str,
+        kill_weapon: &'a str,
         at: Vec3,
     },
     Other,
@@ -189,7 +214,18 @@ fn facing_cone() -> f64 {
     js_cos(std::f64::consts::PI / 4.0)
 }
 
-const MULTI_KILL_WINDOW: i64 = 200;
+/// One killer's frags chain into one highlight: two within
+/// `SEQUENCE_PAIR_SECONDS` of each other, or three within
+/// `SEQUENCE_TRIPLE_SECONDS`, and so on for as long as it keeps up. A death
+/// of the killer breaks the chain.
+const SEQUENCE_PAIR_SECONDS: f64 = 5.0;
+const SEQUENCE_TRIPLE_SECONDS: f64 = 10.0;
+/// A chain whose frags all land within this is one multi-kill; a longer one
+/// is a frag sequence.
+const MULTI_KILL_SPAN_SECONDS: f64 = 3.0;
+/// How often a player's route is sampled for a camera following a frag
+/// sequence.
+const ROUTE_SAMPLE_SECONDS: f64 = 0.1;
 const LEADIN_SECONDS: f64 = 3.0;
 const FOLLOWTHROUGH_SECONDS: f64 = 2.0;
 const LONG_RANGE_THRESHOLD: f64 = 1500.0;
@@ -210,6 +246,17 @@ const MOVE_SAMPLE_SECONDS: f64 = 0.1;
 const BUNNY_HOP_MIN: u32 = 3;
 const MOVE_HEIGHT_GAIN: f64 = 96.0;
 const MOVE_HIGH_SPEED: f64 = 700.0;
+
+/// `isExplosive`: a rocket or grenade frag: the weapon, or in older
+/// recordings its damage.
+fn is_explosive(weapon_id: &str) -> bool {
+    matches!(weapon_id, "rlauncher" | "glauncher" | "explosion")
+}
+
+/// `isBlade`.
+fn is_blade(weapon_id: &str) -> bool {
+    matches!(weapon_id, "blade" | "melee")
+}
 
 const BASE_SCORE_FRAG: f64 = 10.0;
 const BASE_SCORE_MOVEMENT: f64 = 5.0;
@@ -327,6 +374,13 @@ impl<'a> DemoAnalyzer<'a> {
         let mut last_yaw: HashMap<String, f64> = HashMap::new();
         let mut runs: Runs = Vec::new();
         let mut moves: Vec<HighlightCandidate> = Vec::new();
+        // Every death of each player, suicides and the world's too: a death
+        // ends a frag chain.
+        let mut deaths: HashMap<String, Vec<i64>> = HashMap::new();
+        // Each player's route through the whole demo, for a camera following
+        // a frag sequence.
+        let mut routes: HashMap<String, Vec<PathPoint>> = HashMap::new();
+        let route_step = ROUTE_SAMPLE_SECONDS * tick_rate;
 
         for frame in frames {
             let tick = i64::from(frame.tick);
@@ -362,11 +416,16 @@ impl<'a> DemoAnalyzer<'a> {
                     entity_id: victim_id,
                     killer_id,
                     weapon_id,
+                    kill_weapon,
                     at: victim_pos,
                 } = ev.analyzer_event()
                 else {
                     continue;
                 };
+                let weapon_id = if kill_weapon.is_empty() { weapon_id } else { kill_weapon };
+                if !victim_id.is_empty() {
+                    deaths.entry(victim_id.to_owned()).or_default().push(tick);
+                }
                 if killer_id.is_empty() || killer_id == victim_id {
                     continue;
                 }
@@ -416,6 +475,19 @@ impl<'a> DemoAnalyzer<'a> {
                     } else {
                         HighlightTag::Airborne
                     });
+                }
+                // A rocket or grenade caught a victim in the air; a blade frag.
+                let victim_airborne = state
+                    .entities
+                    .get(victim_id)
+                    .and_then(|e| e.velocity)
+                    .is_some_and(|v| !v.grounded)
+                    && self.clearance(victim_pos, trackers.get(victim_id).expect("tracked")) >= AIRBORNE_MIN_CLEARANCE;
+                if victim_airborne && is_explosive(weapon_id) {
+                    tags.push(HighlightTag::AirRocket);
+                }
+                if is_blade(weapon_id) {
+                    tags.push(HighlightTag::Blade);
                 }
                 if let Some(kp) = killer_pos {
                     let (dx, dy, dz) = (kp.x - victim_pos.x, kp.y - victim_pos.y, kp.z - victim_pos.z);
@@ -486,6 +558,7 @@ impl<'a> DemoAnalyzer<'a> {
                     killer_yaw,
                     victim_faced_killer,
                     path: None,
+                    kills: None,
                 });
 
                 let killer = trackers.get_mut(killer_id).expect("tracked");
@@ -507,6 +580,18 @@ impl<'a> DemoAnalyzer<'a> {
                 let Some(velocity) = entity.velocity else { continue };
                 let t = trackers.get_or_insert_with(entity_id, PlayerTracker::default);
                 let position = entity.transform.map(|t| t.position);
+                if let Some(p) = position {
+                    let route = routes.entry(entity_id.to_owned()).or_default();
+                    if route.last().is_none_or(|last| (tick - last.tick) as f64 >= route_step) {
+                        route.push(PathPoint {
+                            tick,
+                            x: p.x,
+                            y: p.y,
+                            z: p.z,
+                            yaw,
+                        });
+                    }
+                }
                 // The TypeScript also counts air frames and kill streaks, which nothing reads.
                 if velocity.grounded
                     && let Some(p) = position
@@ -551,10 +636,25 @@ impl<'a> DemoAnalyzer<'a> {
             }
         }
 
-        let mut grouped = group_multi_kills(raw_frags);
+        let mut grouped = group_frag_chains(raw_frags, &deaths, tick_rate);
+        // A grouped highlight runs from before its first frag to after its last.
         for c in &mut grouped {
-            c.start_tick = first_tick.max(c.peak_tick - leadin);
+            let first_kill = c.kills.as_ref().and_then(|k| k.first()).map_or(c.peak_tick, |k| k.tick);
+            c.start_tick = first_tick.max(first_kill - leadin);
             c.end_tick = last_tick.min(c.peak_tick + followthrough);
+            if c.kind == HighlightType::FragSequence {
+                c.path = Some(
+                    routes
+                        .get(&c.primary_player)
+                        .map(|r| {
+                            r.iter()
+                                .copied()
+                                .filter(|p| p.tick >= c.start_tick && p.tick <= c.end_tick)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                );
+            }
         }
         for c in &mut grouped {
             c.score = compute_score(c);
@@ -623,7 +723,23 @@ fn build_player_names<E>(frames: &[DemoFrame<E>], header: &DemoHeader) -> Ordere
     names
 }
 
-fn group_multi_kills(frags: Vec<HighlightCandidate>) -> Vec<HighlightCandidate> {
+/// `_groupFragChains`: chain each killer's frags (see
+/// `SEQUENCE_PAIR_SECONDS`). A chain of two or more becomes one highlight: a
+/// multi-kill when it all lands within `MULTI_KILL_SPAN_SECONDS`, a frag
+/// sequence when it takes longer.
+fn group_frag_chains(
+    frags: Vec<HighlightCandidate>,
+    deaths: &HashMap<String, Vec<i64>>,
+    tick_rate: f64,
+) -> Vec<HighlightCandidate> {
+    let pair = SEQUENCE_PAIR_SECONDS * tick_rate;
+    let triple = SEQUENCE_TRIPLE_SECONDS * tick_rate;
+    let span = MULTI_KILL_SPAN_SECONDS * tick_rate;
+    let died_between = |player: &str, from: i64, to: i64| {
+        deaths
+            .get(player)
+            .is_some_and(|d| d.iter().any(|&t| t > from && t < to))
+    };
     let mut by_player: Vec<(String, Vec<HighlightCandidate>)> = Vec::new();
     for f in frags {
         match by_player.iter_mut().find(|(k, _)| *k == f.primary_player) {
@@ -636,8 +752,29 @@ fn group_multi_kills(frags: Vec<HighlightCandidate>) -> Vec<HighlightCandidate> 
         player_frags.sort_by_key(|f| f.peak_tick);
         let mut i = 0;
         while i < player_frags.len() {
+            // Chain the frags that follow quickly enough, while the killer
+            // stays alive.
             let mut j = i + 1;
-            while j < player_frags.len() && player_frags[j].peak_tick - player_frags[i].peak_tick <= MULTI_KILL_WINDOW {
+            while j < player_frags.len() {
+                let killer = player_frags[j].primary_player.as_str();
+                let tick = player_frags[j].peak_tick;
+                let previous = player_frags[j - 1].peak_tick;
+                let before_that = if j - i >= 2 {
+                    player_frags[j - 2].peak_tick as f64
+                } else {
+                    f64::NEG_INFINITY
+                };
+                // Or the frag after this one makes three within the longer
+                // window with them.
+                let makes_three = player_frags.get(j + 1).is_some_and(|after| {
+                    (after.peak_tick - previous) as f64 <= triple && !died_between(killer, tick, after.peak_tick)
+                });
+                if (tick - previous) as f64 > pair && tick as f64 - before_that > triple && !makes_three {
+                    break;
+                }
+                if died_between(killer, previous, tick) {
+                    break;
+                }
                 j += 1;
             }
             let group = &player_frags[i..j];
@@ -660,7 +797,11 @@ fn group_multi_kills(frags: Vec<HighlightCandidate>) -> Vec<HighlightCandidate> 
                     peak_tick: last.peak_tick,
                     end_tick: last.end_tick,
                     score: 0.0,
-                    kind: HighlightType::MultiKill,
+                    kind: if (last.peak_tick - first.peak_tick) as f64 <= span {
+                        HighlightType::MultiKill
+                    } else {
+                        HighlightType::FragSequence
+                    },
                     primary_player: first.primary_player.clone(),
                     primary_player_name: first.primary_player_name.clone(),
                     victim_player: last.victim_player.clone(),
@@ -674,6 +815,17 @@ fn group_multi_kills(frags: Vec<HighlightCandidate>) -> Vec<HighlightCandidate> 
                     killer_yaw: last.killer_yaw,
                     victim_faced_killer: None,
                     path: None,
+                    kills: Some(
+                        group
+                            .iter()
+                            .map(|g| KillMoment {
+                                tick: g.peak_tick,
+                                victim_player: g.victim_player.clone().unwrap_or_default(),
+                                victim_pos: g.victim_pos,
+                                killer_pos: g.killer_pos,
+                            })
+                            .collect(),
+                    ),
                 });
             } else {
                 result.push(group[0].clone());
@@ -775,6 +927,7 @@ fn step_run(run: &mut MovementRun, s: Step, speed: f64, tick_rate: f64) {
             x: s.position.x,
             y: s.position.y,
             z: s.position.z,
+            yaw: None,
         });
         run.frames.insert(
             s.tick,
@@ -866,6 +1019,7 @@ fn finish_run(run: &MovementRun, entity_id: &str, tick_rate: f64) -> Option<High
         killer_yaw: at.and_then(|f| f.yaw),
         victim_faced_killer: None,
         path: Some(path),
+        kills: None,
     })
 }
 
