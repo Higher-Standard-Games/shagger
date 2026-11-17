@@ -439,6 +439,9 @@ pub struct WeaponView {
     /// The weapon is new in hand and its first update has not run
     /// (`chargeWeaponDef` differing from `currentWeaponDef`).
     charge_unseen: bool,
+    /// The watched player changed since the last frame (`followedChanged`):
+    /// their aim is their own, never one held through a switch.
+    followed_changed: bool,
     /// Aim held through a weapon switch: it charges nothing until let go,
     /// as on the server (`aimHeldOver`).
     aim_held_over: bool,
@@ -471,6 +474,13 @@ pub struct WeaponView {
 }
 
 impl WeaponView {
+    /// `updateFollowedBob`'s change of whom you watch (and
+    /// `clearFollowedBob`): switching whom you watch is not a weapon switch,
+    /// so the new player's blade charge shows at once.
+    pub fn followed_changed(&mut self) {
+        self.followed_changed = true;
+    }
+
     /// `loadWeapon` and `setupWeapon` for a GLB view model: the hip
     /// position from its definition, applied (`applyPosition`).
     #[must_use]
@@ -503,6 +513,7 @@ impl WeaponView {
             slash: WeaponSlash::default(),
             charge: WeaponCharge::default(),
             charge_unseen: true,
+            followed_changed: false,
             aim_held_over: false,
             barrels: Vec::new(),
             charge_outline: None,
@@ -726,7 +737,11 @@ impl WeaponView {
         // The blade's charge: aiming a melee weapon holds its charge. Aim
         // held through a switch charges nothing until it is let go and
         // pressed again.
-        if self.charge_unseen {
+        if self.followed_changed {
+            self.followed_changed = false;
+            self.charge_unseen = false;
+            self.aim_held_over = false;
+        } else if self.charge_unseen {
             self.charge_unseen = false;
             self.aim_held_over = input.aiming;
         }
@@ -993,6 +1008,13 @@ mod tests {
         blade.update(&ViewModelInput { aiming: false, ..hold });
         assert!(blade.charge_outline.is_none());
         assert_eq!(blade.charge.progress, 0.0);
+
+        // Moving on to a player already charging their blade is not a
+        // switch: their charge shows at once.
+        let mut watched = WeaponView::new("blade", Some(blade_def));
+        watched.followed_changed();
+        watched.update(&hold);
+        assert!(watched.charge_outline.is_some());
 
         // A gun aims; it does not charge.
         let mut gun = WeaponView::new("plasmagun", Some(plasmagun()));
