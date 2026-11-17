@@ -192,12 +192,13 @@ pub enum AnalyzerEvent<'a> {
         player_id: &'a str,
         award_type: &'a str,
     },
-    /// `death`, with the victim's position. `weapon_id` is the event's
-    /// `killWeapon`, or its `weaponId` where that is empty.
+    /// `death`, with the victim's position. The analyzer reads the weapon
+    /// as `killWeapon || weaponId`: `kill_weapon` where it is not empty.
     Death {
         entity_id: &'a str,
         killer_id: &'a str,
         weapon_id: &'a str,
+        kill_weapon: &'a str,
         at: Vec3,
     },
     Other,
@@ -415,11 +416,13 @@ impl<'a> DemoAnalyzer<'a> {
                     entity_id: victim_id,
                     killer_id,
                     weapon_id,
+                    kill_weapon,
                     at: victim_pos,
                 } = ev.analyzer_event()
                 else {
                     continue;
                 };
+                let weapon_id = if kill_weapon.is_empty() { weapon_id } else { kill_weapon };
                 if !victim_id.is_empty() {
                     deaths.entry(victim_id.to_owned()).or_default().push(tick);
                 }

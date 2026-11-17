@@ -17,7 +17,7 @@ use shagger_shared::net::game_state::{Entity, GameState, MovementState, PlayerSt
 enum Event {
     CombatState(String, f64),
     Award(String, String),
-    Death(String, String, String, Vec3),
+    Death(String, String, String, String, Vec3),
     Other,
 }
 
@@ -32,10 +32,11 @@ impl HighlightEvent for Event {
                 player_id: player,
                 award_type: award,
             },
-            Self::Death(victim, killer, weapon, at) => AnalyzerEvent::Death {
+            Self::Death(victim, killer, weapon, kill_weapon, at) => AnalyzerEvent::Death {
                 entity_id: victim,
                 killer_id: killer,
                 weapon_id: weapon,
+                kill_weapon,
                 at: *at,
             },
             Self::Other => AnalyzerEvent::Other,
@@ -99,10 +100,8 @@ fn frame(v: &Value) -> DemoFrame<Event> {
             Some("death") => Event::Death(
                 text(ev, "entityId"),
                 text(ev, "killerId"),
-                // The analyzer reads `killWeapon || weaponId`.
-                Some(text(ev, "killWeapon"))
-                    .filter(|w| !w.is_empty())
-                    .unwrap_or_else(|| text(ev, "weaponId")),
+                text(ev, "weaponId"),
+                text(ev, "killWeapon"),
                 Vec3::new(
                     n(ev.get("x").unwrap()),
                     n(ev.get("y").unwrap()),
