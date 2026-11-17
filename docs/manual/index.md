@@ -6,9 +6,11 @@ SHAGGER ports SHAG's TypeScript one to one where Rust allows. It reads the same 
 
 ## How this manual relates to SHAG's
 
-SHAG's manual is the reference for what the engine does: the cvars, the console, the packages, the maps and shaders, the protocol and the demo format. This manual does not repeat it. It covers what is particular to the Rust port: the crates, how to build and test them, the Rust API, the native backends (wgpu, winit, cpal, egui, gilrs, rapier), and where the port differs from the TypeScript and why.
+[SHAG's manual](https://shag.dev/) is the reference for what the engine does: the cvars, the console, the packages, the maps and shaders, the protocol and the demo format. This manual does not repeat it. It covers what is particular to the Rust port: the crates, how to build and test them, the Rust API, the native backends (wgpu, winit, cpal, egui, gilrs, rapier), and where the port differs from the TypeScript and why.
 
 Each guide here links to the SHAG page for the behaviour it ports. When the two disagree, the TypeScript is right and the Rust has a bug, unless the guide says the difference is deliberate.
+
+This manual is published at [shagger.shag.dev](https://shagger.shag.dev/).
 
 ## Start here
 

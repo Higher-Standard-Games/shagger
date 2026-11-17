@@ -5,6 +5,9 @@ export default defineConfig({
   description: 'The Rust counterpart of the SHAG engine, for native clients',
 
   srcDir: '.',
+
+  // Published at https://shagger.shag.dev/, beside SHAG's manual at https://shag.dev/
+  sitemap: { hostname: 'https://shagger.shag.dev/' },
   outDir: '../../dist-docs',
 
   // localhost URLs are dev-server instructions, not links to verify
@@ -21,7 +24,7 @@ export default defineConfig({
       { text: 'Getting Started', link: '/getting-started/' },
       { text: 'Guides', link: '/guides/' },
       { text: 'Tools', link: '/tools/' },
-      { text: 'SHAG manual', link: 'https://github.com/Higher-Standard-Games/shag/tree/main/docs/manual' }
+      { text: 'SHAG manual', link: 'https://shag.dev/' }
     ],
 
     sidebar: {

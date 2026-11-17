@@ -1,6 +1,6 @@
 # Models and animation
 
-> Behaviour: SHAG's [Model loading](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/model-loading.md) and [Pickup system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/pickup-system.md), and `src/engine/animation`.
+> Behaviour: SHAG's [Model loading](https://shag.dev/guides/model-loading.html) and [Pickup system](https://shag.dev/guides/pickup-system.html), and `src/engine/animation`.
 
 Source: `crates/shagger/src/loader/model/`, `crates/shagger/src/animation/`, `crates/shagger/src/world/`.
 

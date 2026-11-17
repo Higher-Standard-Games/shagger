@@ -1,6 +1,6 @@
 # Rendering
 
-> Behaviour: SHAG's [Render variables](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/render-variables.md), [Lighting system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/lighting-system.md) and [Shader system](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/shader-system.md). The goal is the browser's picture (RUST.md 8 and 21).
+> Behaviour: SHAG's [Render variables](https://shag.dev/guides/render-variables.html), [Lighting system](https://shag.dev/guides/lighting-system.html) and [Shader system](https://shag.dev/guides/shader-system.html). The goal is the browser's picture (RUST.md 8 and 21).
 
 Source: `crates/shagger/src/rendering/`, `lighting/`, `effects/`, `babylon/`.
 

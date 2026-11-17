@@ -1,6 +1,6 @@
 # Networking and lobby
 
-> Behaviour: SHAG's [Networking](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/networking.md) and [Lobby server](https://github.com/Higher-Standard-Games/shag/blob/main/docs/manual/guides/lobby-server.md). The bytes on the wire, the handshake, the acknowledgements and the lobby's JSON messages are the same, so a native client and a browser can play in one match. RUST.md 4 and 18 describe the protocol field by field.
+> Behaviour: SHAG's [Networking](https://shag.dev/guides/networking.html) and [Lobby server](https://shag.dev/guides/lobby-server.html). The bytes on the wire, the handshake, the acknowledgements and the lobby's JSON messages are the same, so a native client and a browser can play in one match. RUST.md 4 and 18 describe the protocol field by field.
 
 Source: `crates/shagger_shared/src/net/`, `crates/shagger/src/network/`, `crates/shagger/src/lobby/`.
 
