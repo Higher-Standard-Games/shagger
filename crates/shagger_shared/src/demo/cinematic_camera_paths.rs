@@ -53,6 +53,9 @@ const TRAIL_BACK: f64 = 170.0;
 const TRAIL_SIDE: f64 = 80.0;
 const TRAIL_UP: f64 = 60.0;
 const TRAIL_KEYFRAME_SECONDS: f64 = 0.3;
+/// A route covering less than this over its heading window (about 0.4 s) is
+/// standing about.
+const TRAIL_MOVING_UNITS: f64 = 60.0;
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
     Vec3::new(a.x + b.x, a.y + b.y, a.z + b.z)
@@ -262,7 +265,9 @@ fn replay_orbit(h: &HighlightCandidate, start_tick: f64, end_tick: f64) -> Camer
     }
 }
 
-/// `_trickFollow`: trail a movement run along its recorded route.
+/// `_trickFollow`: trail a player along their recorded route (a movement
+/// run, or a killer through a frag sequence), from behind where they look
+/// while they stand about.
 fn trick_follow(h: &HighlightCandidate, start_tick: f64, end_tick: f64, tick_rate: f64) -> CameraPath {
     let route: Vec<_> = h
         .path
@@ -278,7 +283,12 @@ fn trick_follow(h: &HighlightCandidate, start_tick: f64, end_tick: f64, tick_rat
         let to = route[(i + 2).min(route.len() - 1)];
         let (dx, dz) = (to.x - from.x, to.z - from.z);
         let length = js_hypot(&[dx, dz]);
-        let forward = if length > 1.0 {
+        // Moving: along the route. Nearly still (a duel strafe): where they look.
+        let forward = if length > TRAIL_MOVING_UNITS {
+            Vec3::new(dx / length, 0.0, dz / length)
+        } else if let Some(yaw) = p.yaw {
+            Vec3::new(js_sin(yaw), 0.0, js_cos(yaw))
+        } else if length > 1.0 {
             Vec3::new(dx / length, 0.0, dz / length)
         } else {
             fallback
