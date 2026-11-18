@@ -20,7 +20,12 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// The BC7 compressor, made with the first texture it compresses.
     pub(crate) compressor: super::texture_compression::Compressor,
+    /// This device among the process's ([`Gpu::serial`]).
+    serial: u64,
 }
+
+/// The next [`Gpu::serial`].
+static NEXT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Gpu {
     /// A device for `instance`, able to present to `surface` when given.
@@ -67,7 +72,17 @@ impl Gpu {
             device,
             queue,
             compressor: super::texture_compression::Compressor::default(),
+            serial: NEXT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
+    }
+
+    /// Tells this device from every other the process has made. wgpu's own
+    /// ids do not: each window's screen makes its own instance, and ids
+    /// count from the start again in each, so the second window's device
+    /// can carry the first one's id.
+    #[must_use]
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// A device with no surface, for offscreen rendering.
