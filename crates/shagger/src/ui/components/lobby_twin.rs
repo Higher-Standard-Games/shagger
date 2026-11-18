@@ -128,36 +128,24 @@ impl TwinStepState {
     }
 }
 
-/// Lines kept in a rail's log; older ones scroll away.
-pub const LOG_LINES: usize = 40;
-
-/// The rail: the game's name, the screen's steps as the lobby's nav keys, a
-/// panel with the screen's facts and log where the lobby lists rooms, and the
-/// engine in the player card's place (`buildTwinRail`).
+/// The rail: the game's name, the screen's steps as the lobby's nav keys,
+/// the room the lobby's room list takes left empty, and the engine in the
+/// player card's place (`buildTwinRail`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TwinRail {
     pub label: String,
-    /// The panel's heading: what this screen is (a match handoff, a local map).
-    pub context: String,
     pub steps: Vec<(String, TwinStepState)>,
-    /// The facts at the head of the panel, by key: (key, label, value).
-    pub facts: Vec<(String, String, String)>,
-    /// The panel's log, newest last.
-    pub lines: Vec<String>,
 }
 
 impl TwinRail {
     #[must_use]
-    pub fn new(label: &str, steps: &[&str], context: &str) -> Self {
+    pub fn new(label: &str, steps: &[&str]) -> Self {
         Self {
             label: label.into(),
-            context: context.into(),
             steps: steps
                 .iter()
                 .map(|s| ((*s).to_owned(), TwinStepState::Pending))
                 .collect(),
-            facts: Vec::new(),
-            lines: Vec::new(),
         }
     }
 
@@ -165,27 +153,6 @@ impl TwinRail {
     pub fn set_steps(&mut self, states: &[TwinStepState]) {
         for (index, (_, state)) in self.steps.iter_mut().enumerate() {
             *state = states.get(index).copied().unwrap_or(TwinStepState::Pending);
-        }
-    }
-
-    /// A fact at the head of the panel, added or updated by key.
-    pub fn set_fact(&mut self, key: &str, label: &str, value: &str) {
-        if let Some(fact) = self.facts.iter_mut().find(|(k, _, _)| k == key) {
-            value.clone_into(&mut fact.2);
-        } else {
-            self.facts.push((key.into(), label.into(), value.into()));
-        }
-    }
-
-    /// A line in the panel's log, newest last; a repeat of the last is dropped.
-    pub fn log(&mut self, line: &str) {
-        if line.is_empty() || self.lines.last().is_some_and(|l| l == line) {
-            return;
-        }
-        self.lines.push(line.into());
-        if self.lines.len() > LOG_LINES {
-            let extra = self.lines.len() - LOG_LINES;
-            self.lines.drain(..extra);
         }
     }
 
@@ -209,34 +176,15 @@ impl TwinRail {
         let mut y = paint_brand(painter, x0, w, top, max_h, screen.width(), style, 1.0);
 
         // The steps, as keys.
-        let hints = screen.width() > 1500.0;
         for (label, state) in &self.steps {
             let key = Rect::from_min_max(pos2(inner_left, y), pos2(inner_right, y + 66.0));
-            paint_key(painter, key, label, state.hint(), *state, hints, style, screen.width());
+            paint_key(painter, key, label, *state, style, screen.width());
             y += 66.0 + 6.0 + 8.0;
         }
 
-        // The panel: its heading, then the facts and the log.
+        // The panel the lobby's room list takes stays empty here.
         let card_height = 54.0;
-        let bottom = y0 + h - 18.0 - card_height - 12.0;
         let sub = hsla(250.0, 45.0, 8.0, 0.62);
-        y += 6.0;
-        let context = text(
-            painter,
-            &self.context.to_uppercase(),
-            11.0,
-            style.body.clone(),
-            sub,
-            2.86,
-        );
-        painter.galley(pos2(inner_left + 2.0, y), context, sub);
-        let version = text(painter, &style.version, 11.0, style.body.clone(), sub, 2.86);
-        painter.galley(pos2(inner_right - 8.0 - version.size().x, y), version, sub);
-        y += 11.0 + 12.0;
-        if bottom - y > 60.0 {
-            let panel = Rect::from_min_max(pos2(inner_left, y), pos2(inner_right, bottom));
-            self.paint_panel(painter, panel, style);
-        }
 
         // The engine, where the lobby has the player card.
         let card_top = y0 + h - 18.0 - card_height;
@@ -263,80 +211,6 @@ impl TwinRail {
             FontId::new(13.0, style.body.clone()),
             sub,
         );
-    }
-
-    fn paint_panel(&self, painter: &Painter, panel: Rect, style: &TwinStyle) {
-        // Clipped at the top right corner.
-        let cut = 22.0;
-        let shape = [
-            panel.min,
-            pos2(panel.max.x - cut, panel.min.y),
-            pos2(panel.max.x, panel.min.y + cut),
-            panel.max,
-            pos2(panel.min.x, panel.max.y),
-        ];
-        gradient_polygon(
-            painter,
-            &shape,
-            &[
-                (0.0, hsla(250.0, 40.0, 11.0, 0.86)),
-                (1.0, hsla(250.0, 44.0, 7.0, 0.92)),
-            ],
-        );
-        painter.add(Shape::closed_line(
-            shape.to_vec(),
-            Stroke::new(1.5, hsla(276.0, 90.0, 64.0, 0.32)),
-        ));
-        let inner = panel.shrink2(vec2(18.0, 14.0));
-        let mut y = inner.min.y;
-        for (_, label, value) in &self.facts {
-            let label = text(
-                painter,
-                &label.to_uppercase(),
-                11.0,
-                style.body.clone(),
-                hsla(45.0, 100.0, 95.0, 0.5),
-                2.2,
-            );
-            let lh = label.size();
-            painter.galley(pos2(inner.min.x, y), label, cream());
-            let value = elide(painter, value, 15.0, style.body.clone(), inner.width() - lh.x - 12.0);
-            painter.text(
-                pos2(inner.max.x, y + lh.y / 2.0),
-                Align2::RIGHT_CENTER,
-                value,
-                FontId::new(15.0, style.body.clone()),
-                gold(),
-            );
-            y += lh.y.max(15.0) + 8.0;
-        }
-        if !self.facts.is_empty() {
-            y += 2.0;
-            painter.hline(
-                inner.min.x..=inner.max.x,
-                y,
-                Stroke::new(1.0, hsla(276.0, 90.0, 64.0, 0.2)),
-            );
-            y += 10.0;
-        }
-        // The log, bottom up, as far as it fits.
-        let line_height = 19.0;
-        let top = y + 6.0;
-        let mut at = inner.max.y - line_height;
-        for line in self.lines.iter().rev() {
-            if at < top {
-                break;
-            }
-            let shown = elide(painter, line, 14.0, style.body.clone(), inner.width());
-            painter.text(
-                pos2(inner.min.x, at),
-                Align2::LEFT_TOP,
-                shown,
-                FontId::new(14.0, style.body.clone()),
-                hsla(45.0, 100.0, 95.0, 0.78),
-            );
-            at -= line_height;
-        }
     }
 }
 
@@ -430,16 +304,7 @@ pub fn paint_brand(
 /// A rail key (`twin-key`): the side below and to the right, the face on
 /// top, pressed by its state.
 #[allow(clippy::too_many_arguments)]
-fn paint_key(
-    painter: &Painter,
-    key: Rect,
-    label: &str,
-    hint: &str,
-    state: TwinStepState,
-    show_hint: bool,
-    style: &TwinStyle,
-    screen_width: f32,
-) {
+fn paint_key(painter: &Painter, key: Rect, label: &str, state: TwinStepState, style: &TwinStyle, screen_width: f32) {
     let (d, dx) = (6.0, 4.5);
     let active = state == TwinStepState::Active;
     let error = state == TwinStepState::Error;
@@ -453,7 +318,7 @@ fn paint_key(
             pos2(r.min.x, r.max.y),
         ]
     };
-    let (face, side, label_color, sub) = if error {
+    let (face, side, label_color) = if error {
         // A step that failed: in the alarm colour, so the rail says where it stopped.
         (
             vec![
@@ -463,7 +328,6 @@ fn paint_key(
             ],
             vec![(0.0, hsl(322.0, 80.0, 24.0)), (1.0, hsl(318.0, 80.0, 14.0))],
             hsl(45.0, 100.0, 96.0),
-            hsla(45.0, 100.0, 96.0, 0.75),
         )
     } else if active {
         (
@@ -474,7 +338,6 @@ fn paint_key(
             ],
             vec![(0.0, hsl(252.0, 44.0, 5.0)), (1.0, hsl(252.0, 44.0, 3.0))],
             hsl(46.0, 100.0, 60.0),
-            hsla(46.0, 100.0, 60.0, 0.66),
         )
     } else {
         (
@@ -485,7 +348,6 @@ fn paint_key(
             ],
             vec![(0.0, hsl(36.0, 92.0, 40.0)), (1.0, hsl(28.0, 88.0, 25.0))],
             hsl(250.0, 45.0, 8.0),
-            hsla(250.0, 45.0, 8.0, 0.62),
         )
     };
     // Unlit: `saturate(0.45) brightness(0.94)`, the label at half.
@@ -523,16 +385,48 @@ fn paint_key(
         galley,
         fade(label_color),
     );
-    if show_hint && !hint.is_empty() {
-        let hint = text(painter, &hint.to_uppercase(), 13.0, style.body.clone(), fade(sub), 1.56);
-        painter.galley(
-            pos2(
-                face_rect.max.x - 24.0 - hint.size().x,
-                face_rect.center().y - hint.size().y / 2.0,
-            ),
-            hint,
-            fade(sub),
-        );
+    // The state as an icon in the key's ink (`.twin-key__hint`): a check
+    // when done, a spinner while loading, a cross when it failed.
+    let icon = Rect::from_center_size(
+        pos2(face_rect.max.x - 24.0 - 9.0, face_rect.center().y),
+        vec2(18.0, 18.0),
+    );
+    let stroke = Stroke::new(3.0, fade(label_color));
+    match state {
+        TwinStepState::Done => {
+            // A rotated corner: `inset: 1px 5px 4px`, its right and bottom edges.
+            let c = icon.center() + vec2(0.0, -1.5);
+            let (w, h) = (8.0, 13.0);
+            let turn = std::f32::consts::FRAC_PI_4;
+            let rot = |p: egui::Vec2| {
+                let (sin, cos) = turn.sin_cos();
+                c + vec2(p.x * cos - p.y * sin, p.x * sin + p.y * cos)
+            };
+            let corner = rot(vec2(w / 2.0, h / 2.0));
+            painter.line_segment([rot(vec2(w / 2.0, -h / 2.0)), corner], stroke);
+            painter.line_segment([rot(vec2(-w / 2.0, h / 2.0)), corner], stroke);
+        }
+        TwinStepState::Active => {
+            // Three quarters of a ring, turning once each 0.8 s.
+            let time = painter.ctx().input(|i| i.time);
+            painter.ctx().request_repaint();
+            let start = ((time / 0.8).fract() as f32) * std::f32::consts::TAU;
+            let r = 7.5;
+            let points: Vec<Pos2> = (0..=18)
+                .map(|i| {
+                    let a = start + i as f32 / 18.0 * std::f32::consts::TAU * 0.75;
+                    icon.center() + vec2(a.cos(), a.sin()) * r
+                })
+                .collect();
+            painter.add(Shape::line(points, stroke));
+        }
+        TwinStepState::Error => {
+            let c = icon.center();
+            let k = 9.0 * std::f32::consts::FRAC_1_SQRT_2;
+            painter.line_segment([c + vec2(-k, -k), c + vec2(k, k)], stroke);
+            painter.line_segment([c + vec2(-k, k), c + vec2(k, -k)], stroke);
+        }
+        TwinStepState::Pending => {}
     }
 }
 
@@ -872,26 +766,8 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_keeps_its_last_forty_lines_without_repeats() {
-        let mut rail = TwinRail::new("Map load", &["Server", "Handshake", "Map load"], "Match handoff");
-        for i in 0..50 {
-            rail.log(&format!("line {i}"));
-            rail.log(&format!("line {i}"));
-        }
-        rail.log("");
-        assert_eq!(rail.lines.len(), LOG_LINES);
-        assert_eq!(rail.lines.first().map(String::as_str), Some("line 10"));
-        assert_eq!(rail.lines.last().map(String::as_str), Some("line 49"));
-    }
-
-    #[test]
-    fn facts_update_in_place_and_steps_default_to_pending() {
-        let mut rail = TwinRail::new("Map load", &["Server", "Handshake", "Map load"], "Match handoff");
-        rail.set_fact("map", "Map", "a");
-        rail.set_fact("server", "Server", "ws://x");
-        rail.set_fact("map", "Map", "b");
-        assert_eq!(rail.facts.len(), 2);
-        assert_eq!(rail.facts[0].2, "b");
+    fn steps_default_to_pending() {
+        let mut rail = TwinRail::new("Map load", &["Server", "Handshake", "Map load"]);
         rail.set_steps(&[TwinStepState::Done]);
         assert_eq!(rail.steps[0].1, TwinStepState::Done);
         assert_eq!(rail.steps[2].1, TwinStepState::Pending);

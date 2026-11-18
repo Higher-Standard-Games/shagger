@@ -497,7 +497,7 @@ pub const DEFAULT_VARS: &[MovementVar] = &[
         default_value: 0.0,
         min: 0.0,
         max: 2.0,
-        description: "Your first-person gun's size: 0 normal, 1 small (10% smaller), 2 smallest (20% smaller)",
+        description: "Your first-person gun's size: 0 normal, 1 small (15% smaller), 2 smallest (25% smaller)",
         category: Category::Camera,
         developer_only: false,
     },

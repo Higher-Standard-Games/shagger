@@ -1,9 +1,10 @@
 //! SHAG `src/engine/ui/TransferLoadingView.ts`: a map loading screen, built
 //! as the lobby's twin.
 //!
-//! The lobby's rail (`components::lobby_twin`) keeps the handoff's steps and
-//! logs the load's phases; the lobby's stage carries the map's name over its
-//! levelshot, and the bar fills phase by phase. When the handoff screen is
+//! The lobby's rail (`components::lobby_twin`) keeps the handoff's steps;
+//! the lobby's stage carries the map's name over its levelshot, the step's
+//! chip with one line beside it of what it is doing, and the bar fills phase
+//! by phase. When the handoff screen is
 //! still up as the map starts loading, this screen appears in its place
 //! without a fade, so joining a match reads as one sequence from the ready
 //! check to the arena.
@@ -124,18 +125,12 @@ impl TransferLoadingView {
     pub fn mount(map: &LoadingStart, networked: bool, handoff: Option<ConnectingOverlay>) -> Self {
         let continued = handoff.is_some();
         let rail = if networked {
-            let mut rail = TwinRail::new("Map load", &["Server", "Handshake", "Map load"], "Match handoff");
-            // What the handoff said stays on the rail.
-            if let Some(h) = &handoff {
-                rail.facts.clone_from(&h.rail.facts);
-                rail.lines.clone_from(&h.rail.lines);
-            }
-            rail
+            TwinRail::new("Map load", &["Server", "Handshake", "Map load"])
         } else {
             let labels: Vec<&str> = LOCAL_STEPS.iter().map(|(label, _)| *label).collect();
-            TwinRail::new("Map load", &labels, "Local map")
+            TwinRail::new("Map load", &labels)
         };
-        let mut stage = OverlayStage::new("NOW LOADING", Vec::new(), "", "LOAD STATUS");
+        let mut stage = OverlayStage::new(Vec::new(), "");
         if let Some(h) = &handoff {
             stage.entered_at = h.stage.entered_at;
             stage.shot = h.stage.shot;
@@ -156,8 +151,6 @@ impl TransferLoadingView {
     pub fn restart(&mut self, map: &LoadingStart) {
         let name = map.display_name.clone().unwrap_or_else(|| map.id.clone());
         self.stage.set_title(title_lines(&name.to_uppercase()));
-        self.rail.set_fact("map", "Map", &map.id);
-        "NOW LOADING".clone_into(&mut self.stage.kicker);
         self.stage.lead = if self.networked {
             "Connected to the match server. Loading the arena it is running.".into()
         } else {
@@ -169,7 +162,7 @@ impl TransferLoadingView {
         self.phase_index = 0;
         self.set_bar(0.0);
         self.set_status(StageState::Loading, "PREPARING");
-        self.stage.footer.clear();
+        self.stage.line.clear();
         self.refresh_steps(TwinStepState::Active);
     }
 
@@ -180,11 +173,7 @@ impl TransferLoadingView {
         }
         let label = index.map_or(event.phase.as_str(), |i| PHASES[i].1);
         self.set_status(StageState::Loading, &label.to_uppercase());
-        self.stage.footer = event.detail.clone().unwrap_or_default();
-        match &event.detail {
-            Some(detail) if !detail.is_empty() => self.rail.log(&format!("{label}: {detail}")),
-            _ => self.rail.log(label),
-        }
+        self.stage.line = event.detail.clone().unwrap_or_default();
         if let Some(share) = phase_progress(event) {
             self.set_bar(share);
         }
@@ -194,10 +183,9 @@ impl TransferLoadingView {
     pub fn complete(&mut self, event: &LoadingComplete, waiting_for: &[&str]) {
         if !event.success {
             self.failed = true;
-            "MAP ERROR".clone_into(&mut self.stage.kicker);
             "The arena could not be loaded.".clone_into(&mut self.stage.lead);
             self.set_status(StageState::Failed, "LOAD FAILED");
-            self.stage.footer.clear();
+            self.stage.line.clear();
             self.stage.error = Some(
                 event
                     .error
@@ -210,9 +198,7 @@ impl TransferLoadingView {
         }
         self.phase_index = PHASES.len() - 1;
         self.set_bar(MAP_SHARE);
-        let loaded = format!("Map loaded in {:.1} s", event.duration / 1000.0);
-        self.stage.footer.clone_from(&loaded);
-        self.rail.log(&loaded);
+        self.stage.line = format!("Map loaded in {:.1} s", event.duration / 1000.0);
         if !waiting_for.is_empty() {
             self.set_status(StageState::SettingUp, "SETTING UP");
         }
@@ -234,7 +220,6 @@ impl TransferLoadingView {
         if self.failed {
             return;
         }
-        "ARENA READY".clone_into(&mut self.stage.kicker);
         "The arena is loaded. Dropping you in.".clone_into(&mut self.stage.lead);
         self.set_bar(1.0);
         self.set_status(StageState::Ready, "READY");
@@ -358,12 +343,12 @@ mod tests {
             &["fps:postload"],
         );
         assert_eq!(view.stage.state, StageState::SettingUp);
-        assert_eq!(view.stage.footer, "Map loaded in 1.2 s");
+        assert_eq!(view.stage.line, "Map loaded in 1.2 s");
         view.hold_progress("Compiling shaders", 0.5);
         assert_eq!(view.stage.status, "COMPILING SHADERS 50%");
         assert!((view.share() - 0.95).abs() < 1e-12);
         view.ready();
-        assert_eq!(view.stage.kicker, "ARENA READY");
+        assert_eq!(view.stage.lead, "The arena is loaded. Dropping you in.");
         assert_eq!(view.share(), 1.0);
         assert_eq!(states(&view), [TwinStepState::Done; 3]);
     }
@@ -371,7 +356,7 @@ mod tests {
     #[test]
     fn a_local_load_walks_its_steps_by_phase() {
         let mut view = TransferLoadingView::mount(&start("washoi_dm2"), false, None);
-        assert_eq!(view.rail.context, "Local map");
+        assert_eq!(view.rail.steps[0].0, "Map data");
         assert_eq!(states(&view)[0], TwinStepState::Active);
         view.progress(&progress("Geometry", None));
         assert_eq!(
@@ -394,7 +379,7 @@ mod tests {
             &[],
         );
         assert_eq!(view.stage.status, "LOAD FAILED");
-        assert_eq!(view.stage.kicker, "MAP ERROR");
+        assert_eq!(view.stage.lead, "The arena could not be loaded.");
         assert_eq!(states(&view)[2], TwinStepState::Error);
         view.hold_progress("Compiling shaders", 1.0);
         view.ready();
@@ -402,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn taking_over_from_the_handoff_keeps_its_rail_and_skips_the_fade() {
-        let mut handoff = ConnectingOverlay::new("wss://eu.washoi.net/game/1", false);
+    fn taking_over_from_the_handoff_skips_the_fade() {
+        let mut handoff = ConnectingOverlay::new(false);
         handoff.set_status("CONNECTING");
         handoff.stage.entered_at = Some(3.0);
         let view = TransferLoadingView::mount(
@@ -417,7 +402,5 @@ mod tests {
         assert!(view.continued);
         assert_eq!(view.stage.entered_at, Some(3.0));
         assert_eq!(view.stage.title, ["PROVING", "GROUNDS"]);
-        assert_eq!(view.rail.facts.len(), 2);
-        assert!(view.rail.lines.iter().any(|l| l == "Connecting"));
     }
 }
