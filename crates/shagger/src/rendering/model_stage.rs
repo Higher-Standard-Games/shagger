@@ -13,6 +13,12 @@
 //!
 //! Drawn at twice the panel's pixels and filtered down, in place of the
 //! canvas's multisampling.
+//!
+//! A stage can outlive its window's GPU device and egui context: the lobby
+//! keeps its panels while a match opens a window of its own, and a screen
+//! opened after it brings a new device. The stage then makes its GPU half
+//! again on the new device and tells the scene ([`StageScene::renderer_lost`]),
+//! since nothing made on one device may be used on another.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -49,10 +55,17 @@ pub struct StageView {
 /// model is not loaded).
 pub trait StageScene: Send {
     fn frame(&mut self, gpu: &Gpu, models: &mut ModelRenderer, size: (u32, u32), time: f64) -> Option<StageView>;
+
+    /// The stage's renderer was made again on another GPU device: every
+    /// handle from the old one is gone, and the next [`Self::frame`] uploads
+    /// what it shows again.
+    fn renderer_lost(&mut self);
 }
 
-/// The stage's GPU half, made in the first paint.
+/// The stage's GPU half, made in the first paint on a device.
 struct Target {
+    /// The device all of this was made on ([`Gpu::serial`]).
+    gpu: u64,
     models: ModelRenderer,
     post: ImageProcessingPostProcess,
     hdr: HdrTarget,
@@ -105,6 +118,13 @@ impl<S: StageScene + 'static> Shared<S> {
         size: (u32, u32),
     ) {
         let size = (size.0.max(1), size.1.max(1));
+        // Another screen's device: the old half cannot be used on it, and
+        // its image id belonged to the old window's egui renderer.
+        if self.target.as_ref().is_some_and(|t| t.gpu != gpu.serial()) {
+            self.target = None;
+            self.shown = None;
+            self.scene.renderer_lost();
+        }
         let target = match &mut self.target {
             Some(t) => t,
             None => {
@@ -112,6 +132,7 @@ impl<S: StageScene + 'static> Shared<S> {
                 let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
                 let texture = textures.register(&output_view);
                 self.target.insert(Target {
+                    gpu: gpu.serial(),
                     models: ModelRenderer::new(gpu, HDR_FORMAT),
                     post: ImageProcessingPostProcess::new(gpu, OUTPUT_FORMAT),
                     hdr: HdrTarget::new(gpu, size.0, size.1),
@@ -187,6 +208,11 @@ impl<S: StageScene + 'static> ModelStage<S> {
     /// paint for a new one at `rect`'s size.
     pub fn ui(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         let ctx = ui.ctx().clone();
+        // A new context is a new window's: the image id shown so far was the
+        // old renderer's, and may name another image in the new one.
+        if self.ctx.as_ref().is_some_and(|old| *old != ctx) {
+            lock(&self.shared).shown = None;
+        }
         let scale = ctx.pixels_per_point() * SUPERSAMPLE;
         let size = (
             (rect.width() * scale).round().clamp(1.0, 4096.0) as u32,
@@ -215,8 +241,11 @@ impl<S: StageScene + 'static> Drop for ModelStage<S> {
         let shared = Arc::clone(&self.shared);
         queue_gpu_job(
             ctx,
-            Box::new(move |_, _, textures| {
-                if let Some(target) = lock(&shared).target.take() {
+            Box::new(move |gpu, _, textures| {
+                // An id from another device's window is not this renderer's.
+                if let Some(target) = lock(&shared).target.take()
+                    && target.gpu == gpu.serial()
+                {
                     textures.free(target.texture);
                 }
             }),
