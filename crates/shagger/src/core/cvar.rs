@@ -102,6 +102,9 @@ pub struct CvarFlags {
     pub cheat: bool,
     /// Left out of `cvarlist`.
     pub hidden: bool,
+    /// Only `developer 1` can change it; a production client keeps the default
+    /// and ignores a stored value.
+    pub developer: bool,
 }
 
 impl Default for CvarFlags {
@@ -111,6 +114,7 @@ impl Default for CvarFlags {
             readonly: false,
             cheat: false,
             hidden: false,
+            developer: false,
         }
     }
 }
@@ -343,6 +347,7 @@ impl Cvars {
             registered: true,
         };
         if !locked
+            && !(options.flags.developer && self.developer_locked)
             && let Some(existing) = self.find(&lower)
             && valid_value(&existing.value, Some(kind))
         {
@@ -406,10 +411,14 @@ impl Cvars {
         if self.is_locked(name) || !valid_value(&value, None) {
             return false;
         }
+        let developer = self.get_bool("developer");
         let Some(cvar) = self.find_mut(name) else {
             return false;
         };
         if cvar.flags.readonly {
+            return false;
+        }
+        if cvar.flags.developer && !developer {
             return false;
         }
         // A numeric cvar refuses text rather than reading it as zero.
@@ -486,10 +495,11 @@ impl Cvars {
     #[must_use]
     pub fn list(&self, filter: Option<&str>) -> Vec<&CvarInstance> {
         let filter = filter.map(str::to_lowercase);
+        let developer = self.get_bool("developer");
         let mut out: Vec<&CvarInstance> = self
             .cvars
             .iter()
-            .filter(|c| !c.flags.hidden)
+            .filter(|c| !c.flags.hidden && (!c.flags.developer || developer))
             .filter(|c| filter.as_ref().is_none_or(|f| c.name.starts_with(f.as_str())))
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -519,6 +529,7 @@ impl Cvars {
                     "readonly": c.flags.readonly,
                     "cheat": c.flags.cheat,
                     "hidden": c.flags.hidden,
+                    "developer": c.flags.developer,
                 });
                 if let Some(min) = c.min {
                     d["min"] = Value::from(min);
@@ -602,6 +613,9 @@ impl Cvars {
         if cvar.flags.readonly {
             info += " [readonly]";
         }
+        if cvar.flags.developer {
+            info += " [developer]";
+        }
         info
     }
 
@@ -628,7 +642,9 @@ impl Cvars {
             if !valid_value(&value, kind) {
                 continue;
             }
+            let locked = self.developer_locked;
             match self.find_mut(name) {
+                Some(cvar) if cvar.flags.developer && locked => {}
                 Some(cvar) if cvar.flags.persist => {
                     cvar.value = coerce_value(&value, cvar.kind, cvar.min, cvar.max);
                 }
@@ -706,6 +722,7 @@ impl Cvars {
             let reason = match self.find(&name) {
                 None => Some("Unknown setting"),
                 Some(c) if c.flags.readonly => Some("Read-only setting"),
+                Some(c) if c.flags.developer && !self.get_bool("developer") => Some("Developer setting"),
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -885,6 +902,31 @@ mod tests {
         assert_eq!(c.get_number("cl_fov"), 100.0, "held to the bounds declared later");
         assert_eq!(c.get_string("g_later"), "x");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn developer_cvars_need_developer_mode() {
+        let developer_only = || {
+            let mut o = CvarOptions::describe("override");
+            o.flags.developer = true;
+            o
+        };
+        let mut c = Cvars::new(None, false);
+        c.register("developer", 0, CvarOptions::default());
+        c.register("r_fog_distance", 0, developer_only());
+        assert!(!c.set("r_fog_distance", 500), "refused without developer mode");
+        assert!(c.exec_config("r_fog_distance 500").accepted == 0);
+        assert!(c.list(Some("r_fog")).is_empty(), "hidden from cvarlist");
+        assert!(c.set("developer", 1));
+        assert!(c.set("r_fog_distance", 500));
+        assert!(c.format_info("r_fog_distance").ends_with("[developer]"));
+
+        // A production client ignores a stored override.
+        let mut c = Cvars::new(None, true);
+        c.preload("r_fog_distance", CvarValue::Number(500.0));
+        c.register("r_fog_distance", 0, developer_only());
+        assert_eq!(c.get_number("r_fog_distance"), 0.0);
+        assert!(!c.set("r_fog_distance", 500));
     }
 
     #[test]

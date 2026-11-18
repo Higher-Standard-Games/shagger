@@ -143,7 +143,9 @@ impl AmmoCounterTuning {
 /// Registers `cg_ammocounter_*`.
 pub fn register_ammo_counter_cvars(cvars: &mut Cvars) {
     let float = |description: &str, min: f64, max: f64| {
-        CvarOptions::describe(description).range(min, max).kind(CvarType::Float)
+        let mut o = CvarOptions::describe(description).range(min, max).kind(CvarType::Float);
+        o.flags.developer = true;
+        o
     };
     let entries: [(&str, f64, CvarOptions); 5] = [
         (
