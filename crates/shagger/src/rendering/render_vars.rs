@@ -549,6 +549,7 @@ pub fn register_render_vars(cvars: &mut Cvars) {
         3.0,
     );
     simulation.flags.persist = false;
+    simulation.flags.developer = true;
     cvars.register("r_colorsimulation", 0, simulation);
     cvars.register(
         "r_cel_outlines",

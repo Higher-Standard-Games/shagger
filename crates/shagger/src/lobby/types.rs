@@ -116,15 +116,21 @@ pub struct Welcome {
     pub recent_demos: Vec<Value>,
 }
 
-/// Login failed. The connection stays open except after `lobby_full`.
+/// Login failed. The connection stays open except after `lobby_full` and `banned`.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthError {
-    /// `unknown_key`, `rate_limited`, `already_authenticated` or `lobby_full`.
+    /// `unknown_key`, `rate_limited`, `already_authenticated`, `lobby_full` or `banned`.
     pub code: String,
     pub online: Option<u32>,
     pub max_players: Option<u32>,
     pub retry_after_sec: Option<u32>,
+    /// `banned`: the reason a person gave, shown to the player.
+    pub reason: Option<String>,
+    /// `banned`: when the ban ends, in Unix milliseconds; absent until lifted.
+    pub until: Option<f64>,
+    /// `banned`: where to appeal.
+    pub appeal: Option<String>,
 }
 
 // ── Campaign ──

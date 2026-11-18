@@ -126,6 +126,7 @@ pub fn register_fog_cvars(cvars: &mut Cvars) {
     let dev = |d: &'static str, kind: CvarType| {
         let mut o = CvarOptions::describe(d).kind(kind);
         o.flags.persist = false;
+        o.flags.developer = true;
         o
     };
     cvars.register(
@@ -379,10 +380,11 @@ mod tests {
         assert_eq!(fog.active(), Some(&map));
         assert_eq!(fog.uniforms().dist, [100.0, 2048.0, 0.0, 0.002]);
         // The overrides need developer 1.
-        assert!(c.set("r_fog_distance", "1000"));
+        assert!(!c.set("r_fog_distance", "1000"));
         fog.refresh(&c);
         assert_eq!(fog.active().unwrap().density, 0.002);
         assert!(c.set("developer", "1"));
+        assert!(c.set("r_fog_distance", "1000"));
         fog.refresh(&c);
         assert_eq!(fog.active().unwrap().density, 3.0 / 1000.0);
         assert_eq!(fog.active().unwrap().color, [0.75, 0.75, 0.75]);
