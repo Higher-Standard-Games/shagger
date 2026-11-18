@@ -49,3 +49,18 @@ pub fn config() -> Arc<ClientConfig> {
 pub fn connector() -> Connector {
     Connector::Rustls(config())
 }
+
+/// The largest WebSocket message or frame either client socket (the lobby's
+/// and the game server's) accepts. tungstenite's own limit is 64 MiB, which a
+/// broken or hostile server could make the client buffer; the largest real
+/// messages (the lobby's board and archive pages, a snapshot with every
+/// entity) are tens of kilobytes.
+pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The settings for `connect_async_tls_with_config`: [`MAX_MESSAGE_BYTES`].
+#[must_use]
+pub fn websocket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES))
+}
