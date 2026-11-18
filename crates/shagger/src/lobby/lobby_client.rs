@@ -350,7 +350,7 @@ impl Drop for LobbyClient {
 async fn run(url: &str, mut requests: async_mpsc::UnboundedReceiver<Outgoing>, events: &mpsc::Sender<LobbyEvent>) {
     let connect = tokio_tungstenite::connect_async_tls_with_config(
         url,
-        None,
+        Some(crate::network::client::tls::websocket_config()),
         true,
         Some(crate::network::client::tls::connector()),
     );
@@ -431,6 +431,47 @@ mod tests {
         let stats = stats_get("st", "snd", "all", Some(RatingPool::Overall));
         assert_eq!(stats["scope"], "overall");
         assert_eq!(stats["period"], "all");
+    }
+
+    #[test]
+    fn a_message_past_the_limit_ends_the_connection() {
+        use crate::network::client::tls::MAX_MESSAGE_BYTES;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                tx.send(format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let fits = format!(
+                    r#"{{"type":"chat:message","text":"{}"}}"#,
+                    "x".repeat(MAX_MESSAGE_BYTES / 2)
+                );
+                ws.send(Message::text(fits)).await.unwrap();
+                let _ = ws.send(Message::text("y".repeat(MAX_MESSAGE_BYTES + 1))).await;
+                // Held open: only the client's limit ends it.
+                let _ = ws.next().await;
+            });
+        });
+        let client = LobbyClient::connect(&rx.recv().unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let (mut messages, mut ended) = (0, None);
+        while ended.is_none() && std::time::Instant::now() < deadline {
+            for event in client.poll_events() {
+                match event {
+                    LobbyEvent::Message(_) => messages += 1,
+                    LobbyEvent::Disconnected { code, .. } => ended = Some(code),
+                    LobbyEvent::Error(e) => panic!("{e}"),
+                    LobbyEvent::Connected => {}
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!((messages, ended), (1, Some(1006)));
     }
 
     #[test]

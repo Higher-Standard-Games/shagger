@@ -31,3 +31,5 @@ A network worker can be stuck in a name lookup the operating system will not cut
 Like Node's `NODE_EXTRA_CA_CERTS`, the PEM certificates in the file named by `SSL_CERT_FILE` are trusted as well, for networks that re-sign TLS through a proxy of their own. A file that cannot be read adds nothing, and the bundled roots still apply.
 
 HTTP(S) downloads (`network::client::http_fetch`) follow at most ten redirects, and never from `https://` to plain `http://`, so packages and updates arrive over TLS or not at all. `HttpFetch::start_at_most` refuses a body past a size as soon as it passes it, so a wrong or hostile server cannot fill the memory.
+
+Both client WebSockets, the lobby's and the game server's, accept messages and frames up to `network::client::tls::MAX_MESSAGE_BYTES` (4 MiB) instead of tungstenite's 64 MiB. A larger message ends the connection as an error (code 1006). The largest real messages, board pages and snapshots, are tens of kilobytes.
