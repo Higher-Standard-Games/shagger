@@ -5,6 +5,7 @@
 //! puts a frame's batch on screen.
 
 pub mod components;
+pub mod cursor_theme;
 pub mod egui_layer;
 pub mod font;
 pub mod glyph_atlas;

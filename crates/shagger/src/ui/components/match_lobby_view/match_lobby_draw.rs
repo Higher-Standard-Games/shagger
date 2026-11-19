@@ -1001,7 +1001,8 @@ impl MatchLobbyView {
                     &name.to_uppercase(),
                     size,
                     style.display.clone(),
-                    ink(1.0),
+                    // Coloured when painted: ink, or cream under the pointer.
+                    Color32::PLACEHOLDER,
                     size * 0.1,
                 )
             })

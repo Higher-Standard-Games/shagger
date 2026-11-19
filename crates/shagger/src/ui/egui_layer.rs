@@ -13,6 +13,7 @@ use egui_wgpu::{Renderer, RendererOptions, ScreenDescriptor};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
+use super::cursor_theme::CursorFollower;
 use crate::rendering::gpu::Gpu;
 
 /// The paint jobs of one frame, waiting for [`EguiLayer::paint`].
@@ -78,6 +79,8 @@ pub struct EguiLayer {
     /// The window's input; `None` offscreen, where input comes as `RawInput`.
     state: Option<egui_winit::State>,
     renderer: Renderer,
+    /// The game's cursors over egui's system ones ([`super::cursor_theme`]).
+    cursor: CursorFollower,
 }
 
 impl EguiLayer {
@@ -91,6 +94,7 @@ impl EguiLayer {
             ctx,
             state: Some(state),
             renderer,
+            cursor: CursorFollower::default(),
         }
     }
 
@@ -102,6 +106,7 @@ impl EguiLayer {
             ctx: egui::Context::default(),
             state: None,
             renderer: Renderer::new(&gpu.device, format, RendererOptions::default()),
+            cursor: CursorFollower::default(),
         }
     }
 
@@ -131,7 +136,10 @@ impl EguiLayer {
         };
         let input = state.take_egui_input(window);
         let output = self.ctx.run_ui(input, ui);
+        let icon = output.platform_output.cursor_icon;
         state.handle_platform_output(window, output.platform_output);
+        let pointer_in_window = self.ctx.input(|i| i.pointer.has_pointer());
+        self.cursor.follow(window, icon, pointer_in_window);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         EguiFrame {
             primitives,
