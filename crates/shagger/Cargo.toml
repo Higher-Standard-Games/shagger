@@ -50,14 +50,15 @@ cpal = "0.18"
 rmp3 = { version = "0.3", features = ["std"] }
 swash = "0.2"
 # Menus, lobby, settings and the console (RUST.md 11): egui on the game's own
-# wgpu device, fed winit's events. Without clipboard and links, which bring
-# in arboard and webbrowser; the game window does without both for now.
+# wgpu device, fed winit's events. With the clipboard (arboard, and
+# smithay-clipboard on Wayland), so a player key can be pasted and copied;
+# without links, which bring in webbrowser.
 egui = "0.37"
 # Glyph outlines for stroked display text (`-webkit-text-stroke`); egui
 # already builds on it.
 skrifa = "0.44"
 egui-wgpu = { version = "0.37", default-features = false }
-egui-winit = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "x11", "wayland"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 # Demo and package downloads over HTTP(S) (RUST.md 7), on rustls with ring
 # like the websocket, which the downloader installs as the provider.
