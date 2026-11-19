@@ -109,7 +109,10 @@ pub struct Welcome {
     #[serde(default)]
     pub online_players: Vec<PlayerInfo>,
     /// The most players the lobby takes online at once; 0 when it has no
-    /// cap. Absent on older servers.
+    /// cap. Absent on older servers. Any number is taken: one that is
+    /// not a whole positive count reads as no cap, rather than failing the
+    /// whole welcome.
+    #[serde(default, deserialize_with = "lenient_cap")]
     pub max_players: Option<u32>,
     #[serde(default)]
     pub chat_history: Vec<ChatMessage>,
@@ -295,6 +298,16 @@ impl LobbyIn {
     }
 }
 
+/// `maxPlayers`: a positive count, or `Some(0)` (no cap) for anything else
+/// the server sends, so one odd value cannot stop the login.
+fn lenient_cap<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    let v = Option::<Value>::deserialize(d)?;
+    Ok(v.map(|v| match v.as_f64() {
+        Some(n) if n.is_finite() && n >= 1.0 => n.min(f64::from(u32::MAX)) as u32,
+        _ => 0,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +322,22 @@ mod tests {
         let Some(LobbyIn::Welcome(w)) = w else { panic!("{w:?}") };
         assert_eq!(w.identity.unwrap().name, "Player_12");
         assert_eq!(w.gametypes[0].map_pool, ["washoi_dm2"]);
+        assert_eq!(w.max_players, None);
+
+        // `maxPlayers`: a count, and anything else reads as no cap rather
+        // than losing the whole welcome.
+        let cap = |v: &str| {
+            let raw = format!(r#"{{"type":"welcome","playerId":"c7","maxPlayers":{v}}}"#);
+            match LobbyIn::parse(&raw) {
+                Some(LobbyIn::Welcome(w)) => w.max_players,
+                other => panic!("{v}: {other:?}"),
+            }
+        };
+        assert_eq!(cap("64"), Some(64));
+        assert_eq!(cap("0"), Some(0));
+        assert_eq!(cap("-1"), Some(0));
+        assert_eq!(cap("2.5"), Some(2));
+        assert_eq!(cap("null"), None);
 
         let c = LobbyIn::parse(
             r#"{"type":"lobby:connect","serverUrl":"wss://eu.washoi.net:7781","map":"washoi_dm2","gametype":"duel","admissionTicket":"t"}"#,

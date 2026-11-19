@@ -14,7 +14,7 @@ impl MatchLobbyView {
         client: &LobbyClient,
         style: &RoomStyle<'_>,
     ) -> Option<RoomAction> {
-        self.tick();
+        self.tick(client);
         let painter = ui.painter_at(rect.expand2(vec2(40.0, 24.0)));
         let time = ui.input(|i| i.time);
         let s = Sizes::new(style);
@@ -102,7 +102,17 @@ impl MatchLobbyView {
             ui.ctx().copy_text(href.clone());
             self.copied = Some(Instant::now());
         }
-        let meta_right = chip.right() + 18.0 + 200.0;
+        // The meta's own width ("LOBBY" and the id at the chip's size), so
+        // the URL is shortened to make room for it before the id gives way.
+        let meta_w = {
+            let w = |t: &str| {
+                text(painter, t, chip_size, style.display.clone(), cream(), chip_size * 0.06)
+                    .size()
+                    .x
+            };
+            w("LOBBY") + chip_size * 0.5 + w(&self.lobby_id.to_uppercase())
+        };
+        let meta_right = chip.right() + 18.0 + meta_w;
         let mut invite_left = copy.left();
         let url_max = (style.window_width * 0.32).clamp(80.0, 46.0 * 15.0 * 0.62);
         let url_room = (copy.left() - 12.0 - meta_right - 80.0).clamp(0.0, url_max);
@@ -268,7 +278,9 @@ impl MatchLobbyView {
         job.wrap.max_rows = 2;
         let sub = painter.layout_job(job);
         let words_h = head.size().y + 10.0 + sub.size().y;
-        let h = pad_t + words_h.max(radar) + pad_b;
+        let invite_h = ai_invite.as_ref().map_or(0.0, |g| g.size().y + 6.0);
+        let tally_h = count.size().y * 0.9 + 8.0 + clock.size().y + invite_h;
+        let h = pad_t + words_h.max(radar).max(tally_h) + pad_b;
         let slab = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), h));
 
         // The slab, cut off its top right, on its accent edge.
@@ -317,8 +329,7 @@ impl MatchLobbyView {
 
         // The tally.
         let right = slab.right() - pad_r;
-        let invite_h = ai_invite.as_ref().map_or(0.0, |g| g.size().y + 6.0);
-        let total_h = count.size().y * 0.9 + 8.0 + clock.size().y + invite_h;
+        let total_h = tally_h;
         let ty = slab.top() + (h - pad_b + pad_t) / 2.0 - total_h / 2.0;
         let ow = of.size().x;
         let cw = count.size().x;
@@ -815,7 +826,8 @@ impl MatchLobbyView {
         let ready = p.ready && !in_match;
         let go = hsl(96.0, 85.0, 55.0);
         let (pip_w, pip_h) = match kind {
-            SeatKind::Vs if !style.narrow && !style.short => (42.0, 30.0),
+            // Only `max-width: 1500px` shrinks it; a short screen keeps it.
+            SeatKind::Vs if !style.narrow => (42.0, 30.0),
             _ => (34.0, 24.0),
         };
         let pip_room = if in_match { 0.0 } else { pip_w + 12.0 };
@@ -1233,7 +1245,8 @@ impl MatchLobbyView {
             } else {
                 "alpha"
             };
-            let label = format!("⇄ To {}", self.team_name(to));
+            // The browser's ⇄ and ⤨ are in neither game font: the words alone.
+            let label = format!("To {}", self.team_name(to));
             let switch = act(
                 ui,
                 &mut x,
@@ -1248,7 +1261,7 @@ impl MatchLobbyView {
             if switch.clicked {
                 client.switch_team(&self.lobby_id);
             }
-            let label = if self.shuffle_sent { "Vote sent" } else { "⤨ Shuffle" };
+            let label = if self.shuffle_sent { "Vote sent" } else { "Shuffle" };
             let shuffle = act(
                 ui,
                 &mut x,
@@ -1348,7 +1361,10 @@ impl MatchLobbyView {
         // `match-lobby__ready-tally`: how many are ready, beside the key that
         // adds you to them, over a pip per player lit when they are.
         let mut left_of_ready = ready_rect.left() - gap;
-        if !self.match_in_progress && !self.players.is_empty() {
+        'tally: {
+            if self.match_in_progress || self.players.is_empty() {
+                break 'tally;
+            }
             let ready = self.players.iter().filter(|p| p.ready).count();
             let count_size = clamp_css(40.0, style.window_width * 0.032, 60.0);
             let count = text(
@@ -1374,6 +1390,11 @@ impl MatchLobbyView {
             let tally_w = count_w.max(pips_w);
             let margin = clamp_css(16.0, style.window_width * 0.016, 30.0);
             let right = ready_rect.left() - margin;
+            // In the browser the tally is a flex item and never overlaps the
+            // keys on the left; here it gives way when they reach it.
+            if right - tally_w < x + gap {
+                break 'tally;
+            }
             let ch = count.size().y * 0.9;
             let total = ch + 10.0 + pip_h;
             let top = ready_rect.center().y - 5.0 - total / 2.0;
@@ -1412,6 +1433,7 @@ impl MatchLobbyView {
         // Rejoin, left of Ready, while this room's match runs.
         if let Some(match_id) = self.active_match_id.clone() {
             let label = self.recover_note.as_deref().unwrap_or("Rejoin match").to_owned();
+            let checking = self.checking_seat();
             let lg = text(
                 painter,
                 &label.to_uppercase(),
@@ -1431,12 +1453,12 @@ impl MatchLobbyView {
                     &label,
                     cream_act,
                     None,
-                    !style.online,
+                    !style.online || checking,
                     0.0,
                     None,
                 );
                 if rejoin.clicked {
-                    self.recover_note = Some("Checking seat…".into());
+                    self.recover_note = Some(super::CHECKING_SEAT.into());
                     action = Some(RoomAction::Rejoin(match_id));
                 }
             }
@@ -1660,6 +1682,9 @@ pub(super) fn map_card(
     };
     let face: KeyFace = key.disabled(starting).show(ui);
     let f = face.rect;
+    // `clip-path`: on a short card the count and flags stay on it.
+    let clipped = painter.with_clip_rect(f.intersect(painter.clip_rect()));
+    let painter = &clipped;
     let cut = f.width() * 0.024;
     let name_size = if style.narrow {
         14.0
