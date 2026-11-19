@@ -4,8 +4,8 @@
 //! bottom, its bar sweeping while the connector reports nothing.
 //!
 //! The stage here is the sheet's, shared with the map loading screen
-//! (`ui::transfer_loading_view`): the kicker, the title, its lead, and the
-//! status with its bar. The browser builds it from HTML; here it is painted
+//! (`ui::transfer_loading_view`): the title, its lead, and the status chip
+//! with one line beside it of what it is doing, over its bar. The browser builds it from HTML; here it is painted
 //! with egui at the sheet's sizes.
 
 use egui::{Color32, FontId, Mesh, Painter, Rect, Shape, Stroke, TextureId, pos2, vec2};
@@ -36,21 +36,19 @@ pub enum StageState {
     Failed,
 }
 
-/// The stage: the kicker, the title, its lead, and the status with its bar.
+/// The stage: the title, its lead, and the status with its bar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayStage {
-    pub kicker: String,
     /// The title's lines; the last is gold.
     pub title: Vec<String>,
     pub lead: String,
-    /// "TRANSFER STATUS" on the handoff, "LOAD STATUS" on the map.
-    pub status_label: String,
     pub status: String,
     pub state: StageState,
     pub bar: BarFill,
-    /// The line under the bar.
-    pub footer: String,
-    /// The notice under the footer (`connecting-overlay__error`).
+    /// Beside the status chip: one line of what it is doing now
+    /// (`connecting-overlay__line`).
+    pub line: String,
+    /// The notice under the bar (`connecting-overlay__error`).
     pub error: Option<String>,
     /// The map's levelshot behind the stage, when there is one.
     pub shot: Option<(TextureId, egui::Vec2)>,
@@ -67,16 +65,14 @@ pub struct OverlayStage {
 
 impl OverlayStage {
     #[must_use]
-    pub fn new(kicker: &str, title: Vec<String>, lead: &str, status_label: &str) -> Self {
+    pub fn new(title: Vec<String>, lead: &str) -> Self {
         Self {
-            kicker: kicker.into(),
             title,
             lead: lead.into(),
-            status_label: status_label.into(),
             status: "PREPARING".into(),
             state: StageState::Preparing,
             bar: BarFill::Sweep,
-            footer: String::new(),
+            line: String::new(),
             error: None,
             shot: None,
             title_at: None,
@@ -95,8 +91,8 @@ impl OverlayStage {
     }
 }
 
-/// The match handoff: the rail with its three steps and the server, and the
-/// stage saying the game is starting (`ConnectingOverlay.show`).
+/// The match handoff: the rail with its three steps, and the stage saying the
+/// game is starting (`ConnectingOverlay.show`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectingOverlay {
     pub rail: TwinRail,
@@ -105,42 +101,38 @@ pub struct ConnectingOverlay {
 
 impl ConnectingOverlay {
     #[must_use]
-    pub fn new(server_url: &str, as_spectator: bool) -> Self {
+    pub fn new(as_spectator: bool) -> Self {
         let label = if as_spectator {
             "Joining live match"
         } else {
             "Match handoff"
         };
-        let mut rail = TwinRail::new(
-            label,
-            &["Server", "Handshake", "Map load"],
-            if as_spectator { "Live channel" } else { "Match handoff" },
-        );
-        rail.set_fact("server", "Server", server_url);
+        let mut rail = TwinRail::new(label, &["Server", "Handshake", "Map load"]);
         rail.set_steps(&[TwinStepState::Done, TwinStepState::Active, TwinStepState::Pending]);
-        rail.log("Preparing");
-        let (kicker, title, lead) = if as_spectator {
+        let (title, lead) = if as_spectator {
             (
-                "LIVE MATCH AVAILABLE",
                 ["SPECTATING", "MATCH"],
                 "Opening a read-only seat on the live match server.",
             )
         } else {
             (
-                "MATCH SERVER ONLINE",
                 ["GAME", "STARTING"],
                 "Your match seat is reserved. Establishing the game connection now.",
             )
         };
-        let mut stage = OverlayStage::new(kicker, title.map(String::from).to_vec(), lead, "TRANSFER STATUS");
-        stage.footer = "KEEP THIS WINDOW OPEN".into();
+        let stage = OverlayStage::new(title.map(String::from).to_vec(), lead);
         Self { rail, stage }
     }
 
-    /// `setStatus`: the status, logged on the rail.
+    /// The handoff of a spectator (`asSpectator`).
+    #[must_use]
+    pub fn spectating(&self) -> bool {
+        self.rail.label == "Joining live match"
+    }
+
+    /// `setStatus`.
     pub fn set_status(&mut self, status: &str) {
         status.clone_into(&mut self.stage.status);
-        self.rail.log(&title_case(status));
     }
 
     /// `showError`: the connection failed.
@@ -149,18 +141,7 @@ impl ConnectingOverlay {
         self.stage.error = Some(error.into());
         self.rail
             .set_steps(&[TwinStepState::Done, TwinStepState::Error, TwinStepState::Pending]);
-        self.rail.log(error);
     }
-}
-
-/// "CONNECTION FAILED" as the rail logs it: "Connection failed".
-fn title_case(status: &str) -> String {
-    let lower = status.to_lowercase();
-    let mut chars = lower.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
 }
 
 /// Paints a twin screen over `screen`: the backdrop and its light, the rail,
@@ -282,19 +263,17 @@ fn paint_stage(
     };
     let plate_size = vec2(status.size().x + dot_room + 32.0, status.size().y + 12.0);
     let bar_height = clamp_css(12.0, 1.7 * vh, 18.0);
-    let footer = text(
+    // Beside the chip, one line of what it is doing now: the start-up
+    // screen's sizes.
+    let line_size = clamp_css(13.6, 1.05 * vw, 16.8);
+    let line_room = (transfer_width - plate_size.x - 18.0).max(0.0);
+    let line = text(
         painter,
-        &elide(
-            painter,
-            &stage.footer.to_uppercase(),
-            11.0,
-            body(),
-            transfer_width / 1.3,
-        ),
-        11.0,
+        &elide(painter, &stage.line, line_size, body(), line_room),
+        line_size,
         body(),
-        hsla(45.0, 100.0, 95.0, 0.55),
-        2.86,
+        hsla(45.0, 100.0, 95.0, 0.6),
+        0.0,
     );
     let error = stage.error.as_ref().map(|e| {
         let size = clamp_css(10.0, 0.8 * vw, 12.5);
@@ -314,26 +293,13 @@ fn paint_stage(
         painter.fonts_mut(|f| f.layout_job(job))
     });
     let error_height = error.as_ref().map_or(0.0, |g| 18.0 + g.size().y + 20.0);
-    let transfer_height = plate_size.y + 14.0 + bar_height + 16.0 + footer.size().y + error_height;
+    let transfer_height = plate_size.y + 14.0 + bar_height + error_height;
     let transfer = Rect::from_min_size(
         pos2(content.min.x, content.max.y - transfer_height),
         vec2(transfer_width, transfer_height),
     );
     let mut y = transfer.min.y;
-    let label = text(
-        painter,
-        &stage.status_label,
-        11.0,
-        body(),
-        hsla(45.0, 100.0, 95.0, 0.55),
-        2.86,
-    );
-    painter.galley(
-        pos2(transfer.min.x, y + (plate_size.y - label.size().y) / 2.0),
-        label,
-        cream(),
-    );
-    let plate = Rect::from_min_size(pos2(transfer.max.x - plate_size.x, y), plate_size);
+    let plate = Rect::from_min_size(pos2(transfer.min.x, y), plate_size);
     painter.add(Shape::convex_polygon(
         vec![
             pos2(plate.min.x + plate.width() * 0.05, plate.min.y),
@@ -344,18 +310,16 @@ fn paint_stage(
         gold(),
         Stroke::NONE,
     ));
+    painter.galley(pos2(plate.min.x + 16.0, plate.min.y + 6.0), status, ink());
     painter.galley(
-        pos2(plate.max.x - 16.0 - dot_room - status.size().x, plate.min.y + 6.0),
-        status,
-        ink(),
+        pos2(plate.max.x + 18.0, plate.center().y - line.size().y / 2.0),
+        line,
+        cream(),
     );
     y += plate_size.y + 14.0;
     let bar = Rect::from_min_size(pos2(transfer.min.x, y), vec2(transfer_width, bar_height));
     paint_bar(painter, bar, stage, time, dt);
-    y += bar_height + 16.0;
-    let footer_height = footer.size().y;
-    painter.galley(pos2(transfer.min.x, y), footer, cream());
-    y += footer_height;
+    y += bar_height;
     if let Some(error) = error {
         let notice = Rect::from_min_size(
             pos2(transfer.min.x, y + 18.0),
@@ -370,19 +334,9 @@ fn paint_stage(
         painter.galley(pos2(notice.min.x + 5.0 + 16.0, notice.min.y + 10.0), error, cream());
     }
 
-    // ── The hero: the kicker, the title and its lead, in the middle ──
+    // ── The hero: the title and its lead, in the middle ──
     let hero_area = Rect::from_min_max(content.min, pos2(content.max.x, transfer.min.y));
     let hero_width = hero_area.width().min(980.0);
-    let kicker_size = clamp_css(9.9, 0.85 * vw, 13.8);
-    let kicker = text(
-        painter,
-        &stage.kicker,
-        kicker_size,
-        display(),
-        ink(),
-        0.24 * kicker_size,
-    );
-    let kicker_plate = vec2(kicker.size().x + 12.0 + 28.0, kicker.size().y + 12.0);
     let chars = stage.title.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(6) as f32;
     let title_size = clamp_css(51.2, (9.1 * vw).min(62.0 * vw / chars), 152.0);
     // `co-title-arrive`: in from 8vw to the right over 0.55 s, after 0.08 s.
@@ -430,22 +384,9 @@ fn paint_stage(
         painter.fonts_mut(|f| f.layout_job(job))
     };
     let lead_gap = clamp_css(22.0, 4.0 * vh, 40.0);
-    let hero_height = kicker_plate.y + 18.0 + line_height * title_lines.len() as f32 + lead_gap + lead.size().y;
+    let hero_height = line_height * title_lines.len() as f32 + lead_gap + lead.size().y;
     let mut y = hero_area.center().y - hero_height / 2.0;
     let x = hero_area.min.x;
-    let k = Rect::from_min_size(pos2(x, y), kicker_plate);
-    painter.add(Shape::convex_polygon(
-        vec![
-            k.left_top(),
-            k.right_top(),
-            pos2(k.min.x + k.width() * 0.92, k.max.y),
-            pos2(k.min.x + k.width() * 0.03, k.max.y),
-        ],
-        gold(),
-        Stroke::NONE,
-    ));
-    painter.galley(pos2(k.min.x + 12.0, k.min.y + 6.0), kicker, ink());
-    y += kicker_plate.y + 18.0;
     let shift = 8.0 * vw * (1.0 - eased);
     for (galley, shadow) in title_lines {
         // `line-height: 0.8`: the glyphs sit in a box shorter than the font's.
@@ -533,23 +474,24 @@ mod tests {
 
     #[test]
     fn the_handoff_starts_with_the_server_reached_and_the_handshake_under_way() {
-        let overlay = ConnectingOverlay::new("wss://eu.washoi.net/game/1", false);
+        let overlay = ConnectingOverlay::new(false);
         assert_eq!(overlay.stage.title, ["GAME", "STARTING"]);
-        assert_eq!(overlay.stage.kicker, "MATCH SERVER ONLINE");
         assert_eq!(
             overlay.rail.steps.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
             [TwinStepState::Done, TwinStepState::Active, TwinStepState::Pending]
         );
-        assert_eq!(overlay.rail.facts[0].2, "wss://eu.washoi.net/game/1");
-        let watching = ConnectingOverlay::new("ws://x", true);
+        assert!(!overlay.spectating());
+        let watching = ConnectingOverlay::new(true);
         assert_eq!(watching.stage.title, ["SPECTATING", "MATCH"]);
-        assert_eq!(watching.rail.context, "Live channel");
+        assert!(watching.spectating());
     }
 
     #[test]
-    fn a_status_is_logged_in_sentence_case() {
-        let mut overlay = ConnectingOverlay::new("ws://x", false);
+    fn a_failure_marks_the_handshake() {
+        let mut overlay = ConnectingOverlay::new(false);
         overlay.set_status("CONNECTION FAILED");
-        assert_eq!(overlay.rail.lines.last().map(String::as_str), Some("Connection failed"));
+        overlay.show_error("No answer");
+        assert_eq!(overlay.stage.status, "CONNECTION FAILED");
+        assert_eq!(overlay.rail.steps[1].1, TwinStepState::Error);
     }
 }

@@ -38,7 +38,7 @@ impl MatchLobbyView {
         action
     }
 
-    /// `match-lobby__top`: the mode chip, the shape and id, and the invite.
+    /// `match-lobby__top`: the mode chip, the room's id, and the invite.
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui, painter: &Painter, rect: Rect, style: &RoomStyle<'_>) -> f32 {
         let a = style.accent;
         let chip_size = clamp_css(18.0, style.window_width * 0.016, 26.0);
@@ -134,13 +134,14 @@ impl MatchLobbyView {
                 url,
                 cream(),
             );
+            // At the size of the room's id, in the mode chip's type.
             let label = text(
                 painter,
                 "INVITE",
-                12.0,
-                style.body.clone(),
+                chip_size,
+                style.display.clone(),
                 hsla(45.0, 100.0, 95.0, 0.5),
-                12.0 * 0.26,
+                chip_size * 0.06,
             );
             let lx = field.left() - 12.0 - label.size().x;
             invite_left = field.left();
@@ -149,42 +150,32 @@ impl MatchLobbyView {
                 painter.galley(pos2(lx, field.center().y - label.size().y / 2.0), label, cream());
             }
         }
-        // `match-lobby__meta`: the shape over the room's id, wrapped in what
-        // the invite leaves.
-        let faint = hsla(45.0, 100.0, 95.0, 0.6);
+        // `match-lobby__meta`: "Lobby" and the room's id, both in the mode
+        // chip's type beside it.
+        let faint = hsla(45.0, 100.0, 95.0, 0.5);
         let meta_x = chip.right() + 18.0;
-        let meta_w = (invite_left - 24.0 - meta_x).max(120.0);
-        let line_h = 14.0 * 1.3;
-        let mut job = egui::text::LayoutJob::default();
-        job.append(
-            &self.shape().to_uppercase(),
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::new(14.0, style.body.clone()),
-                color: faint,
-                extra_letter_spacing: 14.0 * 0.16,
-                line_height: Some(line_h),
-                ..Default::default()
-            },
+        let lobby = text(
+            painter,
+            "LOBBY",
+            chip_size,
+            style.display.clone(),
+            faint,
+            chip_size * 0.06,
         );
-        job.wrap.max_width = meta_w;
-        let shape = painter.layout_job(job);
-        let lines = shape.rows.len().max(1) as f32 + 1.0;
-        let meta_top = rect.top() + h / 2.0 - lines * line_h / 2.0;
-        let sh = shape.size().y;
-        painter.galley(pos2(meta_x, meta_top), shape, faint);
-        let lobby = text(painter, "LOBBY ", 14.0, style.body.clone(), faint, 14.0 * 0.16);
-        let lw = lobby.size().x;
-        painter.galley(pos2(meta_x, meta_top + sh), lobby, faint);
         let id = text(
             painter,
             &self.lobby_id.to_uppercase(),
-            14.0,
+            chip_size,
             style.display.clone(),
             cream(),
-            14.0 * 0.08,
+            chip_size * 0.06,
         );
-        painter.galley(pos2(meta_x + lw, meta_top + sh + 1.0), id, cream());
+        let my = chip.center().y - lobby.size().y / 2.0;
+        let lw = lobby.size().x;
+        painter.galley(pos2(meta_x, my), lobby, faint);
+        if meta_x + lw + chip_size * 0.5 + id.size().x < invite_left - 24.0 {
+            painter.galley(pos2(meta_x + lw + chip_size * 0.5, my), id, cream());
+        }
         h
     }
 
@@ -192,7 +183,7 @@ impl MatchLobbyView {
     pub(super) fn status_slab(&self, painter: &Painter, rect: Rect, top: f32, style: &RoomStyle<'_>, time: f64) -> f32 {
         let a = style.accent;
         let phase = self.status_phase();
-        let (kicker, head, sub) = self.status_text();
+        let (head, sub) = self.status_text();
         let error = self.room_error.is_some();
         let (pad_t, pad_b, pad_l, pad_r) = if style.short {
             (12.0, 18.0, 20.0, 30.0)
@@ -235,7 +226,20 @@ impl MatchLobbyView {
             hsla(45.0, 100.0, 95.0, 0.5),
             13.0 * 0.2,
         );
-        let tally_w = (count.size().x + of.size().x).max(clock.size().x);
+        // `match-lobby__ai-invite`, under the clock.
+        let ai_invite = self.ai_invite_text().map(|t| {
+            text(
+                painter,
+                &t.to_uppercase(),
+                11.0,
+                style.body.clone(),
+                cream().gamma_multiply(0.75),
+                11.0 * 0.16,
+            )
+        });
+        let tally_w = (count.size().x + of.size().x)
+            .max(clock.size().x)
+            .max(ai_invite.as_ref().map_or(0.0, |g| g.size().x));
         let words_left = rect.left() + 10.0 + pad_l + radar + gap;
         let words_w = (rect.right() - pad_r - tally_w - gap - words_left).max(80.0);
         let head_color = if error {
@@ -250,14 +254,6 @@ impl MatchLobbyView {
         } else {
             hsla(45.0, 100.0, 95.0, 0.78)
         };
-        let kicker = text(
-            painter,
-            &kicker.to_uppercase(),
-            12.0,
-            style.body.clone(),
-            a.face,
-            12.0 * 0.32,
-        );
         let head_shown = elide(painter, &head.to_uppercase(), head_size, style.display.clone(), words_w);
         let head = text(
             painter,
@@ -271,7 +267,7 @@ impl MatchLobbyView {
             egui::text::LayoutJob::simple(sub, egui::FontId::new(sub_size, style.body.clone()), sub_color, words_w);
         job.wrap.max_rows = 2;
         let sub = painter.layout_job(job);
-        let words_h = kicker.size().y + 8.0 + head.size().y + 10.0 + sub.size().y;
+        let words_h = head.size().y + 10.0 + sub.size().y;
         let h = pad_t + words_h.max(radar) + pad_b;
         let slab = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), h));
 
@@ -313,9 +309,7 @@ impl MatchLobbyView {
 
         // The words.
         let wy = slab.top() + (h - pad_b + pad_t) / 2.0 - words_h / 2.0;
-        let kh = kicker.size().y;
-        painter.galley(pos2(words_left, wy), kicker, a.face);
-        let hy = wy + kh + 8.0;
+        let hy = wy;
         let hh = head.size().y;
         painter.galley_with_override_text_color(pos2(words_left + 4.0, hy + 5.0), head.clone(), hsl(250.0, 50.0, 3.0));
         painter.galley(pos2(words_left, hy), head, head_color);
@@ -323,14 +317,20 @@ impl MatchLobbyView {
 
         // The tally.
         let right = slab.right() - pad_r;
-        let total_h = count.size().y * 0.9 + 8.0 + clock.size().y;
+        let invite_h = ai_invite.as_ref().map_or(0.0, |g| g.size().y + 6.0);
+        let total_h = count.size().y * 0.9 + 8.0 + clock.size().y + invite_h;
         let ty = slab.top() + (h - pad_b + pad_t) / 2.0 - total_h / 2.0;
         let ow = of.size().x;
         let cw = count.size().x;
         let ch = count.size().y;
         painter.galley(pos2(right - ow, ty + ch - of.size().y - ch * 0.08), of, cream());
         painter.galley(pos2(right - ow - cw, ty), count, cream());
+        let clock_h = clock.size().y;
         painter.galley(pos2(right - clock.size().x, ty + ch * 0.9 + 8.0), clock, cream());
+        if let Some(g) = ai_invite {
+            let y = ty + ch * 0.9 + 8.0 + clock_h + 6.0;
+            painter.galley(pos2(right - g.size().x, y), g, cream());
+        }
 
         // `match-lobby__status-bar`: how full the room is.
         let bar = Rect::from_min_max(pos2(slab.left(), slab.bottom() - 8.0), slab.right_bottom());
@@ -465,16 +465,22 @@ impl MatchLobbyView {
         }
         let roster_h = self.roster_height(body.width(), style, s);
         let vote_head = 20.0 + 12.0;
-        let map_rows = if style.narrower { 2.0 } else { 1.0 };
+        // Six to choose from sit three across, two down.
+        let six = self.maps.len() > 3;
         let maps_min = if style.narrower {
-            260.0
-        } else if style.short {
-            124.0
+            if six { 390.0 } else { 260.0 }
         } else {
-            150.0
+            if six {
+                // Two rows share what one took, so the room still fits.
+                if style.short { 196.0 } else { 236.0 }
+            } else if style.short {
+                124.0
+            } else {
+                150.0
+            }
         };
         let fit = body.height() - roster_h - s.gap - vote_head;
-        let maps_h = fit.max(maps_min) * if style.narrower { 1.0 } else { map_rows };
+        let maps_h = fit.max(maps_min);
         let content_h = roster_h + s.gap + vote_head + maps_h;
         // The keys lift up and left and cast their side down and right, so the
         // scroll box reaches past the room on those edges.
@@ -728,12 +734,12 @@ impl MatchLobbyView {
         }
 
         let (avatar, avatar_font, name_size) = match kind {
-            SeatKind::Vs if style.narrow => (54.0, 24.0, clamp_css(16.0, style.window_width * 0.015, 26.0)),
-            SeatKind::Vs => (76.0, 34.0, clamp_css(20.0, style.window_width * 0.017, 30.0)),
-            SeatKind::Grid if style.short => (30.0, 14.0, 16.0),
-            SeatKind::Grid => (36.0, 14.0, 16.0),
-            SeatKind::Row if style.short => (24.0, 12.0, 16.0),
-            SeatKind::Row => (30.0, 14.0, 16.0),
+            SeatKind::Vs if style.narrow => (54.0, 24.0, clamp_css(20.0, style.window_width * 0.017, 30.0)),
+            SeatKind::Vs => (76.0, 34.0, clamp_css(24.0, style.window_width * 0.02, 36.0)),
+            SeatKind::Grid if style.short => (30.0, 14.0, 20.0),
+            SeatKind::Grid => (36.0, 14.0, 20.0),
+            SeatKind::Row if style.short => (24.0, 12.0, 20.0),
+            SeatKind::Row => (30.0, 14.0, 20.0),
         };
         let pad_l = border + if vs { 16.0 } else { 12.0 };
         let pad_r = slant + if vs { 10.0 } else { 8.0 };
@@ -802,7 +808,84 @@ impl MatchLobbyView {
         let g = text(painter, &initial, avatar_font, style.display.clone(), ink(1.0), 0.0);
         painter.galley(av.center() - g.size() / 2.0, g, ink(1.0));
 
-        // Tags: "You", a bot's level.
+        // Ready or not, drawn rather than said: an empty slanted pip at the
+        // right, filled green with a check once ready. While a match is
+        // played the flags belong to the next one, so the pip goes.
+        let in_match = self.match_in_progress;
+        let ready = p.ready && !in_match;
+        let go = hsl(96.0, 85.0, 55.0);
+        let (pip_w, pip_h) = match kind {
+            SeatKind::Vs if !style.narrow && !style.short => (42.0, 30.0),
+            _ => (34.0, 24.0),
+        };
+        let pip_room = if in_match { 0.0 } else { pip_w + 12.0 };
+        let tagged = p.is_local || p.bot_level.is_some();
+        let shown = elide(
+            painter,
+            &p.name,
+            name_size,
+            style.display.clone(),
+            (right - x0 - pip_room).max(20.0),
+        );
+        let name = text(
+            painter,
+            &shown,
+            name_size,
+            style.display.clone(),
+            cream(),
+            name_size * 0.04,
+        );
+        let nh = name.size().y;
+        painter.galley(pos2(x0, r.center().y - nh / 2.0), name, cream());
+        if !in_match {
+            // Under the corner tab when the seat has one.
+            let drop = if tagged { (r.height() * 0.12).min(8.0) } else { 0.0 };
+            let pr = Rect::from_min_size(
+                pos2(right - pip_w, r.center().y + drop - pip_h / 2.0),
+                vec2(pip_w, pip_h),
+            );
+            let cut = pip_w * 0.12;
+            let pts = vec![
+                pr.left_top() + vec2(cut, 0.0),
+                pr.right_top(),
+                pr.right_bottom() - vec2(cut, 0.0),
+                pr.left_bottom(),
+            ];
+            if ready {
+                for grow in [6.0, 3.0] {
+                    let g = pr.expand(grow);
+                    let c = g.width() * 0.12;
+                    painter.add(Shape::convex_polygon(
+                        vec![
+                            g.left_top() + vec2(c, 0.0),
+                            g.right_top(),
+                            g.right_bottom() - vec2(c, 0.0),
+                            g.left_bottom(),
+                        ],
+                        go.gamma_multiply(0.18),
+                        Stroke::NONE,
+                    ));
+                }
+                painter.add(Shape::convex_polygon(pts, go, Stroke::NONE));
+                // `✓`, drawn: the face's font may not have it.
+                let c = pr.center();
+                let k = pip_h * 0.55;
+                let stroke = Stroke::new(pip_h * 0.13, ink(1.0));
+                painter.line_segment([pos2(c.x - k * 0.45, c.y), pos2(c.x - k * 0.1, c.y + k * 0.32)], stroke);
+                painter.line_segment(
+                    [
+                        pos2(c.x - k * 0.1, c.y + k * 0.32),
+                        pos2(c.x + k * 0.45, c.y - k * 0.38),
+                    ],
+                    stroke,
+                );
+            } else {
+                painter.add(Shape::closed_line(pts, Stroke::new(2.0, hsla(45.0, 100.0, 95.0, 0.28))));
+            }
+        }
+
+        // Who the seat is (You, a bot's level): a tab flush in the card's
+        // top right corner, cut on its inner edge.
         let mut tags = Vec::new();
         if p.is_local {
             tags.push(("YOU".to_owned(), hsl(46.0, 100.0, 60.0)));
@@ -813,126 +896,25 @@ impl MatchLobbyView {
                 hsl(186.0, 90.0, 46.0),
             ));
         }
-        let tag_galleys: Vec<_> = tags
-            .iter()
-            .map(|(t, c)| (text(painter, t, 10.0, style.display.clone(), ink(1.0), 1.2), *c))
-            .collect();
-        let tags_w: f32 = tag_galleys.iter().map(|(g, _)| g.size().x + 16.0 + 6.0).sum();
-
-        let in_match = self.match_in_progress;
-        let ready = p.ready && !in_match;
-        let state = if in_match {
-            "IN MATCH"
-        } else if p.ready {
-            "READY"
-        } else {
-            "NOT READY"
-        };
-        let go = hsl(96.0, 85.0, 55.0);
-        let two_rows = kind != SeatKind::Row;
-        let (state_size, state_chip) = match kind {
-            SeatKind::Vs if style.narrow => (11.0, true),
-            SeatKind::Vs => (13.0, true),
-            SeatKind::Grid => (10.0, false),
-            SeatKind::Row => (11.0, true),
-        };
-        let state_color = if ready && state_chip {
-            ink(1.0)
-        } else if ready {
-            go
-        } else {
-            hsla(45.0, 100.0, 95.0, 0.42)
-        };
-        let state_g = text(
-            painter,
-            state,
-            state_size,
-            style.display.clone(),
-            state_color,
-            state_size * 0.1,
-        );
-        let check = if ready { state_size * 0.9 + 4.0 } else { 0.0 };
-        let (chip_px, chip_py) = match kind {
-            SeatKind::Vs if !style.narrow => (14.0, 8.0),
-            _ => (11.0, 5.0),
-        };
-        let state_w = state_g.size().x + check + if state_chip { chip_px * 2.0 } else { 0.0 };
-        let state_h = state_g.size().y + if state_chip { chip_py * 2.0 } else { 0.0 };
-
-        let name_room = if two_rows {
-            right - x0 - tags_w
-        } else {
-            right - x0 - tags_w - state_w - 12.0
-        };
-        let weight_size = name_size;
-        let shown = elide(
-            painter,
-            &p.name,
-            weight_size,
-            style.display.clone(),
-            name_room.max(20.0),
-        );
-        let name = text(
-            painter,
-            &shown,
-            weight_size,
-            style.display.clone(),
-            cream(),
-            weight_size * 0.04,
-        );
-        let row_gap = if vs { 8.0 } else { 5.0 };
-        let (name_y, state_y) = if two_rows {
-            let total = name.size().y + row_gap + state_h;
-            let top = r.center().y - total / 2.0;
-            (top, top + name.size().y + row_gap)
-        } else {
-            (r.center().y - name.size().y / 2.0, r.center().y - state_h / 2.0)
-        };
-        let nh = name.size().y;
-        let nw = name.size().x;
-        painter.galley(pos2(x0, name_y), name, cream());
-        // Tags sit after the name on its row; in a grid they take the right.
-        let mut tx = if two_rows { right - tags_w + 6.0 } else { x0 + nw + 12.0 };
-        for (g, c) in tag_galleys {
-            let tw = g.size().x + 16.0;
-            let th = g.size().y + 6.0;
-            let tr = Rect::from_min_size(pos2(tx, name_y + nh / 2.0 - th / 2.0), vec2(tw, th));
-            chip(painter, tr, 0.1, c);
-            painter.galley(pos2(tr.left() + 8.0, tr.top() + 3.0), g, ink(1.0));
-            tx += tw + 6.0;
+        let mut tx = r.right();
+        for (t, c) in tags.iter().rev() {
+            let g = text(painter, t, 11.0, style.display.clone(), ink(1.0), 11.0 * 0.12);
+            let tw = g.size().x + 14.0 + 18.0;
+            let th = g.size().y + 11.0;
+            let tr = Rect::from_min_size(pos2(tx - tw, r.top()), vec2(tw, th));
+            painter.add(Shape::convex_polygon(
+                vec![
+                    tr.left_top() + vec2(10.0, 0.0),
+                    tr.right_top(),
+                    tr.right_bottom(),
+                    tr.left_bottom(),
+                ],
+                *c,
+                Stroke::NONE,
+            ));
+            painter.galley(pos2(tr.left() + 18.0, tr.top() + 5.0), g, ink(1.0));
+            tx -= tw - 4.0;
         }
-        let sx = if two_rows { x0 } else { right - state_w };
-        let sr = Rect::from_min_size(pos2(sx, state_y), vec2(state_w, state_h));
-        if state_chip {
-            if ready {
-                chip(painter, sr, 0.08, go);
-            } else {
-                let cut = sr.width() * 0.08;
-                painter.add(Shape::closed_line(
-                    vec![
-                        sr.left_top() + vec2(cut, 0.0),
-                        sr.right_top(),
-                        sr.right_bottom() - vec2(cut, 0.0),
-                        sr.left_bottom(),
-                    ],
-                    Stroke::new(1.5, hsla(45.0, 100.0, 95.0, 0.2)),
-                ));
-            }
-        }
-        let mut lx = sr.left() + if state_chip { chip_px } else { 0.0 };
-        let sy = sr.center().y;
-        if ready {
-            let k = state_size * 0.9;
-            let stroke = Stroke::new(state_size * 0.16, state_color);
-            painter.line_segment([pos2(lx, sy), pos2(lx + k * 0.35, sy + k * 0.32)], stroke);
-            painter.line_segment(
-                [pos2(lx + k * 0.35, sy + k * 0.32), pos2(lx + k * 0.9, sy - k * 0.38)],
-                stroke,
-            );
-            lx += check;
-        }
-        let sgh = state_g.size().y;
-        painter.galley(pos2(lx, sy - sgh / 2.0), state_g, state_color);
     }
 
     /// `match-lobby__vote`: the head, and a card per map.
@@ -948,32 +930,20 @@ impl MatchLobbyView {
         style: &RoomStyle<'_>,
     ) {
         let title = text(painter, "VOTE MAP", 20.0, style.display.clone(), cream(), 20.0 * 0.14);
-        let tw = title.size().x;
-        let th = title.size().y;
         painter.galley(pos2(r.left(), top), title, cream());
-        let hint = text(
-            painter,
-            "MOST VOTES WINS · TIES ARE RANDOM",
-            13.0,
-            style.body.clone(),
-            hsla(45.0, 100.0, 95.0, 0.48),
-            13.0 * 0.16,
-        );
-        painter.galley(
-            pos2(r.left() + tw + 18.0, top + th - hint.size().y - 1.0),
-            hint,
-            cream(),
-        );
         let maps_top = top + 20.0 + 12.0;
         let slots = self.maps.len().max(3);
         let (cols, rows) = if style.narrower {
             (2, slots.div_ceil(2))
+        } else if slots > 3 {
+            (3, slots.div_ceil(3))
         } else {
             (slots, 1)
         };
         let gap = 26.0;
+        let row_gap = if slots > 3 { 18.0 } else { gap };
         let w = (r.width() - gap * (cols as f32 - 1.0)) / cols as f32;
-        let h = (maps_h - (rows as f32 - 1.0) * gap) / rows as f32;
+        let h = (maps_h - (rows as f32 - 1.0) * row_gap) / rows as f32;
         let most = self.maps.iter().map(|m| m.votes).max().unwrap_or(0);
         let leaders = self.maps.iter().filter(|m| m.votes == most).count();
         let starting = self.phase == Phase::Starting;
@@ -982,7 +952,7 @@ impl MatchLobbyView {
             let (row, col) = (i / cols, i % cols);
             let depth = 7.8;
             let card = Rect::from_min_size(
-                pos2(r.left() + col as f32 * (w + gap), maps_top + row as f32 * (h + gap)),
+                pos2(r.left() + col as f32 * (w + gap), maps_top + row as f32 * (h + row_gap)),
                 vec2(w - depth * 0.75, h - depth - 8.0),
             );
             let Some(map) = self.maps.get(i) else {
@@ -1026,7 +996,10 @@ impl MatchLobbyView {
             .collect();
         let widest = names.iter().map(|g| g.size().x).fold(0.0, f32::max);
         let item_h = size + item_pad.y * 2.0;
-        let width = (widest + item_pad.x * 2.0 + pad * 2.0).max(180.0);
+        // As wide as the key and its arrow, and never narrower than its words.
+        let width = (widest + item_pad.x * 2.0 + pad * 2.0)
+            .max(180.0)
+            .max(caret.right() - bottom_left.x);
         let height = item_h * BOT_LEVELS.len() as f32 + pad * 2.0;
         let menu = Rect::from_min_size(bottom_left - vec2(0.0, height), vec2(width, height));
         let id = egui::Id::NULL.with(("match-lobby", "bot-menu"));
@@ -1083,7 +1056,8 @@ impl MatchLobbyView {
         picked
     }
 
-    /// `match-lobby__actions`: Leave, Add bot, Switch and Shuffle, Rejoin, Ready.
+    /// `match-lobby__actions`: Leave, Add AI player, Switch and Shuffle,
+    /// Rejoin, the ready tally and Ready.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn actions(
         &mut self,
@@ -1111,7 +1085,6 @@ impl MatchLobbyView {
                    x: &mut f32,
                    id: &str,
                    label: &str,
-                   hint: &str,
                    look: KeyLook,
                    hover: Option<(KeyLook, f32)>,
                    disabled: bool,
@@ -1125,15 +1098,7 @@ impl MatchLobbyView {
                 Color32::WHITE,
                 label_size * 0.07,
             );
-            let hg = text(
-                painter,
-                &hint.to_uppercase(),
-                12.0,
-                style.body.clone(),
-                Color32::WHITE,
-                1.4,
-            );
-            let w = (lg.size().x + lead).max(hg.size().x) + pad.0 + pad.1 + 8.0;
+            let w = lg.size().x + lead + pad.0 + pad.1 + 8.0;
             let r = Rect::from_min_size(pos2(*x, act_top), vec2(w, s.act_h));
             // `--key-cut` in pixels rather than of the width.
             let cut = |look: KeyLook| match cut_px {
@@ -1145,15 +1110,10 @@ impl MatchLobbyView {
                 key = key.hover(cut(h), p);
             }
             let face = key.show(ui);
-            // The label stands `lead` in, past a drawn mark; the hint does not.
+            // The label stands `lead` in, past a drawn mark.
             KeyText::new(label, "", style.display.clone(), style.body.clone())
                 .size(label_size, 12.0)
                 .pad(pad.0 + lead, pad.1)
-                .layout(KeyTextLayout::Stacked)
-                .paint(painter, &shift_face(&face, -(hg.size().y + 6.0) / 2.0));
-            KeyText::new(" ", hint, style.display.clone(), style.body.clone())
-                .size(label_size, 12.0)
-                .pad(pad.0, pad.1)
                 .layout(KeyTextLayout::Stacked)
                 .paint(painter, &face);
             *x += w + act_depth * 0.75 + 2.0 + gap;
@@ -1184,7 +1144,6 @@ impl MatchLobbyView {
             &mut x,
             "leave",
             "Leave",
-            "Back to play",
             leave_look,
             Some((leave_hover, -0.35)),
             false,
@@ -1193,8 +1152,7 @@ impl MatchLobbyView {
         );
         // `←`, drawn: the face's font may not have the arrow.
         {
-            let hint_h = 12.0 * 1.2;
-            let y = leave.rect.center().y - (hint_h + 6.0) / 2.0;
+            let y = leave.rect.center().y;
             let ax = leave.rect.left() + pad.0;
             let stroke = Stroke::new(2.4, leave.text);
             let k = label_size * 0.42;
@@ -1210,8 +1168,7 @@ impl MatchLobbyView {
         let full = self.players.len() >= self.max_players;
         let bot_disabled = starting || self.invite_bot_pending.is_some() || full || self.bot_note.is_some();
         let cream_act = KeyLook::cream().depth(act_depth);
-        let bot_hint = self.bot_hint();
-        // Add bot and the skill arrow lean by the same fixed amount, as one
+        // Add AI player and the skill arrow lean by the same fixed amount, as one
         // split key (the usual 3% would leave the narrow arrow upright).
         let key_cut = 5.0;
         let bot_left = x;
@@ -1219,8 +1176,7 @@ impl MatchLobbyView {
             ui,
             &mut x,
             "bot",
-            "+ Add bot",
-            &bot_hint,
+            self.bot_label(),
             cream_act.clone(),
             None,
             bot_disabled,
@@ -1230,7 +1186,7 @@ impl MatchLobbyView {
         if bot.clicked {
             self.request_bot(client, None);
         }
-        // The arrow starts where Add bot's slanted edge ends, over its side.
+        // The arrow starts where Add AI player's slanted edge ends, over its side.
         let caret_left = x - (act_depth * 0.75 + 2.0 + gap) - key_cut + 2.0;
         let caret_pad = clamp_css(12.0, style.window_width * 0.01, 18.0);
         let caret_w = caret_pad * 2.0 + 16.0;
@@ -1243,14 +1199,15 @@ impl MatchLobbyView {
             .disabled(bot_disabled)
             .show(ui);
         {
-            // `▾`, drawn: the face's font may not have it.
+            // `▴`, drawn: the face's font may not have it. It points up,
+            // where its menu opens.
             let c = caret.rect.center();
             let (hw, hh) = (7.0, 5.0);
             painter.add(Shape::convex_polygon(
                 vec![
-                    pos2(c.x - hw, c.y - hh * 0.6),
-                    pos2(c.x + hw, c.y - hh * 0.6),
-                    pos2(c.x, c.y + hh * 1.4),
+                    pos2(c.x - hw, c.y + hh * 0.6),
+                    pos2(c.x, c.y - hh * 1.4),
+                    pos2(c.x + hw, c.y + hh * 0.6),
                 ],
                 caret.text,
                 Stroke::NONE,
@@ -1276,13 +1233,12 @@ impl MatchLobbyView {
             } else {
                 "alpha"
             };
-            let hint = format!("To {}", self.team_name(to));
+            let label = format!("⇄ To {}", self.team_name(to));
             let switch = act(
                 ui,
                 &mut x,
                 "switch",
-                "Switch",
-                &hint,
+                &label,
                 cream_act.clone(),
                 None,
                 starting,
@@ -1292,17 +1248,12 @@ impl MatchLobbyView {
             if switch.clicked {
                 client.switch_team(&self.lobby_id);
             }
-            let hint = if self.shuffle_sent {
-                "Vote sent"
-            } else {
-                "Mix the teams"
-            };
+            let label = if self.shuffle_sent { "Vote sent" } else { "⤨ Shuffle" };
             let shuffle = act(
                 ui,
                 &mut x,
                 "shuffle",
-                "Shuffle",
-                hint,
+                label,
                 cream_act.clone(),
                 None,
                 starting || self.shuffle_sent,
@@ -1316,7 +1267,7 @@ impl MatchLobbyView {
         }
 
         // Ready, at the right.
-        let (ready_label, ready_hint) = self.ready_text();
+        let ready_label = self.ready_label();
         let ready_size = if style.short {
             clamp_css(22.0, style.window_width * 0.017, 30.0)
         } else {
@@ -1388,57 +1339,96 @@ impl MatchLobbyView {
             face.text,
             ready_size * 0.12,
         );
-        let hint = text(
-            painter,
-            &ready_hint.to_uppercase(),
-            13.0,
-            style.body.clone(),
-            face.sub,
-            13.0 * 0.12,
-        );
-        let total = label.size().y + 8.0 + hint.size().y;
-        let ty = face.rect.center().y - total / 2.0;
-        let lh = label.size().y;
-        painter.galley(pos2(face.rect.center().x - label.size().x / 2.0, ty), label, face.text);
-        painter.galley(
-            pos2(face.rect.center().x - hint.size().x / 2.0, ty + lh + 8.0),
-            hint,
-            face.sub,
-        );
+        painter.galley(face.rect.center() - label.size() / 2.0, label, face.text);
         if face.clicked {
             let ready = !self.local_ready;
             self.set_ready(ready, client);
         }
 
+        // `match-lobby__ready-tally`: how many are ready, beside the key that
+        // adds you to them, over a pip per player lit when they are.
+        let mut left_of_ready = ready_rect.left() - gap;
+        if !self.match_in_progress && !self.players.is_empty() {
+            let ready = self.players.iter().filter(|p| p.ready).count();
+            let count_size = clamp_css(40.0, style.window_width * 0.032, 60.0);
+            let count = text(
+                painter,
+                &ready.to_string(),
+                count_size,
+                style.display.clone(),
+                a.hi,
+                0.0,
+            );
+            let of = text(
+                painter,
+                &format!("/{}", self.players.len()),
+                count_size * 0.5,
+                style.display.clone(),
+                a.hi,
+                0.0,
+            );
+            let (pip_w, pip_h, pip_gap) = (20.0, 8.0, 5.0);
+            let n = self.players.len() as f32;
+            let pips_w = n * pip_w + (n - 1.0) * pip_gap;
+            let count_w = count.size().x + of.size().x;
+            let tally_w = count_w.max(pips_w);
+            let margin = clamp_css(16.0, style.window_width * 0.016, 30.0);
+            let right = ready_rect.left() - margin;
+            let ch = count.size().y * 0.9;
+            let total = ch + 10.0 + pip_h;
+            let top = ready_rect.center().y - 5.0 - total / 2.0;
+            let count_at = pos2(right - count_w, top);
+            painter.galley_with_override_text_color(count_at + vec2(3.0, 4.0), count.clone(), hsl(250.0, 50.0, 3.0));
+            let count_h = count.size().y;
+            painter.galley(count_at, count, a.hi);
+            painter.galley(pos2(right - of.size().x, top + count_h * 0.82 - of.size().y), of, a.hi);
+            let py = top + ch + 10.0;
+            for (i, player) in self.players.iter().enumerate() {
+                let px = right - pips_w + i as f32 * (pip_w + pip_gap);
+                let r = Rect::from_min_size(pos2(px, py), vec2(pip_w, pip_h));
+                // `skewX(-20deg)`
+                let skew = pip_h * 0.364;
+                let pts = vec![
+                    r.left_top() + vec2(skew / 2.0, 0.0),
+                    r.right_top() + vec2(skew / 2.0, 0.0),
+                    r.right_bottom() - vec2(skew / 2.0, 0.0),
+                    r.left_bottom() - vec2(skew / 2.0, 0.0),
+                ];
+                if player.ready {
+                    let glow: Vec<Pos2> = pts.clone();
+                    painter.add(Shape::convex_polygon(
+                        glow.iter().map(|p| *p + (*p - r.center()) * 0.35).collect(),
+                        a.face.gamma_multiply(0.3),
+                        Stroke::NONE,
+                    ));
+                    painter.add(Shape::convex_polygon(pts, a.face, Stroke::NONE));
+                } else {
+                    painter.add(Shape::convex_polygon(pts, hsla(45.0, 100.0, 95.0, 0.16), Stroke::NONE));
+                }
+            }
+            left_of_ready = right - tally_w - gap;
+        }
+
         // Rejoin, left of Ready, while this room's match runs.
         if let Some(match_id) = self.active_match_id.clone() {
-            let hint = self.recover_note.as_deref().unwrap_or("Unplayed seat").to_owned();
+            let label = self.recover_note.as_deref().unwrap_or("Rejoin match").to_owned();
             let lg = text(
                 painter,
-                "REJOIN MATCH",
+                &label.to_uppercase(),
                 label_size,
                 style.display.clone(),
                 Color32::WHITE,
                 label_size * 0.07,
             );
-            let hg = text(
-                painter,
-                &hint.to_uppercase(),
-                12.0,
-                style.body.clone(),
-                Color32::WHITE,
-                1.4,
-            );
-            let w = lg.size().x.max(hg.size().x) + pad.0 + pad.1 + 8.0;
-            let rx = ready_rect.left() - gap - act_depth * 0.75 - 2.0 - w;
+            let w = lg.size().x + pad.0 + pad.1 + 8.0;
+            let rx = left_of_ready - act_depth * 0.75 - 2.0 - w;
             if rx > x {
                 let mut rx_cursor = rx;
                 let rejoin = act(
                     ui,
                     &mut rx_cursor,
                     "rejoin",
-                    "Rejoin match",
-                    &hint,
+                    &label,
                     cream_act,
                     None,
                     !style.online,
@@ -1452,7 +1442,7 @@ impl MatchLobbyView {
             }
         }
 
-        // A note beside Add bot that fades by itself.
+        // A note beside Add AI player that fades by itself.
         if let Some((note, at)) = &self.flash {
             let t = at.elapsed().as_secs_f32() / FLASH.as_secs_f32();
             let alpha = if t < 0.1 {
@@ -1525,14 +1515,6 @@ impl Sizes {
     }
 }
 
-/// The same face moved down by `dy`, for lettering set off its centre.
-pub(super) fn shift_face(face: &KeyFace, dy: f32) -> KeyFace {
-    KeyFace {
-        rect: face.rect.translate(vec2(0.0, dy)),
-        ..face.clone()
-    }
-}
-
 /// `--ink`.
 pub(super) fn ink(a: f32) -> Color32 {
     hsla(250.0, 45.0, 7.0, a)
@@ -1582,21 +1564,6 @@ pub(super) fn gradient_rect_x(rect: Rect, stops: &[(f32, Color32)]) -> Mesh {
 /// A band across `rect`: transparent outside the stops.
 pub(super) fn horizontal_band(painter: &Painter, rect: Rect, stops: &[(f32, Color32)]) {
     painter.add(gradient_rect_x(rect, stops));
-}
-
-/// A slanted chip (`clip-path: polygon(cut 0, 100% 0, 100%-cut 100%, 0 100%)`).
-pub(super) fn chip(painter: &Painter, r: Rect, cut: f32, color: Color32) {
-    let c = r.width() * cut;
-    painter.add(Shape::convex_polygon(
-        vec![
-            r.left_top() + vec2(c, 0.0),
-            r.right_top(),
-            r.right_bottom() - vec2(c, 0.0),
-            r.left_bottom(),
-        ],
-        color,
-        Stroke::NONE,
-    ));
 }
 
 pub(super) fn vs_galley(painter: &Painter, size: f32, style: &RoomStyle<'_>) -> std::sync::Arc<egui::Galley> {
@@ -1699,7 +1666,6 @@ pub(super) fn map_card(
     } else {
         clamp_css(14.0, style.window_width * 0.0115, 20.0)
     };
-    let id_size = if style.narrow { 11.0 } else { 13.0 };
     let (pad_t, pad_b) = if style.narrow { (11.0, 13.0) } else { (13.0, 15.0) };
     let info_h = name_size + pad_t + pad_b;
     let shot_bottom = f.bottom() - info_h;
@@ -1732,21 +1698,36 @@ pub(super) fn map_card(
             &shade,
             &[(0.0, Color32::TRANSPARENT), (1.0, hsla(250.0, 50.0, 4.0, 0.55))],
         );
-        // Flags, top left.
-        let mut fx = f.left() + 22.0;
+        // Tabs flush in the shot's top corner, starting where the card's
+        // slanted edge does: Your vote in gold, so the green of the leading
+        // map stands out. A tab after another tucks under its slant.
+        let mut fx = f.left() + cut;
         let mut flags = Vec::new();
         if map.voted_by_local {
-            flags.push(("YOUR VOTE", ink(1.0), a.face));
+            flags.push(("YOUR VOTE", hsl(46.0, 100.0, 60.0)));
         }
         if leading {
-            flags.push(("LEADING", ink(1.0), hsl(96.0, 85.0, 55.0)));
+            flags.push(("LEADING", hsl(96.0, 85.0, 55.0)));
         }
-        for (label, fg, bg) in flags {
-            let g = text(painter, label, 11.0, style.display.clone(), fg, 11.0 * 0.12);
-            let r = Rect::from_min_size(pos2(fx, f.top() + 12.0), vec2(g.size().x + 24.0, g.size().y + 12.0));
-            chip(painter, r, 0.08, bg);
-            painter.galley(pos2(r.left() + 12.0, r.top() + 6.0), g, fg);
-            fx = r.right() + 8.0;
+        for (i, (label, bg)) in flags.into_iter().enumerate() {
+            let g = text(painter, label, 13.0, style.display.clone(), ink(1.0), 13.0 * 0.12);
+            let (pad_l, inset) = if i == 0 { (14.0, 0.0) } else { (20.0, 10.0) };
+            if i > 0 {
+                fx -= 6.0;
+            }
+            let r = Rect::from_min_size(pos2(fx, f.top()), vec2(g.size().x + pad_l + 22.0, g.size().y + 19.0));
+            painter.add(Shape::convex_polygon(
+                vec![
+                    r.left_top() + vec2(inset, 0.0),
+                    r.right_top(),
+                    r.right_bottom() - vec2(10.0, 0.0),
+                    r.left_bottom(),
+                ],
+                bg,
+                Stroke::NONE,
+            ));
+            painter.galley(pos2(r.left() + pad_l, r.top() + 9.0), g, ink(1.0));
+            fx = r.right();
         }
         // Votes, bottom right.
         if map.votes > 0 {
@@ -1777,19 +1758,9 @@ pub(super) fn map_card(
             painter.galley(pos2(x + nw + 8.0, y + nh * 0.78 - w.size().y), w, cream());
         }
     }
-    // The name and id under the shot.
-    let id = text(
-        painter,
-        &map.name.to_uppercase(),
-        id_size,
-        style.body.clone(),
-        face.sub,
-        id_size * 0.14,
-    );
-    let ix = f.right() - cut - 26.0 - id.size().x;
+    // The name under the shot.
+    let ix = f.right() - cut - 26.0;
     let cy = shot_bottom + info_h / 2.0;
-    let idh = id.size().y;
-    painter.galley(pos2(ix, cy - idh / 2.0), id, face.sub);
     let title = if map.display_name.is_empty() {
         &map.name
     } else {

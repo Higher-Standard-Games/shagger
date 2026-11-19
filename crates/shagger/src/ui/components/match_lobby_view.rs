@@ -1,8 +1,8 @@
 //! SHAG `src/engine/ui/components/MatchLobbyView.ts` and
 //! `styles/MatchLobbyView.css`: one room of the lobby before its match.
 //! Which room it is and its invite; a status slab that says what the room
-//! waits on; the seats; the map vote; and the keys to leave, add a bot,
-//! switch or shuffle sides, rejoin a running match and ready up. Quick
+//! waits on; the seats; the map vote; and the keys to leave, add an AI
+//! player, switch or shuffle sides, rejoin a running match and ready up. Quick
 //! play's self-driving fill (`fillWithBots`) is here too.
 //!
 //! The browser builds this from HTML and CSS; here the same state paints
@@ -40,6 +40,13 @@ const BOT_LEVELS: [(&str, &str); 4] = [
 const BOT_INVITE_TIMEOUT: Duration = Duration::from_secs(9);
 /// How long a flash note and a key's changed hint stay.
 const FLASH: Duration = Duration::from_secs(2);
+/// Add AI player stays off this long after none was available.
+const BOT_NOTE: Duration = Duration::from_millis(2500);
+/// `ADD_AI_LABEL`.
+const ADD_AI_LABEL: &str = "+ Add AI player";
+/// `AI_INVITE_NOTICE_SECONDS`: the notice under the clock shows this many
+/// seconds before the room invites an AI player.
+const AI_INVITE_NOTICE_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchLobbyPlayer {
@@ -119,13 +126,15 @@ pub struct MatchLobbyView {
     invite_bot_pending: Option<Instant>,
     /// Quick play: bots still to add; 0 when off. The player readies up themselves.
     auto_fill_bots: usize,
-    /// The skill menu beside Add bot is open.
+    /// The skill menu beside Add AI player is open.
     bot_menu: bool,
-    /// A note beside the Add bot key, such as "Lobby changed to private".
+    /// A note beside the Add AI player key, such as "No AI players available".
     flash: Option<(String, Instant)>,
-    /// A key's hint changed for a moment: Add bot's "No bots available",
-    /// Copy's "Copied", Shuffle's "Vote sent", Rejoin's "Checking seat…".
-    bot_note: Option<(String, Instant)>,
+    /// Add AI player stays off for a moment after none was available.
+    bot_note: Option<Instant>,
+    /// When the room invites its next AI player by itself
+    /// (`aiInviteInMs`, `lobby:ai_invite`); `None` when it will not.
+    ai_invite_at: Option<Instant>,
     copied: Option<Instant>,
     shuffle_sent: bool,
     recover_note: Option<String>,
@@ -197,6 +206,10 @@ impl MatchLobbyView {
             format!("/?lobby={id}")
         };
         let active_match_id = lobby.get("activeMatchId").and_then(Value::as_str).map(str::to_owned);
+        let ai_invite_at = lobby
+            .get("aiInviteInMs")
+            .and_then(Value::as_f64)
+            .map(|ms| Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0));
         let maps = lobby
             .get("maps")
             .and_then(Value::as_array)
@@ -242,6 +255,7 @@ impl MatchLobbyView {
             auto_fill_bots: 0,
             flash: None,
             bot_note: None,
+            ai_invite_at,
             copied: None,
             shuffle_sent: false,
             recover_note: None,
@@ -322,17 +336,20 @@ impl MatchLobbyView {
                 let id = str_of(msg, "playerId");
                 self.players.retain(|p| p.id != id);
             }
-            "lobby:made_private" => {
+            // When the room, left waiting, invites an AI player by itself.
+            "lobby:ai_invite" => {
                 if str_of(msg, "lobbyId") == self.lobby_id {
-                    self.private_lobby = true;
-                    str_of(msg, "shareUrl").clone_into(&mut self.share_url);
-                    self.flash = Some(("Lobby changed to private".into(), Instant::now()));
+                    self.ai_invite_at = msg
+                        .get("inMs")
+                        .and_then(Value::as_f64)
+                        .map(|ms| Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0));
                 }
             }
             "lobby:bot_invite_failed" => {
                 self.invite_bot_pending = None;
                 self.auto_fill_bots = 0;
-                self.bot_note = Some(("No bots available".into(), Instant::now()));
+                self.bot_note = Some(Instant::now());
+                self.flash = Some(("No AI players available".into(), Instant::now()));
             }
             "lobby:all_ready" => {
                 self.room_error = None;
@@ -387,7 +404,7 @@ impl MatchLobbyView {
         if self.flash.as_ref().is_some_and(|(_, at)| at.elapsed() >= FLASH) {
             self.flash = None;
         }
-        if self.bot_note.as_ref().is_some_and(|(_, at)| at.elapsed() >= FLASH) {
+        if self.bot_note.is_some_and(|at| at.elapsed() >= BOT_NOTE) {
             self.bot_note = None;
         }
         if self.copied.is_some_and(|at| at.elapsed() >= FLASH) {
@@ -411,27 +428,6 @@ impl MatchLobbyView {
         } else {
             &self.team_names.1
         }
-    }
-
-    /// `shape`: "1 vs 1", "Up to 5 vs 5 · starts at 2", "Free for all · 8 players".
-    #[must_use]
-    pub fn shape(&self) -> String {
-        let (max, min) = (self.max_players, self.min_players);
-        if max == 2 {
-            return "1 vs 1".into();
-        }
-        let starts = if min < max {
-            format!(" · starts at {min}")
-        } else {
-            String::new()
-        };
-        if self.has_teams {
-            let side = max.div_ceil(2);
-            let up_to = if min < max { "Up to " } else { "" };
-            return format!("{up_to}{side} vs {side}{starts}");
-        }
-        let up_to = if min < max { "up to " } else { "" };
-        format!("Free for all · {up_to}{max} players{starts}")
     }
 
     /// `enoughToStart`: the server's minimum, and in a team mode someone on
@@ -510,9 +506,9 @@ impl MatchLobbyView {
         }
     }
 
-    /// The slab's kicker, head and line under it (`refreshStatus`).
+    /// The slab's head and the line under it (`refreshStatus`).
     #[must_use]
-    pub fn status_text(&self) -> (&'static str, &'static str, String) {
+    pub fn status_text(&self) -> (&'static str, String) {
         let full = self.players.len() >= self.max_players;
         let enough = self.enough_to_start();
         let starting = self.phase == Phase::Starting;
@@ -520,13 +516,6 @@ impl MatchLobbyView {
         let waiting = self.players.len() - ready;
         let open = self.max_players.saturating_sub(self.players.len());
         let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let kicker = if self.room_error.is_some() || self.match_in_progress || starting || !enough {
-            "Match lobby"
-        } else if full {
-            "Lobby full"
-        } else {
-            "Enough to start"
-        };
         let head = if self.room_error.is_some() {
             "Room action failed"
         } else if self.match_in_progress {
@@ -554,15 +543,11 @@ impl MatchLobbyView {
             "Everyone is ready. Connecting when the game server is available.".into()
         } else if !enough {
             if self.has_teams && self.players.len() >= self.min_players {
-                if self.private_lobby {
-                    "Each side needs a player. Switch sides, or add a bot.".into()
-                } else {
-                    "Each side needs a player. Switch sides, or wait for someone to join.".into()
-                }
+                "Each side needs a player. Switch sides, or add an AI player.".into()
             } else if self.private_lobby {
-                "Share the invite, or add a bot to play right now.".into()
+                "Share the invite, or add an AI player to play right now.".into()
             } else {
-                "Share the room's link; it starts as soon as someone joins.".into()
+                "Share the room's link, or add an AI player to play right now.".into()
             }
         } else if self.local_ready {
             format!("{waiting} player{} still to ready up.", plural(waiting))
@@ -575,46 +560,53 @@ impl MatchLobbyView {
                 plural(open)
             )
         };
-        (kicker, head, sub)
+        (head, sub)
     }
 
     /// A one-line summary, for logs and tests.
     #[must_use]
     pub fn status(&self) -> String {
-        self.status_text().2
+        self.status_text().1
     }
 
-    /// The Ready key's label and hint (`refreshReadyKey`).
-    fn ready_text(&self) -> (&'static str, String) {
-        let ready = self.players.iter().filter(|p| p.ready).count();
-        let hint = if self.match_in_progress {
-            "Match running".into()
-        } else if self.phase == Phase::Starting {
-            "Starting".into()
-        } else if self.enough_to_start() {
-            format!("{ready} / {} ready", self.players.len())
-        } else if self.local_ready {
-            "Waiting for the rest".into()
-        } else {
-            "Click when set".into()
-        };
-        (if self.local_ready { "Ready!" } else { "Ready" }, hint)
+    /// The Ready key's label (`refreshReadyKey`).
+    fn ready_label(&self) -> &'static str {
+        if self.local_ready { "Ready!" } else { "Ready" }
     }
 
-    /// The Add bot key's hint (`updateInviteBotState`).
-    fn bot_hint(&self) -> String {
-        if let Some((note, _)) = &self.bot_note {
-            return note.clone();
-        }
+    /// The Add AI player key's label (`updateInviteBotState`, `requestBot`).
+    fn bot_label(&self) -> &'static str {
         if self.invite_bot_pending.is_some() {
-            return "Summoning…".into();
+            "Inviting…"
+        } else {
+            ADD_AI_LABEL
         }
-        let open = self.max_players.saturating_sub(self.players.len());
-        match open {
-            0 => "Room is full".into(),
-            1 => "1 seat open".into(),
-            n => format!("{n} seats open"),
+    }
+
+    /// `refreshAiInvite`: under the clock, the last half minute before the
+    /// room invites an AI player, then that it is inviting them while seats
+    /// stay open. `None` when nothing shows.
+    #[must_use]
+    pub fn ai_invite_text(&self) -> Option<String> {
+        let at = self.ai_invite_at?;
+        // `Math.ceil((at - now) / 1000)`
+        let left = at
+            .checked_duration_since(Instant::now())
+            .map_or(0, |d| d.as_millis().div_ceil(1000) as u64);
+        let shown = left <= AI_INVITE_NOTICE_SECONDS
+            && !self.match_in_progress
+            && self.phase == Phase::Waiting
+            && self.players.len() < self.max_players;
+        if !shown {
+            return None;
         }
+        Some(if left > 0 {
+            format!("Inviting AI opponent in {}", clock_text(left))
+        } else if self.max_players > 2 {
+            "Inviting AI opponents".into()
+        } else {
+            "Inviting AI opponent".into()
+        })
     }
 
     /// `startClock`: seconds in the room, so the wait is visibly real.
@@ -625,9 +617,13 @@ impl MatchLobbyView {
         if self.phase == Phase::Starting {
             return "Starting".into();
         }
-        let s = self.opened_at.elapsed().as_secs();
-        format!("Waiting {}:{:02}", s / 60, s % 60)
+        format!("Waiting {}", clock_text(self.opened_at.elapsed().as_secs()))
     }
+}
+
+/// "1:27"
+fn clock_text(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// The slab's state (`data-phase`).
@@ -702,14 +698,41 @@ mod tests {
     fn the_room_says_what_it_waits_on() {
         let client = LobbyClient::connect("ws://127.0.0.1:9");
         let mut view = MatchLobbyView::new(&room(), Some("me"), 0, 0, &client);
-        assert_eq!(view.shape(), "Free for all · up to 6 players · starts at 2");
-        let (kicker, head, sub) = view.status_text();
-        assert_eq!((kicker, head), ("Match lobby", "Waiting for players"));
-        assert_eq!(sub, "Share the invite, or add a bot to play right now.");
+        let (head, sub) = view.status_text();
+        assert_eq!(head, "Waiting for players");
+        assert_eq!(sub, "Share the invite, or add an AI player to play right now.");
         view.handle(&joined("b1"), &client);
-        let (kicker, head, sub) = view.status_text();
-        assert_eq!((kicker, head), ("Enough to start", "Ready when you are"));
+        let (head, sub) = view.status_text();
+        assert_eq!(head, "Ready when you are");
         assert_eq!(sub, "1 / 2 ready · 4 seats stay open until it starts");
+    }
+
+    #[test]
+    fn a_public_room_counts_down_to_its_ai_invite() {
+        let client = LobbyClient::connect("ws://127.0.0.1:9");
+        let mut lobby = room();
+        lobby["visibility"] = "public".into();
+        lobby["aiInviteInMs"] = 90_000.into();
+        let mut view = MatchLobbyView::new(&lobby, Some("me"), 0, 0, &client);
+        // Shown only in the last half minute.
+        assert_eq!(view.ai_invite_text(), None);
+        let invite = |ms: Value| LobbyIn::Other {
+            kind: "lobby:ai_invite".into(),
+            message: serde_json::json!({"lobbyId": "L1", "inMs": ms}),
+        };
+        view.handle(&invite(29_500.into()), &client);
+        assert_eq!(view.ai_invite_text().as_deref(), Some("Inviting AI opponent in 0:30"));
+        view.handle(&invite(0.into()), &client);
+        assert_eq!(view.ai_invite_text().as_deref(), Some("Inviting AI opponents"));
+        // Another room's says nothing about this one.
+        let elsewhere = LobbyIn::Other {
+            kind: "lobby:ai_invite".into(),
+            message: serde_json::json!({"lobbyId": "L2", "inMs": null}),
+        };
+        view.handle(&elsewhere, &client);
+        assert!(view.ai_invite_text().is_some());
+        view.handle(&invite(Value::Null), &client);
+        assert_eq!(view.ai_invite_text(), None);
     }
 
     #[test]

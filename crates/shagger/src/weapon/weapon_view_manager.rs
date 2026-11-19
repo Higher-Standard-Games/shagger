@@ -59,8 +59,9 @@ use crate::loader::bsp::light_grid_sampling::LightSample;
 use crate::loader::model::gltf_model::ModelMaterial;
 use crate::rendering::model_renderer::{ModelLight, ModelMaterialMode, Outline, ReflectionFill};
 
-/// The gun's scale for each `cl_gunsize`: normal, small and smallest.
-pub const GUN_SIZES: [f64; 3] = [1.0, 0.9, 0.8];
+/// The gun's scale for each `cl_gunsize`: normal, then small and smallest at
+/// 15% and 25% under it.
+pub const GUN_SIZES: [f64; 3] = [0.8, 0.68, 0.6];
 
 /// The weapon camera's near plane.
 pub const WEAPON_CAMERA_MIN_Z: f32 = 0.1;
@@ -1278,19 +1279,20 @@ mod tests {
         let mut gun = WeaponView::new("plasmagun", None);
         gun.aspect_ratio = 2.0;
         gun.effective_base_position = DVec3::new(12.0, -25.0, 20.0);
-        gun.apply_gun_size();
-        assert_eq!((gun.view_scale, gun.view_offset), (1.0, DVec3::ZERO));
-        gun.cvars.gun_size = 2.0;
+        // Normal is the old smallest.
         gun.apply_gun_size();
         assert!((gun.view_scale - 0.8).abs() < 1e-12);
+        gun.cvars.gun_size = 2.0;
+        gun.apply_gun_size();
+        assert!((gun.view_scale - 0.6).abs() < 1e-12);
         let half_height = (DEFAULT_WEAPON_FOV.to_radians() / 2.0).tan() * 20.0;
-        let expected = DVec3::new(half_height * 2.0 * 0.2, -half_height * 0.2, 4.0);
+        let expected = DVec3::new(half_height * 2.0 * 0.4, -half_height * 0.4, 8.0);
         assert!((gun.view_offset - expected).length() < 1e-9);
         // Left-handed, the corner is the left one; half aimed, half the pull.
         gun.effective_base_position.x = -12.0;
         gun.ads_progress = 0.5;
         gun.apply_gun_size();
-        assert!((gun.view_scale - 0.9).abs() < 1e-12);
+        assert!((gun.view_scale - 0.8).abs() < 1e-12);
         assert!(gun.view_offset.x < 0.0);
         gun.ads_progress = 1.0;
         gun.apply_gun_size();

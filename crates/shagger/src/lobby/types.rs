@@ -108,6 +108,9 @@ pub struct Welcome {
     pub gametypes: Vec<GametypeInfo>,
     #[serde(default)]
     pub online_players: Vec<PlayerInfo>,
+    /// The most players the lobby takes online at once; 0 when it has no
+    /// cap. Absent on older servers.
+    pub max_players: Option<u32>,
     #[serde(default)]
     pub chat_history: Vec<ChatMessage>,
     #[serde(default)]

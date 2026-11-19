@@ -261,6 +261,14 @@ impl LobbyClient {
         request_id
     }
 
+    /// `requestCampaignBoard`: the answer is `campaign:board` or
+    /// `campaign:board:error` with this id.
+    pub fn request_campaign_board(&mut self) -> String {
+        let request_id = self.next_request_id("cb");
+        self.send(&json!({ "type": "campaign:board:get", "requestId": request_id }));
+        request_id
+    }
+
     /// `requestSettings`: the answer is `settings:data` with this id.
     pub fn request_settings(&mut self) -> String {
         let request_id = self.next_request_id("settings");
