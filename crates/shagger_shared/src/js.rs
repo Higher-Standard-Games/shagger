@@ -356,6 +356,27 @@ pub fn js_number_to_string(x: f64) -> String {
     format!("{sign}{body}")
 }
 
+/// `x.toLocaleString("en-US")` for a whole number: its digits with a comma
+/// between each group of three ("1,234,567"). Anything else (a fraction, or
+/// a number past 1e21 that prints in exponent form) comes back as
+/// [`js_number_to_string`] gives it, as the callers only show whole counts.
+#[must_use]
+pub fn js_group_thousands(x: f64) -> String {
+    let whole = js_number_to_string(x);
+    if x.fract() != 0.0 || x.abs() < 1000.0 || whole.contains('e') {
+        return whole;
+    }
+    let (sign, digits) = whole.strip_prefix('-').map_or(("", whole.as_str()), |d| ("-", d));
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{sign}{out}")
+}
+
 /// `Math.sin`: V8's fdlibm port. The platform `sin` differs from it in the
 /// last bit for about 3% of inputs, and differs again across platforms.
 #[must_use]
@@ -418,5 +439,15 @@ mod tests {
         assert_eq!(js_hypot(&[f64::NAN, f64::NEG_INFINITY]), f64::INFINITY);
         assert!(js_hypot(&[f64::NAN, 1.0]).is_nan());
         assert_eq!(js_hypot(&[3.0, 4.0]), 5.0);
+    }
+
+    #[test]
+    fn whole_numbers_group_by_thousands_as_en_us_does() {
+        assert_eq!(js_group_thousands(1_234_567.0), "1,234,567");
+        assert_eq!(js_group_thousands(999.0), "999");
+        assert_eq!(js_group_thousands(1000.0), "1,000");
+        assert_eq!(js_group_thousands(-12_345.0), "-12,345");
+        assert_eq!(js_group_thousands(0.0), "0");
+        assert_eq!(js_group_thousands(1e21), "1e+21");
     }
 }

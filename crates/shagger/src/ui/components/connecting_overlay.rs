@@ -97,6 +97,8 @@ impl OverlayStage {
 pub struct ConnectingOverlay {
     pub rail: TwinRail,
     pub stage: OverlayStage,
+    /// `asSpectator`: a read-only seat on a live match.
+    as_spectator: bool,
 }
 
 impl ConnectingOverlay {
@@ -121,13 +123,17 @@ impl ConnectingOverlay {
             )
         };
         let stage = OverlayStage::new(title.map(String::from).to_vec(), lead);
-        Self { rail, stage }
+        Self {
+            rail,
+            stage,
+            as_spectator,
+        }
     }
 
     /// The handoff of a spectator (`asSpectator`).
     #[must_use]
     pub fn spectating(&self) -> bool {
-        self.rail.label == "Joining live match"
+        self.as_spectator
     }
 
     /// `setStatus`.

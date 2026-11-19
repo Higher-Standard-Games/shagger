@@ -126,6 +126,9 @@ pub struct MatchLobbyView {
     invite_bot_pending: Option<Instant>,
     /// Quick play: bots still to add; 0 when off. The player readies up themselves.
     auto_fill_bots: usize,
+    /// `heldReady`: Ready pressed while quick play still adds bots, sent
+    /// once it has none left to add.
+    held_ready: bool,
     /// The skill menu beside Add AI player is open.
     bot_menu: bool,
     /// A note beside the Add AI player key, such as "No AI players available".
@@ -139,6 +142,20 @@ pub struct MatchLobbyView {
     shuffle_sent: bool,
     recover_note: Option<String>,
     opened_at: Instant,
+}
+
+/// The Rejoin key's label while the lobby looks for the seat.
+pub(crate) const CHECKING_SEAT: &str = "Checking seat…";
+
+/// When a countdown of `ms` from the lobby ends; `None` for one that cannot
+/// be a moment (not finite). Clamped to a day, so a wild value cannot
+/// overflow the clock.
+fn in_ms(ms: f64) -> Option<Instant> {
+    if !ms.is_finite() {
+        return None;
+    }
+    let secs = (ms / 1000.0).clamp(0.0, 86_400.0);
+    Instant::now().checked_add(Duration::from_secs_f64(secs))
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -206,10 +223,7 @@ impl MatchLobbyView {
             format!("/?lobby={id}")
         };
         let active_match_id = lobby.get("activeMatchId").and_then(Value::as_str).map(str::to_owned);
-        let ai_invite_at = lobby
-            .get("aiInviteInMs")
-            .and_then(Value::as_f64)
-            .map(|ms| Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+        let ai_invite_at = lobby.get("aiInviteInMs").and_then(Value::as_f64).and_then(in_ms);
         let maps = lobby
             .get("maps")
             .and_then(Value::as_array)
@@ -253,6 +267,7 @@ impl MatchLobbyView {
             invite_bot_pending: None,
             bot_menu: false,
             auto_fill_bots: 0,
+            held_ready: false,
             flash: None,
             bot_note: None,
             ai_invite_at,
@@ -339,15 +354,12 @@ impl MatchLobbyView {
             // When the room, left waiting, invites an AI player by itself.
             "lobby:ai_invite" => {
                 if str_of(msg, "lobbyId") == self.lobby_id {
-                    self.ai_invite_at = msg
-                        .get("inMs")
-                        .and_then(Value::as_f64)
-                        .map(|ms| Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+                    self.ai_invite_at = msg.get("inMs").and_then(Value::as_f64).and_then(in_ms);
                 }
             }
             "lobby:bot_invite_failed" => {
                 self.invite_bot_pending = None;
-                self.auto_fill_bots = 0;
+                self.end_auto_fill(client);
                 self.bot_note = Some(Instant::now());
                 self.flash = Some(("No AI players available".into(), Instant::now()));
             }
@@ -392,14 +404,26 @@ impl MatchLobbyView {
         self.recover_note = Some("No seat to return to".into());
     }
 
+    /// The lobby gave the seat back (`match:seat_reissued`): Rejoin reads
+    /// as itself again.
+    pub fn seat_reissued(&mut self) {
+        self.recover_note = None;
+    }
+
+    /// Whether a Rejoin is waiting for the lobby's answer (the key is off).
+    #[must_use]
+    pub fn checking_seat(&self) -> bool {
+        self.recover_note.as_deref() == Some(CHECKING_SEAT)
+    }
+
     /// Per frame: an invite the server never answered lets go.
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, client: &LobbyClient) {
         if self
             .invite_bot_pending
             .is_some_and(|at| at.elapsed() >= BOT_INVITE_TIMEOUT)
         {
             self.invite_bot_pending = None;
-            self.auto_fill_bots = 0;
+            self.end_auto_fill(client);
         }
         if self.flash.as_ref().is_some_and(|(_, at)| at.elapsed() >= FLASH) {
             self.flash = None;
@@ -464,7 +488,21 @@ impl MatchLobbyView {
         if let Some(p) = self.players.iter_mut().find(|p| p.is_local) {
             p.ready = ready;
         }
-        client.set_ready(&self.lobby_id, ready);
+        // Held while quick play still has bots to add; an unready goes at once.
+        self.held_ready = ready && self.auto_fill_bots > 0;
+        if !self.held_ready {
+            client.set_ready(&self.lobby_id, ready);
+        }
+    }
+
+    /// `endAutoFill`: quick play has no more bots to add, so a Ready held
+    /// for them goes now.
+    fn end_auto_fill(&mut self, client: &LobbyClient) {
+        self.auto_fill_bots = 0;
+        if !std::mem::take(&mut self.held_ready) {
+            return;
+        }
+        client.set_ready(&self.lobby_id, true);
     }
 
     /// `requestBot`: at `difficulty` (a preset), or without one at the
@@ -485,14 +523,14 @@ impl MatchLobbyView {
             return;
         }
         if self.phase == Phase::Starting {
-            self.auto_fill_bots = 0;
+            self.end_auto_fill(client);
             return;
         }
         if self.bot_count() < self.auto_fill_bots && self.players.len() < self.max_players {
             self.request_bot(client, None);
             return;
         }
-        self.auto_fill_bots = 0;
+        self.end_auto_fill(client);
     }
 
     /// The status slab's phase: `searching`, `ready` or `starting`.
@@ -677,6 +715,55 @@ mod tests {
         assert_eq!(view.bot_count(), 2);
         assert_eq!(view.auto_fill_bots, 0);
         assert!(!view.local_ready);
+    }
+
+    #[test]
+    fn a_ready_pressed_while_quick_play_adds_bots_waits_for_them() {
+        let client = LobbyClient::connect("ws://127.0.0.1:9");
+        let mut view = MatchLobbyView::new(&room(), Some("me"), 2, 0, &client);
+        view.handle(&joined("b1"), &client);
+        // `heldReady`: shown as ready, not yet sent.
+        view.set_ready(true, &client);
+        assert!(view.local_ready && view.held_ready);
+        view.handle(&joined("b2"), &client);
+        assert_eq!(view.auto_fill_bots, 0);
+        assert!(view.local_ready && !view.held_ready);
+
+        // A failed invite ends the fill, and the held Ready goes with it.
+        let mut view = MatchLobbyView::new(&room(), Some("me"), 2, 0, &client);
+        view.set_ready(true, &client);
+        assert!(view.held_ready);
+        view.handle(
+            &LobbyIn::Other {
+                kind: "lobby:bot_invite_failed".into(),
+                message: serde_json::json!({"error": "none"}),
+            },
+            &client,
+        );
+        assert!(!view.held_ready && view.auto_fill_bots == 0);
+
+        // An unready goes at once and holds nothing.
+        let mut view = MatchLobbyView::new(&room(), Some("me"), 2, 0, &client);
+        view.set_ready(false, &client);
+        assert!(!view.held_ready);
+    }
+
+    #[test]
+    fn countdowns_from_the_lobby_stay_on_the_clock() {
+        assert!(in_ms(1e300).is_some());
+        assert!(in_ms(-5.0).is_some());
+        assert!(in_ms(f64::NAN).is_none());
+        assert!(in_ms(f64::INFINITY).is_none());
+    }
+
+    #[test]
+    fn rejoin_reads_as_itself_once_the_seat_comes_back() {
+        let client = LobbyClient::connect("ws://127.0.0.1:9");
+        let mut view = MatchLobbyView::new(&room(), Some("me"), 0, 0, &client);
+        view.recover_note = Some(CHECKING_SEAT.into());
+        assert!(view.checking_seat());
+        view.seat_reissued();
+        assert!(!view.checking_seat() && view.recover_note.is_none());
     }
 
     #[test]
