@@ -11,6 +11,13 @@ use swash::scale::ScaleContext;
 use crate::ui::font::Font;
 use crate::ui::glyph_atlas::GlyphAtlas;
 
+/// The largest glyph drawn into the atlas, in device pixels. Larger text
+/// is drawn from a glyph this size, stretched: text that scales with
+/// distance (a bomb site's letter) can ask for thousands of pixels up
+/// close, and rasterizing that freezes the frame (or overflows the
+/// rasterizer's mask).
+pub const MAX_GLYPH_PX: f32 = 256.0;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct HudVertex {
@@ -496,6 +503,12 @@ impl Hud2d {
             return;
         }
         let px = (style.size * self.scale).round().max(1.0);
+        if !px.is_finite() {
+            return;
+        }
+        // Rasterized at most `MAX_GLYPH_PX`, then stretched by `stretch`.
+        let raster = px.min(MAX_GLYPH_PX);
+        let stretch = px / raster;
         let (x, y) = turned.map_or((x, y), |_| (0.0, 0.0));
         let mut pen = (x * self.scale).round();
         let baseline = (y * self.scale).round();
@@ -511,11 +524,11 @@ impl Hud2d {
             let font = &self.fonts[style.font.0];
             let glyph = font.glyph(ch);
             let advance = font.advance(glyph, px);
-            let key = (style.font.0, glyph, px as u32);
+            let key = (style.font.0, glyph, raster as u32);
             let placed = match self.atlas.get(key) {
                 Some(placed) => placed,
                 None => {
-                    let bitmap = font.rasterize(&mut self.context, glyph, px).unwrap_or_default();
+                    let bitmap = font.rasterize(&mut self.context, glyph, raster).unwrap_or_default();
                     let placed = self.atlas.insert(
                         key,
                         bitmap.left,
@@ -543,8 +556,8 @@ impl Hud2d {
             };
             if let Some(g) = placed {
                 let [gx, gy, gw, gh] = g.rect;
-                let p0 = [pen + g.left as f32, baseline - g.top as f32];
-                let p1 = [p0[0] + gw as f32, p0[1] + gh as f32];
+                let p0 = [pen + g.left as f32 * stretch, baseline - g.top as f32 * stretch];
+                let p1 = [p0[0] + gw as f32 * stretch, p0[1] + gh as f32 * stretch];
                 let uv0 = [gx as f32 * inv, gy as f32 * inv];
                 let uv1 = [(gx + gw) as f32 * inv, (gy + gh) as f32 * inv];
                 self.quad_corners(
@@ -669,6 +682,29 @@ mod with_a_font {
         let used = hud.atlas.pixels.iter().filter(|&&p| p > 0).count();
         hud.text(0.0, 50.0, "58:0", &style);
         assert_eq!(hud.atlas.pixels.iter().filter(|&&p| p > 0).count(), used);
+    }
+
+    #[test]
+    fn draws_huge_text_from_a_capped_glyph() {
+        let Ok(path) = std::env::var("SHAGGER_TEST_FONT") else {
+            return;
+        };
+        let mut hud = Hud2d::new();
+        let font = hud.add_font(Font::from_bytes(std::fs::read(path).unwrap()).unwrap());
+        hud.begin(800.0, 600.0, 1.0);
+        // A bomb site's letter a hair from the camera: once a freeze.
+        let started = std::time::Instant::now();
+        hud.text(400.0, 300.0, "A", &TextStyle::new(font, 120_000.0, [1.0; 4]));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let ys: Vec<f32> = hud.vertices.iter().map(|v| v.position[1]).collect();
+        let tall = ys.iter().copied().fold(f32::MIN, f32::max) - ys.iter().copied().fold(f32::MAX, f32::min);
+        assert!(tall > 50_000.0, "stretched to its size: {tall}");
+        let inked = hud.atlas.pixels.iter().filter(|&&p| p > 0).count();
+        assert!(inked < (MAX_GLYPH_PX * MAX_GLYPH_PX) as usize, "{inked}");
+        // A size past measure draws nothing.
+        let before = hud.indices.len();
+        hud.text(0.0, 0.0, "A", &TextStyle::new(font, f32::INFINITY, [1.0; 4]));
+        assert_eq!(hud.indices.len(), before);
     }
 
     #[test]
