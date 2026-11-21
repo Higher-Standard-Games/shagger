@@ -211,8 +211,8 @@ fn fill_even_odd(painter: &Painter, contours: &[Vec<Pos2>], color: Color32) {
             }
         }
         crossings.sort_by(f32::total_cmp);
-        for span in crossings.chunks_exact(2) {
-            mesh.add_colored_rect(Rect::from_min_max(pos2(span[0], y), pos2(span[1], y + 1.0)), color);
+        for [left, right] in crossings.as_chunks::<2>().0 {
+            mesh.add_colored_rect(Rect::from_min_max(pos2(*left, y), pos2(*right, y + 1.0)), color);
         }
         y += 1.0;
     }
