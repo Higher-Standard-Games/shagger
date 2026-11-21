@@ -115,6 +115,10 @@ pub struct MatchLobbyView {
     pub private_lobby: bool,
     /// The link that brings someone into this room; a private room's carries its invite.
     pub share_url: String,
+    /// The room as a code to paste into another client's Join lobby
+    /// (`roomCode`: `eu:3fa9c2d1`, a private room's with its invite), set
+    /// by the game; Copy code shows beside Copy link when it is.
+    pub room_code: Option<String>,
     pub maps: Vec<MatchLobbyMapOption>,
     pub players: Vec<MatchLobbyPlayer>,
     pub local_ready: bool,
@@ -139,6 +143,8 @@ pub struct MatchLobbyView {
     /// (`aiInviteInMs`, `lobby:ai_invite`); `None` when it will not.
     ai_invite_at: Option<Instant>,
     copied: Option<Instant>,
+    /// Copy code was pressed: it says Copied for a moment.
+    code_copied: Option<Instant>,
     shuffle_sent: bool,
     recover_note: Option<String>,
     opened_at: Instant,
@@ -272,6 +278,8 @@ impl MatchLobbyView {
             bot_note: None,
             ai_invite_at,
             copied: None,
+            code_copied: None,
+            room_code: None,
             shuffle_sent: false,
             recover_note: None,
             opened_at: Instant::now(),
@@ -430,6 +438,9 @@ impl MatchLobbyView {
         }
         if self.bot_note.is_some_and(|at| at.elapsed() >= BOT_NOTE) {
             self.bot_note = None;
+        }
+        if self.code_copied.is_some_and(|at| at.elapsed() >= FLASH) {
+            self.code_copied = None;
         }
         if self.copied.is_some_and(|at| at.elapsed() >= FLASH) {
             self.copied = None;
