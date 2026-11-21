@@ -71,6 +71,11 @@ struct Draw {
     // A hemispheric light of the draw's own: xyz its direction, w its
     // intensity (0 none); white above, black below.
     key_light: vec4f,
+    // The pole ripple (EmpCorePlugin): radius, pole z, strength (0 none),
+    // time; rgb tint and w warp; ring frequency and speed.
+    ripple_shape: vec4f,
+    ripple_tint: vec4f,
+    ripple_rings: vec4f,
 };
 
 struct Material {
@@ -123,6 +128,9 @@ struct VertexOut {
     @location(0) world_position: vec3f,
     @location(1) normal: vec3f,
     @location(2) uv: vec2f,
+    // The vertex as the model stores it, before skin and world
+    // (Babylon's positionUpdated).
+    @location(3) model_position: vec3f,
 };
 
 struct SkinIn {
@@ -148,6 +156,7 @@ fn shade_vertex(in: VertexIn, model: mat4x4f) -> VertexOut {
     // transpose would.
     out.normal = (model * vec4f(in.normal, 0.0)).xyz;
     out.uv = in.uv;
+    out.model_position = in.position;
     return out;
 }
 
@@ -238,6 +247,26 @@ fn environment_brdf(n_dot_v: f32, roughness: f32) -> vec2f {
     return vec2f(-1.04, 1.04) * a004 + r.zw;
 }
 
+// wash-fps EmpCorePlugin's CUSTOM_FRAGMENT_BEFORE_FOG: the base texture
+// again at a rippling offset, as light on the pole discs. Sampled outside
+// any branch (uniform control flow); a draw without one adds nothing.
+fn pole_ripple(in: VertexOut) -> vec3f {
+    let shape = draw.ripple_shape;
+    let p = in.model_position;
+    let r = length(p.xy);
+    // smoothstep is undefined with equal edges, as an unset shape has.
+    let disc = (1.0 - smoothstep(shape.x * 0.55, shape.x, r)) * smoothstep(shape.y, shape.y + 0.05, abs(p.z));
+    let on = select(0.0, disc, shape.z > 0.0 && shape.x > 0.0);
+    let angle = atan2(p.y, p.x);
+    let t = shape.w;
+    let warp = vec2f(sin(r * 55.0 - t * 4.0 + angle * 3.0), cos(r * 40.0 - t * 3.1 - angle * 2.0))
+        * (draw.ripple_tint.w * on);
+    let texel = textureSample(base_texture, base_sampler, in.uv + warp).rgb;
+    let ring = 0.5 + 0.5 * sin(r * draw.ripple_rings.x - t * draw.ripple_rings.y);
+    let flicker = 0.85 + 0.15 * sin(t * 23.0 + angle * 5.0);
+    return texel * draw.ripple_tint.rgb * (shape.z * (0.35 + 0.9 * ring * ring) * flicker * on);
+}
+
 @fragment
 fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let texel = textureSample(base_texture, base_sampler, in.uv);
@@ -245,6 +274,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
     let bump = textureSample(normal_texture, base_sampler, in.uv).xyz * 2.0 - 1.0;
     let metal_rough = textureSample(metallic_roughness_texture, base_sampler, in.uv);
     let emissive_texel = textureSample(emissive_texture, base_sampler, in.uv).rgb;
+    let ripple = pole_ripple(in);
     let frame = cotangent_frame(normalize(in.normal), in.world_position, in.uv, NORMAL_MAP_SIGNS);
     let albedo_color = select(material.base_color.rgb, draw.tint.rgb, draw.tint.w > 0.5);
     let albedo = pow(texel.rgb, vec3f(2.2)) * albedo_color;
@@ -335,6 +365,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front: bool) -> @location(0) ve
         material_emissive *= pow(emissive_texel, vec3f(2.2));
     }
     color += material_emissive;
+    color += ripple;
     // A draw's emissive (a powerup glow), added as PBR adds its own.
     if draw.emissive.w > 0.5 {
         color += draw.emissive.rgb;
