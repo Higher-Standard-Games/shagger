@@ -70,35 +70,52 @@ impl MatchLobbyView {
             label,
             ink(1.0),
         );
-        // `match-lobby__invite`, on the right: label, the link, Copy.
+        // `match-lobby__invite`, on the right: label, the link, Copy link and,
+        // when the game names the room by a code, Copy code.
         let href = invite_href(style.site, &self.share_url, &self.lobby_id);
         let shown = href
             .split_once("://")
             .map_or(href.as_str(), |(_, rest)| rest)
             .to_owned();
-        let copy_label = if self.copied.is_some() { "Copied" } else { "Copy" };
-        let copy_text = text(
-            painter,
-            &copy_label.to_uppercase(),
-            15.0,
-            style.display.clone(),
-            ink(1.0),
-            1.0,
-        );
-        let copy_w = copy_text.size().x + 40.0;
         let copy_h = 41.0;
-        let copy = Rect::from_min_size(
-            pos2(rect.right() - copy_w - 4.0, rect.top() + (h - copy_h) / 2.0 - 2.0),
-            vec2(copy_w, copy_h),
-        );
-        let face = RaisedKey::new(("room-copy", &self.lobby_id), copy, KeyLook::cream().sm()).show(ui);
-        KeyText::new(copy_label, "", style.display.clone(), style.body.clone())
-            .size(15.0, 12.0)
-            .spacing(0.07)
-            .pad(20.0, 20.0)
-            .layout(KeyTextLayout::Centered)
-            .paint(painter, &face);
-        if face.clicked {
+        let mut keys_left = rect.right() - 4.0;
+        let mut copy_key = |ui: &mut egui::Ui, id: &str, caption: &str, flashed: bool| {
+            let label = if flashed { "Copied" } else { caption };
+            let g = text(
+                painter,
+                &label.to_uppercase(),
+                15.0,
+                style.display.clone(),
+                ink(1.0),
+                1.0,
+            );
+            let w = g.size().x + 40.0;
+            let r = Rect::from_min_size(
+                pos2(keys_left - w, rect.top() + (h - copy_h) / 2.0 - 2.0),
+                vec2(w, copy_h),
+            );
+            keys_left = r.left() - 10.0;
+            let face = RaisedKey::new((id, &self.lobby_id), r, KeyLook::cream().sm()).show(ui);
+            KeyText::new(label, "", style.display.clone(), style.body.clone())
+                .size(15.0, 12.0)
+                .spacing(0.07)
+                .pad(20.0, 20.0)
+                .layout(KeyTextLayout::Centered)
+                .paint(painter, &face);
+            (face.clicked, r)
+        };
+        let mut copy = Rect::from_min_size(pos2(rect.right() - 4.0, rect.top()), vec2(0.0, copy_h));
+        if let Some(code) = self.room_code.clone() {
+            let (clicked, r) = copy_key(ui, "room-copy-code", "Copy code", self.code_copied.is_some());
+            copy = r;
+            if clicked {
+                ui.ctx().copy_text(code);
+                self.code_copied = Some(Instant::now());
+            }
+        }
+        let (clicked, r) = copy_key(ui, "room-copy", "Copy link", self.copied.is_some());
+        copy = Rect::from_min_max(r.min, pos2(copy.right().max(r.right()), r.bottom()));
+        if clicked {
             ui.ctx().copy_text(href.clone());
             self.copied = Some(Instant::now());
         }
