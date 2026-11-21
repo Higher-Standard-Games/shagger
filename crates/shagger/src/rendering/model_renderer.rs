@@ -130,6 +130,34 @@ pub struct ModelDraw {
     pub cull: bool,
     /// A light that reaches only this draw (Babylon's `includedOnlyMeshes`).
     pub key_light: Option<KeyLight>,
+    /// Rippling light on the model's two pole discs (lit materials only).
+    pub pole_ripple: Option<PoleRipple>,
+}
+
+/// wash-fps `client/bomb/EmpCorePlugin.ts`: a disc of light on each pole of
+/// a model (its own ±Z), found by each fragment's position in model space,
+/// so it stays on the disc whatever the texture atlas. The base texture is
+/// sampled again at a rippling offset, tinted and added before fog: the
+/// picture wobbles in place and bright rings run outward from the centre.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PoleRipple {
+    /// The disc's radius about the Z axis, in model units.
+    pub radius: f32,
+    /// Fragments nearer the equator than this, in model units, are on
+    /// neither disc.
+    pub pole_z: f32,
+    /// How bright the disc shines over the lit surface; 0 is off.
+    pub strength: f32,
+    /// Seconds: drives the wobble, the rings and the flicker.
+    pub time: f32,
+    /// Multiplied into the texture it samples.
+    pub tint: Vec3,
+    /// How far the picture wobbles, in texture coordinates.
+    pub warp: f32,
+    /// Rings across the disc, in radians per model unit.
+    pub ring_frequency: f32,
+    /// How fast the rings run outward, in radians per second.
+    pub ring_speed: f32,
 }
 
 /// A `HemisphericLight` of a draw's own: white from `direction` (up, as
@@ -169,6 +197,7 @@ impl ModelDraw {
             reflection: None,
             cull: true,
             key_light: None,
+            pole_ripple: None,
         }
     }
 }
@@ -201,6 +230,12 @@ struct DrawUniform {
     reflection: [f32; 4],
     /// xyz: the key light's direction (normalized), w: its intensity (0 none).
     key_light: [f32; 4],
+    /// The pole ripple: radius, pole z, strength (0 none), time.
+    ripple_shape: [f32; 4],
+    /// rgb: the ripple's tint, w: its warp.
+    ripple_tint: [f32; 4],
+    /// x: ring frequency, y: ring speed.
+    ripple_rings: [f32; 4],
 }
 
 #[repr(C)]
@@ -1315,6 +1350,13 @@ impl ModelRenderer {
                 key_light: draw.key_light.map_or([0.0; 4], |k| {
                     k.direction.normalize_or_zero().extend(k.intensity.max(0.0)).into()
                 }),
+                ripple_shape: draw
+                    .pole_ripple
+                    .map_or([0.0; 4], |r| [r.radius, r.pole_z, r.strength.max(0.0), r.time]),
+                ripple_tint: draw.pole_ripple.map_or([0.0; 4], |r| r.tint.extend(r.warp).into()),
+                ripple_rings: draw
+                    .pole_ripple
+                    .map_or([0.0; 4], |r| [r.ring_frequency, r.ring_speed, 0.0, 0.0]),
             };
             bytes[at..at + size].copy_from_slice(bytemuck::bytes_of(&uniform));
         }
@@ -1475,5 +1517,19 @@ mod tests {
         );
         assert!(draw_visible(&frustum, &scaled, unit, false));
         assert_eq!(position_bounds(&[]), (Vec3::ZERO, Vec3::ZERO));
+    }
+
+    #[test]
+    fn the_model_shader_validates() {
+        let source = concat!(include_str!("fog.wgsl"), include_str!("model.wgsl"));
+        let module = wgpu::naga::front::wgsl::parse_str(source).expect("model.wgsl parses");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("model.wgsl validates");
+        // The draw uniform fits its dynamic offset stride.
+        assert!(std::mem::size_of::<DrawUniform>() as u64 <= DRAW_STRIDE);
     }
 }
