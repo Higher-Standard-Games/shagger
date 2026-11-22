@@ -104,6 +104,12 @@ function writeWireSnapshot(e) {
       e.writeUint8(chance(0.5) ? int(2) : int(256));
     }
     if (flags & 0x40) e.writeUint8(int(256));
+    if (flags & 0x80) {
+      // Extension byte; only bit 0 (orientation, four int16 words) is defined
+      const ext = int(256);
+      e.writeUint8(ext);
+      if (ext & 0x01) for (let k = 0; k < 4; k++) e.writeInt16(int(0x10000) - 0x8000);
+    }
   }
   const players = int(5);
   e.writeUint16(players);
@@ -150,6 +156,8 @@ function canonicalState(state) {
     if (w) c.weaponMeta = { weaponId: w.weaponId, settled: w.settled };
     const p = entity.getComponent("powerups");
     if (p) c.powerups = p.mask;
+    const o = entity.getComponent("orientation");
+    if (o) c.orientation = [num(o.x), num(o.y), num(o.z), num(o.w)];
     return [id, c];
   });
   const players = [...state.players].map(([id, p]) => [id, {
@@ -218,6 +226,11 @@ function serverState(tick, previous) {
       if (chance(0.5)) entity.addComponent("powerups", { mask: int(512) });
     } else {
       entity.addComponent("weaponMeta", keep("weaponMeta") ?? { weaponId: pick(["shotgun", "rail", ""]), settled: chance(0.5) });
+      // A thrown weapon's rotation, kept often so the delta carries it forward;
+      // a point-stepped one has none. Words past ±1 clamp on the wire.
+      const orientation = keep("orientation") ??
+        (chance(0.7) ? { x: random() * 2.2 - 1.1, y: random() * 2 - 1, z: pick([0, -0, 0.5, random() - 0.5]), w: random() * 2 - 1 } : undefined);
+      if (orientation) entity.addComponent("orientation", { ...orientation });
     }
     state.entities.set(id, entity);
   }

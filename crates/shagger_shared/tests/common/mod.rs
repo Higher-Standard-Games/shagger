@@ -121,6 +121,9 @@ pub fn canonical<E>(state: &GameState<E>) -> Value {
             if let Some(p) = e.powerups {
                 c.push(("powerups", int(p)));
             }
+            if let Some(o) = e.orientation {
+                c.push(("orientation", Value::Array(o.iter().map(|&q| num(q)).collect())));
+            }
             Value::Array(vec![text(id), obj(c)])
         })
         .collect();

@@ -5,7 +5,7 @@
 //! little-endian, the whole file optionally gzip:
 //!
 //! ```text
-//! "SHAG" version:u8 (1..=8)
+//! "SHAG" version:u8 (1..=9)
 //! map:str gametype:str tickRate:u8 snapshotRate:u8 startTimeHigh:u32 startTimeLow:u32
 //! v2+: matchId:str
 //! v4+: visibility:u8 (0 public, 1 private)
@@ -70,7 +70,7 @@ impl std::error::Error for DemoError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemoHeader {
-    /// Format version, 1 to 8.
+    /// Format version, 1 to 9.
     pub version: u8,
     pub map: String,
     /// Gametype (duel, ffa, tdm, and so on).
@@ -228,8 +228,9 @@ impl DemoReader {
         offset += 1;
         // v6 retains v5's layout and adds optional bomb brush state in match
         // JSON; v7 adds an optional look byte to each player's snapshot record;
-        // v8 adds the campaign mission to the header.
-        if !(1..=8).contains(&version) {
+        // v8 adds the campaign mission to the header;
+        // v9 adds thrown weapons' orientation to item entities (entity flag 0x80).
+        if !(1..=9).contains(&version) {
             return Err(DemoError::UnsupportedVersion(version));
         }
         let (map, n) = read_string(data, offset)?;

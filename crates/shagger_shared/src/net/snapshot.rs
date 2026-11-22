@@ -190,6 +190,17 @@ fn decode_entity(
     if flags & 0x40 != 0 {
         entity.powerups = Some(decoder.read_uint8()?);
     }
+
+    // Flag 0x80: an extension byte. Orientation (bit 0x01) is
+    // delta-compressed: absent means unchanged, so the baseline's carries
+    // forward.
+    let ext = if flags & 0x80 != 0 { decoder.read_uint8()? } else { 0 };
+    if ext & 0x01 != 0 {
+        let mut word = || -> Result<f64, DecodeError> { Ok(f64::from(decoder.read_int16()?) / 32767.0) };
+        entity.orientation = Some([word()?, word()?, word()?, word()?]);
+    } else if let Some(orientation) = base.and_then(|b| b.orientation) {
+        entity.orientation = Some(orientation);
+    }
     Ok(())
 }
 
