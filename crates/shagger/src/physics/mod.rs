@@ -1,9 +1,8 @@
-//! Map collision (SHAG `src/engine/physics`): the Q3 brush and patch sweep the
-//! simulation runs on, and the adapter that hands it to `shagger_shared`.
-
-// Index loops and negated comparisons are the TypeScript's own: the indices
-// cross several parallel arrays, and `!(a < b)` is true for NaN.
-#![allow(clippy::needless_range_loop, clippy::neg_cmp_op_on_partial_ord)]
+//! Map collision (SHAG `src/engine/physics`). The Q3 brush and patch sweep
+//! the simulation runs on, its adapter, and the player hull live in
+//! `shagger_shared::physics`, so a headless game simulation can use them; each
+//! is re-exported here at its engine path. `physics_system` is the engine's
+//! own.
 
 pub mod collision_backend;
 pub mod collision_spatial_index;

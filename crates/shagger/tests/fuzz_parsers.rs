@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use shagger::audio::decode::decode_sound;
 use shagger::audio::music::Playlist;
-use shagger::babylon::maths::math_vector::Vector3;
 use shagger::console::command_registry::parse_input;
 use shagger::core::cvar::{CvarOptions, Cvars};
 use shagger::lighting::map_emissive_surfaces::{SurfaceEmission, extract_emissive_surfaces};
@@ -48,6 +47,7 @@ use shagger::shared::demo::demo_inputs::decode_inputs;
 use shagger::shared::json;
 use shagger::shared::net::message_codec as codec;
 use shagger::shared::net::snapshot::NoEvents;
+use shagger_shared::server::simulation::types::Vec3;
 
 /// xorshift64*: reproducible from the seed printed with a failure.
 struct Rng(u64);
@@ -163,7 +163,7 @@ fn fuzz_bsp(bytes: &[u8]) {
             ((-1e6, 0.0, 0.0), (1e6, 0.0, 0.0)),
             ((100.0, 100.0, 100.0), (100.0, 100.0, 100.0)),
         ] {
-            let _ = backend.trace(Vector3::new(a.0, a.1, a.2), Vector3::new(b.0, b.1, b.2), options);
+            let _ = backend.trace(Vec3::new(a.0, a.1, a.2), Vec3::new(b.0, b.1, b.2), options);
         }
     }
 }
