@@ -137,6 +137,10 @@ pub struct Entity {
     pub weapon_meta: Option<WeaponMeta>,
     /// Bit per entry of the game's powerup kinds.
     pub powerups: Option<u8>,
+    /// `orientation`: how a thrown item lies, a unit quaternion x, y, z, w
+    /// (entity flag 0x80, extension bit 0x01). `None` in recordings made
+    /// before demo v9 and for an item the server steps as a point.
+    pub orientation: Option<[f64; 4]>,
 }
 
 /// `PlayerState`.
