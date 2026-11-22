@@ -25,6 +25,7 @@ use crate::bsp::map_entities::{EntityLike, ModelLike};
 use crate::js::{js_max, js_min};
 use crate::server::simulation::types::Vec3;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 mod content {
     pub const SOLID: i32 = 0x1;
@@ -137,29 +138,29 @@ pub struct CollisionStats {
 /// `SweepCollisionBackend`.
 #[derive(Debug, Clone)]
 pub struct SweepCollisionBackend {
-    bsp: BspCollisionData,
+    bsp: Arc<BspCollisionData>,
     pub lifts: Option<LiftSystem>,
     pub brush_models: Option<BrushModelState>,
-    brush_model_brushes: HashSet<i64>,
-    brush_model_faces: HashSet<i64>,
-    lift_brushes: HashMap<i64, usize>,
-    lift_faces: HashSet<i64>,
-    ladder_brushes: Vec<usize>,
-    face_collision: Vec<Option<FaceCollisionGeometry>>,
+    brush_model_brushes: Arc<HashSet<i64>>,
+    brush_model_faces: Arc<HashSet<i64>>,
+    lift_brushes: Arc<HashMap<i64, usize>>,
+    lift_faces: Arc<HashSet<i64>>,
+    ladder_brushes: Arc<Vec<usize>>,
+    face_collision: Arc<Vec<Option<FaceCollisionGeometry>>>,
     /// Patch collision of each switchable brush model, by model index, in the
     /// model's own space: apart from `face_collision`, so the world walk never
     /// meets them, and they collide only while their model is enabled.
-    brush_model_patches: HashMap<usize, Vec<(usize, FaceCollisionGeometry)>>,
-    clip_brush_indices: Vec<usize>,
+    brush_model_patches: Arc<HashMap<usize, Vec<(usize, FaceCollisionGeometry)>>>,
+    clip_brush_indices: Arc<Vec<usize>>,
     brush_visits: Vec<u32>,
     face_visits: Vec<u32>,
     trace_generation: u32,
-    collision_textures: Vec<CollisionTexture>,
-    brush_bounds: Vec<Option<CollisionBounds>>,
-    clip_index: Option<CollisionSpatialIndex>,
+    collision_textures: Arc<Vec<CollisionTexture>>,
+    brush_bounds: Arc<Vec<Option<CollisionBounds>>>,
+    clip_index: Arc<Option<CollisionSpatialIndex>>,
     facet_candidates: Vec<usize>,
     clip_candidates: Vec<usize>,
-    brush_parents: Vec<i64>,
+    brush_parents: Arc<Vec<i64>>,
     stats: CollisionStats,
 }
 
@@ -284,26 +285,26 @@ impl SweepCollisionBackend {
         let brushes = bsp.brushes.len();
         let faces = bsp.faces.len();
         let mut backend = Self {
-            bsp,
+            bsp: Arc::new(bsp),
             lifts: Some(lifts),
             brush_models: Some(brush_models),
-            brush_model_brushes,
-            brush_model_faces,
-            lift_brushes,
-            lift_faces,
-            ladder_brushes: Vec::new(),
-            face_collision: Vec::new(),
-            brush_model_patches: HashMap::new(),
-            clip_brush_indices: Vec::new(),
+            brush_model_brushes: Arc::new(brush_model_brushes),
+            brush_model_faces: Arc::new(brush_model_faces),
+            lift_brushes: Arc::new(lift_brushes),
+            lift_faces: Arc::new(lift_faces),
+            ladder_brushes: Arc::default(),
+            face_collision: Arc::default(),
+            brush_model_patches: Arc::default(),
+            clip_brush_indices: Arc::default(),
             brush_visits: vec![0; brushes],
             face_visits: vec![0; faces],
             trace_generation: 0,
-            collision_textures,
-            brush_bounds,
-            clip_index: None,
+            collision_textures: Arc::new(collision_textures),
+            brush_bounds: Arc::new(brush_bounds),
+            clip_index: Arc::default(),
             facet_candidates: Vec::new(),
             clip_candidates: Vec::new(),
-            brush_parents: Vec::new(),
+            brush_parents: Arc::default(),
             stats: CollisionStats::default(),
         };
         backend.process_faces();
@@ -427,7 +428,7 @@ impl SweepCollisionBackend {
                 }
             }
         }
-        self.brush_parents = parents;
+        self.brush_parents = Arc::new(parents);
     }
 
     fn hull_starts_outside_brush(&self, brush: &BspBrush, state: &TraceState) -> bool {
@@ -453,12 +454,14 @@ impl SweepCollisionBackend {
     }
 
     fn build_ladder_brush_index(&mut self) {
-        self.ladder_brushes = (0..self.bsp.brushes.len())
-            .filter(|&bi| {
-                let b = &self.bsp.brushes[bi];
-                b.num_sides >= 4 && self.is_ladder_brush(b)
-            })
-            .collect();
+        self.ladder_brushes = Arc::new(
+            (0..self.bsp.brushes.len())
+                .filter(|&bi| {
+                    let b = &self.bsp.brushes[bi];
+                    b.num_sides >= 4 && self.is_ladder_brush(b)
+                })
+                .collect(),
+        );
     }
 
     fn is_ladder_brush(&self, brush: &BspBrush) -> bool {
@@ -490,21 +493,23 @@ impl SweepCollisionBackend {
     }
 
     fn build_clip_brush_index(&mut self) {
-        self.clip_brush_indices = (0..self.bsp.brushes.len())
-            .filter(|&bi| {
-                if self.lift_brushes.contains_key(&(bi as i64)) || self.brush_model_brushes.contains(&(bi as i64)) {
-                    return false;
-                }
-                let brush = &self.bsp.brushes[bi];
-                if brush.num_sides < 4 {
-                    return false;
-                }
-                self.brush_texture(brush).is_some_and(|t| {
-                    let name = self.collision_textures[t].name.to_lowercase();
-                    name.contains("fullclip") || name.contains("playerclip")
+        self.clip_brush_indices = Arc::new(
+            (0..self.bsp.brushes.len())
+                .filter(|&bi| {
+                    if self.lift_brushes.contains_key(&(bi as i64)) || self.brush_model_brushes.contains(&(bi as i64)) {
+                        return false;
+                    }
+                    let brush = &self.bsp.brushes[bi];
+                    if brush.num_sides < 4 {
+                        return false;
+                    }
+                    self.brush_texture(brush).is_some_and(|t| {
+                        let name = self.collision_textures[t].name.to_lowercase();
+                        name.contains("fullclip") || name.contains("playerclip")
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        );
         let items: Vec<CollisionBoundItem> = self
             .clip_brush_indices
             .iter()
@@ -513,7 +518,7 @@ impl SweepCollisionBackend {
                 bounds: self.brush_bounds[id],
             })
             .collect();
-        self.clip_index = Some(CollisionSpatialIndex::new(&items));
+        self.clip_index = Arc::new(Some(CollisionSpatialIndex::new(&items)));
     }
 
     fn swept_bounds(state: &TraceState) -> CollisionBounds {
@@ -533,10 +538,10 @@ impl SweepCollisionBackend {
             }
             *slot = self.build_patch_collision(i);
         }
-        self.face_collision = out;
+        self.face_collision = Arc::new(out);
         // A switchable model's patches are as solid as its brushes: the
         // machinery at a bomb site is mostly patches around a thin clip column.
-        self.brush_model_patches.clear();
+        Arc::make_mut(&mut self.brush_model_patches).clear();
         let models: Vec<usize> = self
             .brush_models
             .iter()
@@ -551,7 +556,7 @@ impl SweepCollisionBackend {
                 })
                 .collect();
             if !patches.is_empty() {
-                self.brush_model_patches.insert(model_index, patches);
+                Arc::make_mut(&mut self.brush_model_patches).insert(model_index, patches);
             }
         }
     }
@@ -723,12 +728,14 @@ impl SweepCollisionBackend {
                 state.end = [q3_end[0] - origin.x, q3_end[1] - origin.z, q3_end[2] - origin.y];
                 let model = self.bsp.models[model_index];
                 self.trace_model_brushes(&model, &mut state);
-                if let Some(patches) = self.brush_model_patches.remove(&model_index) {
+                // A handle on the shared patches, so they stay borrowed while
+                // the trace writes its own scratch state.
+                let all_patches = Arc::clone(&self.brush_model_patches);
+                if let Some(patches) = all_patches.get(&model_index) {
                     let bounds = Self::swept_bounds(&state);
-                    for (face_index, mesh) in &patches {
+                    for (face_index, mesh) in patches {
                         self.trace_face(*face_index, mesh, &bounds, &mut state);
                     }
-                    self.brush_model_patches.insert(model_index, patches);
                 }
             }
         }
@@ -926,6 +933,7 @@ impl SweepCollisionBackend {
             return;
         }
         let bounds = Self::swept_bounds(state);
+        let faces = Arc::clone(&self.face_collision);
         for i in range(leaf.first_leaf_face, leaf.num_leaf_faces) {
             let Some(&fi) = get(&self.bsp.leaf_faces, i) else {
                 continue;
@@ -933,11 +941,10 @@ impl SweepCollisionBackend {
             let Some(face_index) = idx(i64::from(fi)).filter(|&f| f < self.face_collision.len()) else {
                 continue;
             };
-            let Some(geometry) = self.face_collision[face_index].take() else {
+            let Some(geometry) = &faces[face_index] else {
                 continue;
             };
-            self.trace_face(face_index, &geometry, &bounds, state);
-            self.face_collision[face_index] = Some(geometry);
+            self.trace_face(face_index, geometry, &bounds, state);
         }
     }
 
@@ -1066,9 +1073,9 @@ impl SweepCollisionBackend {
             return;
         }
         let mut candidates = std::mem::take(&mut self.clip_candidates);
-        match &self.clip_index {
+        match &*self.clip_index {
             Some(index) => index.query_into(&Self::swept_bounds(state), &mut candidates),
-            None => candidates.clone_from(&self.clip_brush_indices),
+            None => candidates.clone_from(&*self.clip_brush_indices),
         }
         for &bi in &candidates {
             if self.brush_visits[bi] == self.trace_generation {

@@ -261,12 +261,21 @@ fn collision_matches_shag() {
         let mut world = SharedCollisionWorld::new(SweepBackendAdapter {
             backend: SweepCollisionBackend::new(bsp),
         });
+        // A clone shares the map and keeps its own scratch and lift state:
+        // it answers every op as the original does.
+        let mut copy = world.clone();
         for (q, op) in v.get("ops").and_then(Value::as_array).unwrap().iter().enumerate() {
             let got = run(&mut world, op);
             assert_eq!(&got, field(op, "out"), "map {i} op {q}: {op:?}");
+            assert_eq!(run(&mut copy, op), got, "map {i} op {q} on a clone");
             ops += 1;
         }
         let s = world.backend.backend.stats();
+        assert_eq!(
+            format!("{:?}", copy.backend.backend.stats()),
+            format!("{s:?}"),
+            "map {i}: a clone's stats"
+        );
         let expected = v.get("stats").unwrap();
         let stats = [
             ("traceCount", s.trace_count as f64),
