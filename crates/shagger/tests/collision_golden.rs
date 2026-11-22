@@ -3,7 +3,6 @@
 //! (`tools/golden/collision.mjs`). Every query runs in the recorded order on
 //! one backend per map, so lift motion and brush model toggles carry over.
 
-use shagger::babylon::maths::math_vector::Vector3;
 use shagger::loader::bsp::bsp_loader::load_collision;
 use shagger::physics::collision_backend::{TraceOptions, TraceResult};
 use shagger::physics::sweep_backend_adapter::SweepBackendAdapter;
@@ -37,7 +36,7 @@ fn vec3(x: f64, y: f64, z: f64) -> Value {
     Value::Array(vec![num(x), num(y), num(z)])
 }
 
-fn bv(v: Vector3) -> Value {
+fn bv(v: Vec3) -> Value {
     vec3(v.x, v.y, v.z)
 }
 
@@ -63,9 +62,9 @@ fn read_vec(v: &Value) -> Vec3 {
     Vec3::new(read_num(&a[0]), read_num(&a[1]), read_num(&a[2]))
 }
 
-fn read_babylon(v: &Value) -> Vector3 {
+fn read_babylon(v: &Value) -> Vec3 {
     let p = read_vec(v);
-    Vector3::new(p.x, p.y, p.z)
+    Vec3::new(p.x, p.y, p.z)
 }
 
 fn field<'v>(op: &'v Value, key: &str) -> &'v Value {

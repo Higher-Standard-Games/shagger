@@ -12,7 +12,6 @@
 use glam::{DVec3, Vec3};
 use shagger_shared::spread_utils::{generate_spread_directions, mulberry32, yaw_pitch_from_direction};
 
-use crate::babylon::maths::math_vector::Vector3;
 use crate::physics::collision_backend::TraceOptions;
 use crate::physics::content_flags::{content, surface};
 use crate::physics::sweep_collision_backend::SweepCollisionBackend;
@@ -26,6 +25,7 @@ use crate::weapon::rail::rail_profiles::{RailEffectSample, RailImpactKind};
 use crate::weapon::tracer::streak_tracer_renderer::{StreakTracerRenderer, StreakTracerShot};
 use crate::weapon::voltaic::voltaic_effect_renderer::VoltaicEffectRenderer;
 use crate::weapon::voltaic::voltaic_profiles::{VoltaicEffectSample, VoltaicImpactKind};
+use shagger_shared::server::simulation::types::Vec3 as SimVec3;
 
 const TRACER_IMPACT_LIGHT_INTENSITY: f32 = 0.25;
 /// Embers per contact, per weapon class.
@@ -114,8 +114,8 @@ impl ShotWorld for SweepCollisionBackend {
     fn trace_shot(&mut self, origin: DVec3, dir: DVec3, max_dist: f64) -> Option<ShotTrace> {
         let end = origin + dir * max_dist;
         let result = self.trace(
-            Vector3::new(origin.x, origin.y, origin.z),
-            Vector3::new(end.x, end.y, end.z),
+            SimVec3::new(origin.x, origin.y, origin.z),
+            SimVec3::new(end.x, end.y, end.z),
             TraceOptions {
                 radius: Some(0.0),
                 height: Some(0.0),
